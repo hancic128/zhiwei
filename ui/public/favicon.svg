@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="知微">
+  <!-- 知微标识：朱砂底 + 素色「见微」折线（三笔由粗到细，取「见微知著」之意） -->
+  <rect width="32" height="32" rx="7" fill="#C73225"/>
+  <path d="M7 21.5h4.5l2.5-6 3 11 3-14.5 2.5 9.5H25"
+        fill="none" stroke="#FFFFFF" stroke-width="2.4"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

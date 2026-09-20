@@ -1,0 +1,36 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# local artifacts
+*.pem
+*.crt
+*.key
+*.csr
+*.db
+*.db-shm
+*.db-wal
+
+# secrets / runtime
+.env
+config/local.toml
+data/
+# 手工在仓库根跑二进制时会生成 admin token（data/ 之外的那份）
+/admin.token
+
+# local cargo mirror config (machine-specific)
+.cargo/config.toml
+
+# frontend
+ui/node_modules/
+ui/dist/
+
+# editor
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# 本地预览 / 走查产物
+.playwright-mcp/
+shots/

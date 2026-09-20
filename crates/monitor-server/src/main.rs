@@ -1,0 +1,461 @@
+//! ZhiWei monitor-server (data plane).
+//!
+//! Endpoints:
+//!   POST /v1/enroll      — bootstrap token + node Ed25519 public key → node_id
+//!   POST /v1/telemetry   — 签名请求（Ed25519），protobuf TelemetryBatch
+//!   GET  /healthz        — liveness
+//!
+//! 节点身份由请求签名承担（见 `zhiwei_common::auth`），不依赖客户端证书：
+//! 托管平台在边缘终止 TLS、不向容器转发客户端证书，所以必须能在「明文
+//! HTTP + 边缘 TLS」下工作（`--plain-http`）。自建部署仍可用内置 rustls
+//! 直接终结 TLS（只配服务端证书，不要求客户端证书）。
+//!
+//! hyper-util 的 auto builder 按连接协商 HTTP/1.1 或 HTTP/2。
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::Context;
+use clap::Parser;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder as AutoBuilder;
+use tokio_rustls::TlsAcceptor;
+use tower::ServiceExt;
+use tracing_subscriber::EnvFilter;
+
+mod admin;
+mod alerts;
+mod ca;
+mod certs_api;
+mod config;
+mod probes_api;
+mod retention;
+mod routes;
+mod state;
+mod tls;
+mod todo_api;
+
+use state::AppState;
+
+#[derive(Parser, Debug)]
+#[command(name = "zhiwei-monitor", about = "ZhiWei monitor-server (data plane)")]
+struct Args {
+    /// Path to config TOML
+    #[arg(long, default_value = "config/monitor.toml")]
+    config: PathBuf,
+
+    /// Override data directory (where DB + certs live)
+    #[arg(long, env = "ZHIWEI_DATA_DIR")]
+    data_dir: Option<PathBuf>,
+
+    /// Override listen address (e.g. 0.0.0.0:8443)
+    #[arg(long, env = "ZHIWEI_LISTEN")]
+    listen: Option<String>,
+
+    /// Directory holding the built console (SPA). Served at / when present.
+    #[arg(long, env = "ZHIWEI_UI_DIR", default_value = "ui/dist")]
+    ui_dir: PathBuf,
+
+    /// 以明文 HTTP 提供服务，TLS 由前置边缘（PaaS / 反代）终止。
+    /// 节点身份靠请求签名，不依赖传输层，因此明文传输不影响鉴权强度。
+    /// 环境变量接受 1/0/true/false/yes/no/on/off（PaaS 面板里常填 1）。
+    ///
+    /// 不传或留空时，会按常见 PaaS 环境变量自动判断：
+    /// `RENDER` / `RAILWAY_*` / `NORTHFLANK_*` / `DYNO`（Heroku）下默认 true。
+    /// 显式传 0/false 总是覆盖自动判断。
+    #[arg(
+        long,
+        env = "ZHIWEI_PLAIN_HTTP",
+        value_parser = clap::builder::BoolishValueParser::new(),
+        default_missing_value = "auto",
+        num_args = 0..=1,
+    )]
+    plain_http: Option<bool>,
+}
+
+/// 是否处于「边缘终结 TLS 的 PaaS」环境：Render / Railway / Northflank / Heroku。
+/// 仅作为 `--plain-http` 未显式配置时的默认判断，自建主机不受影响。
+///
+/// 注意：这只是一层便利。Northflank 这类平台既不注入 `PORT`、也没有稳定的
+/// 环境变量前缀（实测 `listen` 会落到默认的回环地址），自动判断覆盖不到，
+/// 必须显式设 `ZHIWEI_PLAIN_HTTP=1`。`--plain-http` 的显式配置永远优先。
+fn detect_paas_edge_terminates_tls() -> bool {
+    // Render 永远注入 `RENDER=true`。
+    if std::env::var("RENDER").ok().as_deref() == Some("true") {
+        return true;
+    }
+    // Railway 注入 RAILWAY_*（任一存在即视为 Railway）。
+    if std::env::vars().any(|(k, _)| k.starts_with("RAILWAY_")) {
+        return true;
+    }
+    // Northflank 没有单一稳定标记，组合几个常见变量。
+    if std::env::vars().any(|(k, _)| k.starts_with("NORTHFLANK_")) {
+        return true;
+    }
+    // Heroku / 旧式 PaaS。
+    if std::env::var("DYNO").is_ok() {
+        return true;
+    }
+    false
+}
+
+/// 监听地址是否是回环。
+///
+/// 只做字符串判断——传入的是 `host:port`，不需要真正解析 IP。
+/// IPv6 形如 `[::1]:8443`，所以要把方括号剥掉再比。
+fn listen_is_loopback(listen: &str) -> bool {
+    let host = match listen.rsplit_once(':') {
+        Some((h, _)) => h,
+        None => listen,
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    matches!(host, "localhost" | "::1") || host.starts_with("127.")
+}
+
+/// TLS 握手失败的告警间隔（秒）。
+///
+/// 托管平台的健康检查会按固定节奏戳容器，配置错了就是每来一次打一条。
+/// 不设窗口的话启动信息会被刷掉，真正的原因反而看不见。
+const TLS_WARN_INTERVAL_SECS: u64 = 60;
+
+/// 打一条 TLS 握手失败告警，同一窗口内只打一次。
+///
+/// 特意把 `InvalidContentType` 认出来：那条错误的含义是「对方发的是明文 HTTP，
+/// 本进程却按 TLS 解析」，在托管平台上是典型的「忘了开 `--plain-http`」。
+/// 光看 rustls 的原文根本猜不到，所以这里直接给出下一步动作。
+fn warn_tls_handshake_once(err: &std::io::Error, peer: std::net::SocketAddr, last_warn: &AtomicU64) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let prev = last_warn.load(Ordering::Relaxed);
+
+    // 窗口内已经报过，或者抢输了 CAS（别的任务刚报过）→ 降级为 debug
+    if now.saturating_sub(prev) < TLS_WARN_INTERVAL_SECS
+        || last_warn
+            .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+    {
+        tracing::debug!(error = %err, %peer, "TLS handshake failed（同类告警已限流）");
+        return;
+    }
+
+    if err.to_string().contains("InvalidContentType") {
+        tracing::warn!(
+            error = %err,
+            %peer,
+            "TLS 握手失败：对方发的是明文 HTTP，而本进程按 TLS 处理。\
+             部署在托管平台（边缘已终结 TLS）后面时，请设 ZHIWEI_PLAIN_HTTP=1 并重新部署；\
+             自建部署请检查客户端是不是用 http:// 连了 https 端口。"
+        );
+    } else {
+        tracing::warn!(error = %err, %peer, "TLS handshake failed");
+    }
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("info,zhiwei=debug")),
+        )
+        .init();
+
+    let args = Args::parse();
+    let cfg = config::MonitorConfig::load(&args.config).context("loading config")?;
+    let data_dir = args.data_dir.unwrap_or(cfg.data_dir.clone());
+    let listen = args.listen.unwrap_or(cfg.listen.clone());
+
+    tokio::fs::create_dir_all(&data_dir)
+        .await
+        .with_context(|| format!("creating data dir {}", data_dir.display()))?;
+
+    // 没有显式传 --plain-http / ZHIWEI_PLAIN_HTTP 时，按 PaaS 环境自动判断。
+    // 显式 false 永远覆盖自动判断——自建部署保持 TLS 本地终结。
+    let plain_http = args.plain_http.unwrap_or_else(detect_paas_edge_terminates_tls);
+    tracing::info!(
+        ?data_dir,
+        %listen,
+        plain_http,
+        paas_auto_detected = args.plain_http.is_none(),
+        "starting zhiwei-monitor"
+    );
+
+    // 绑回环在「自建 + 本机反代」下是对的，在容器里几乎一定是错的：
+    // 平台边缘从容器外部转发进来，回环地址它够不着，表现为健康检查失败 / 502。
+    // 这个坑光看日志很难反应过来（端口明明对），所以主动喊一声。
+    if listen_is_loopback(&listen) {
+        tracing::warn!(
+            %listen,
+            "监听在回环地址：本机之外的任何东西（托管平台边缘、浏览器、其它主机）都连不上。\
+             托管平台请设 ZHIWEI_LISTEN=0.0.0.0:<端口>，或直接设 PORT=<端口>（本程序检测到 PORT 会自动绑 0.0.0.0）。"
+        );
+    }
+
+    let db_path = data_dir.join("monitor.db");
+    let storage = zhiwei_storage::Storage::open(&db_path)
+        .await
+        .context("opening sqlite storage")?;
+
+    let ca = ca::Ca::load_or_init(&data_dir)
+        .await
+        .context("initializing CA")?;
+    // 明文模式下 TLS 由前置边缘终结，不需要本地签发服务端证书
+    let server_cert = if plain_http {
+        None
+    } else {
+        Some(
+            tls::ensure_server_cert(&ca, &data_dir, &cfg.server_cert_cn)
+                .context("ensuring server cert")?,
+        )
+    };
+
+    // ops 公钥由 ops-server 首次启动时写入；没有它时 enroll 会下发空串，
+    // 节点将拒绝任何命令（安全侧默认拒绝）。
+    let ops_pub_path = data_dir.join("ops.pub");
+    let ops_public_key = tokio::fs::read_to_string(&ops_pub_path)
+        .await
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    if ops_public_key.is_empty() {
+        tracing::warn!(
+            "未找到 {}；节点将无法验证命令签名。启动 zhiwei-ops 后会生成。",
+            ops_pub_path.display()
+        );
+    }
+
+    let (admin_token, admin_token_source) = admin::load_or_init(&data_dir)
+        .await
+        .context("initializing admin token")?;
+    match admin_token_source {
+        // 本次生成的：只在这里打印一次。托管平台免费层拿不到 Shell 时，
+        // 这行日志是唯一的出口（日志面板免费可看）。
+        admin::TokenSource::Generated => {
+            eprintln!(
+                "\
+\n[ADMIN TOKEN] {admin_token}
+   Console:    https://<host>:<port>/    (paste this token when prompted)
+   Read API:   Authorization: Bearer <token>
+   Stored at:  {}/admin.token\n",
+                data_dir.display()
+            );
+            tracing::info!(
+                ?data_dir,
+                "admin token ready (use `cat <data-dir>/admin.token`)"
+            );
+        }
+        // 来自环境变量：token 已经在部署面板里，不重复打印（日志里不该留明文凭据）。
+        admin::TokenSource::Env => {
+            tracing::info!(
+                "admin token ready (来自 ZHIWEI_ADMIN_TOKEN，不会写盘、也不会随重启变化)"
+            );
+        }
+        // 来自文件：自建 / 有持久卷的常规路径。
+        admin::TokenSource::File => {
+            tracing::info!(
+                ?data_dir,
+                "admin token ready (use `cat <data-dir>/admin.token`)"
+            );
+        }
+    }
+
+    let bootstrap_tokens = Arc::new(routes::BootstrapTokens::default());
+    // 固定入网令牌优先：托管平台（免费层没 Shell、没持久卷）用它替掉
+    // 「抢启动日志里 10 分钟有效期的一次性 token」这套流程。
+    match std::env::var("ZHIWEI_BOOTSTRAP_TOKEN") {
+        Ok(raw) => {
+            // 太短一律拒绝，理由同 admin token：它长期有效、又暴露在公网边缘，
+            // 短了就能被暴力猜解并注册假节点。拒绝后照旧生成一次性 token 兜底，
+            // 所以服务不会起不来，但绝不会接受一个弱凭据。
+            match admin::validate_env_token("ZHIWEI_BOOTSTRAP_TOKEN", &raw) {
+                Ok(token) => {
+                    // 刻意不打印值：它已经在部署面板里，日志不该留明文凭据。
+                    tracing::info!(
+                        "入网令牌来自 ZHIWEI_BOOTSTRAP_TOKEN（长期有效，不随重启变化）"
+                    );
+                    bootstrap_tokens.add_static(token);
+                }
+                Err(reason) => {
+                    tracing::error!(
+                        %reason,
+                        "ZHIWEI_BOOTSTRAP_TOKEN 不可用，已忽略；本次改回一次性 token"
+                    );
+                }
+            }
+        }
+        Err(std::env::VarError::NotPresent) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "读取 ZHIWEI_BOOTSTRAP_TOKEN 失败，改走一次性 token");
+        }
+    }
+    // 没有固定令牌时才随机生成一个一次性 token 并打印（自建 / 本地开发）。
+    if bootstrap_tokens.is_empty().await {
+        let token = routes::BootstrapTokens::mint();
+        bootstrap_tokens.add(token.clone(), 600).await;
+        eprintln!("\n[BOOTSTRAP TOKEN] {token}   (valid 10 minutes)\n");
+    }
+
+    let ca_cert_pem = ca.cert_pem.clone();
+    let ui_dir = if args.ui_dir.join("index.html").exists() {
+        Some(args.ui_dir.clone())
+    } else {
+        None
+    };
+    let state = AppState {
+        storage,
+        data_dir: data_dir.clone(),
+        ca: Arc::new(ca),
+        ca_cert_pem,
+        bootstrap_tokens,
+        admin_token: Arc::new(std::sync::RwLock::new(admin_token)),
+        ops_public_key,
+        ops_endpoint: cfg.ops_endpoint.clone(),
+        nonce_cache: Arc::new(zhiwei_common::NonceCache::default()),
+        server_cert_cn: cfg.server_cert_cn.clone(),
+        tls_terminated_locally: !plain_http,
+        ui_dir: ui_dir.clone(),
+    };
+
+    if let Err(e) = alerts::seed_default_rules(&state).await {
+        tracing::warn!(error = %e, "写入默认告警规则失败");
+    }
+
+    // 探针结果明细滚动保留 7 天（启动先清一次，之后每 6 小时一次）
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            const RETENTION_NS: i64 = 7 * 24 * 60 * 60 * 1_000_000_000;
+            loop {
+                let cutoff = zhiwei_common::Timestamp::now().unix_nano() - RETENTION_NS;
+                match state.storage.probes().cleanup_results(cutoff).await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(removed = n, "清理过期探针结果"),
+                    Err(e) => tracing::warn!(error = %e, "清理探针结果失败"),
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(6 * 60 * 60)).await;
+            }
+        });
+    }
+
+    // 遥测留存：原始 10 秒数据滚动保留 + 小时聚合长期保留。
+    // 失败会开一条平台告警进待办，见 retention.rs 与设计文档 §8。
+    retention::spawn(state.clone());
+
+    let app = routes::router(state);
+
+    // Serve the console when a build is present; everything not under /v1 or
+    // /healthz falls through to index.html so client-side routing works.
+    if ui_dir.is_some() {
+        tracing::info!(ui_dir = ?args.ui_dir, "serving console");
+    } else {
+        tracing::warn!(ui_dir = ?args.ui_dir, "console build not found; UI disabled");
+    }
+    let listener = tokio::net::TcpListener::bind(&listen)
+        .await
+        .with_context(|| format!("binding {listen}"))?;
+
+    // 明文模式：TLS 由前置边缘终结。节点身份来自请求签名而非传输层，
+    // 所以这里不做任何额外鉴权——每条请求都要自证。
+    if server_cert.is_none() {
+        tracing::info!(%listen, "zhiwei-monitor ready (明文 HTTP，TLS 由前置边缘终结)");
+        loop {
+            let (stream, peer) = listener.accept().await?;
+            let app = app.clone();
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let svc = hyper::service::service_fn(
+                    move |req: hyper::Request<hyper::body::Incoming>| {
+                        let app = app.clone();
+                        async move { app.oneshot(req).await }
+                    },
+                );
+                if let Err(e) = AutoBuilder::new(TokioExecutor::new())
+                    .serve_connection(io, svc)
+                    .await
+                {
+                    tracing::debug!(error = %e, %peer, "connection closed");
+                }
+            });
+        }
+    }
+
+    let server_cert = server_cert.expect("plain-http 关闭时服务端证书已生成");
+    let rustls_config = tls::build_server_config(
+        &server_cert.cert_pem,
+        &server_cert.key_pem,
+        &server_cert.ca_cert_pem,
+    )?;
+    let acceptor = TlsAcceptor::from(Arc::new(rustls_config));
+    tracing::info!(%listen, "zhiwei-monitor ready (内置 TLS)");
+
+    // 同类失败在窗口内只打一条：托管平台的健康检查会每分钟戳一次，
+    // 每次都打完整日志会把启动信息刷没，反而看不清真正的问题。
+    let last_tls_warn = Arc::new(AtomicU64::new(0));
+
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        let acceptor = acceptor.clone();
+        let app = app.clone();
+        let last_tls_warn = last_tls_warn.clone();
+        tokio::spawn(async move {
+            let tls_stream = match acceptor.accept(stream).await {
+                Ok(s) => s,
+                Err(e) => {
+                    warn_tls_handshake_once(&e, peer, &last_tls_warn);
+                    return;
+                }
+            };
+            let io = TokioIo::new(tls_stream);
+            // 不要求也不读取客户端证书：节点身份一律由请求签名证明
+            let svc =
+                hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                    let app = app.clone();
+                    async move { app.oneshot(req).await }
+                });
+            if let Err(e) = AutoBuilder::new(TokioExecutor::new())
+                .serve_connection(io, svc)
+                .await
+            {
+                tracing::debug!(error = %e, %peer, "connection closed");
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod listen_tests {
+    use super::listen_is_loopback;
+
+    #[test]
+    fn flags_loopback_addresses() {
+        // 这些在容器里都意味着「平台边缘够不着」，要触发告警
+        for addr in [
+            "127.0.0.1:8443",
+            "127.0.0.1:10000",
+            "127.1.2.3:8443",
+            "localhost:8443",
+            "[::1]:8443",
+            "::1:8443",
+        ] {
+            assert!(listen_is_loopback(addr), "{addr} 应判为回环");
+        }
+    }
+
+    #[test]
+    fn does_not_flag_reachable_addresses() {
+        // 这些是本机之外能连上的绑定，不该告警——否则自建用户会被误导
+        for addr in [
+            "0.0.0.0:8443",
+            "0.0.0.0:10000",
+            "[::]:8443",
+            "192.168.1.10:8443",
+            "10.0.0.5:8443",
+            "monitor.internal:8443",
+        ] {
+            assert!(!listen_is_loopback(addr), "{addr} 不应判为回环");
+        }
+    }
+}

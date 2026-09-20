@@ -1,0 +1,121 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ────────────────────────────────────────────────────────────────────
+   令牌定义 —— 严格遵循 Trilium「前端约束规范」02 / 03。
+   brand 色阶随 [data-theme] 切换；surface / ink 固定不随主题变。
+   ──────────────────────────────────────────────────────────────────── */
+@layer base {
+  :root {
+    /* 默认主题：zhiwei（朱砂 #C73225，见 docs/NAMING.md 视觉基线） */
+    --brand-50: #fdf2f1;
+    --brand-100: #fbe1df;
+    --brand-500: #df473a;
+    --brand-600: #c73225;
+    --brand-700: #a42419;
+    --brand-900: #53130e;
+  }
+
+  [data-theme="indigo"] {
+    --brand-50: #eef2ff;
+    --brand-100: #e0e7ff;
+    --brand-500: #6366f1;
+    --brand-600: #4f46e5;
+    --brand-700: #4338ca;
+    --brand-900: #312e81;
+  }
+
+  [data-theme="emerald"] {
+    --brand-50: #ecfdf5;
+    --brand-100: #d1fae5;
+    --brand-500: #10b981;
+    --brand-600: #059669;
+    --brand-700: #047857;
+    --brand-900: #064e3b;
+  }
+
+  [data-theme="rose"] {
+    --brand-50: #fff1f2;
+    --brand-100: #ffe4e6;
+    --brand-500: #f43f5e;
+    --brand-600: #e11d48;
+    --brand-700: #be123c;
+    --brand-900: #881337;
+  }
+
+  [data-theme="amber"] {
+    --brand-50: #fffbeb;
+    --brand-100: #fef3c7;
+    --brand-500: #f59e0b;
+    --brand-600: #d97706;
+    --brand-700: #b45309;
+    --brand-900: #78350f;
+  }
+
+  [data-theme="slate"] {
+    --brand-50: #f8fafc;
+    --brand-100: #f1f5f9;
+    --brand-500: #64748b;
+    --brand-600: #475569;
+    --brand-700: #334155;
+    --brand-900: #0f172a;
+  }
+
+  * {
+    border-color: #e4e4e7; /* surface-3 */
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    margin: 0;
+    background-color: #f4f4f5; /* surface-2 */
+    color: #18181b; /* ink-900 */
+    font-family: theme("fontFamily.sans");
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  .dark body {
+    background-color: #18181b; /* ink-900 */
+    color: #ffffff; /* surface-0 */
+  }
+
+  /* 主题色切换时，所有品牌色元素统一过渡（规范 08：200ms） */
+  .brand-transition,
+  .brand-transition * {
+    transition:
+      background-color 200ms,
+      border-color 200ms,
+      color 200ms;
+  }
+
+  ::selection {
+    background: var(--brand-100);
+  }
+}
+
+@layer utilities {
+  /* 规范 08：表格横向滚动条 scrollbar-thin，滑块 surface-4 */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: #d4d4d8 transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: #d4d4d8; /* surface-4 */
+    border-radius: 8px;
+  }
+  .dark .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: #3f3f46; /* ink-700 */
+  }
+}

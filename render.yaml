@@ -1,0 +1,53 @@
+# Render Blueprint：托管平台（Render 边缘终结 TLS）的一键部署。
+#
+# 部署步骤：
+#   1. Render 控制台 → New → Blueprint → 连这个仓库
+#   2. 它会自动读这份 render.yaml 起一个 Web Service + 持久 Disk
+#   3. 控制台凭据由 `generateValue` 自动生成，去 Service → Environment
+#      就能看到 `ZHIWEI_ADMIN_TOKEN` 的值（不用 Shell、不用翻日志）
+#
+# 注意：
+#   * Render 不支持公开裸 TCP——必须走 HTTPS，所以 TLS 由 Render 边缘终结；
+#     monitor-server 在容器内监听明文 HTTP（ZHIWEI_PLAIN_HTTP=1 已被自动检测，
+#     这里显式再写一遍，万一未来去掉自动检测也不会断）。
+#   * Apple Silicon 上必须显式指定 --platform linux/amd64 构建。
+#   * 持久 Disk 是付费项；CA 私钥就在它上面，丢盘 = 所有节点全部掉线。
+#   * 免费层没有 Disk 也没有 Shell：那种情况下 CA 仍会随重启重建（节点要重新
+#     enroll），但 `ZHIWEI_ADMIN_TOKEN` 让你至少能稳定登录控制台。
+
+services:
+  - type: web
+    name: zhiwei-monitor
+    runtime: docker
+    plan: starter
+    # Render 默认自动部署 main 分支；改完 PR 触发自动部署。
+    autoDeploy: true
+    # platform 自定义镜像默认跑 amd64；Apple Silicon 上
+    # `docker build` 默认产 arm64，必须显式指定目标平台。
+    docker:
+      context: .
+      dockerfilePath: ./Dockerfile
+    # Render 注入 PORT；listen 在没有显式配置时绑定 0.0.0.0:$PORT。
+    envVars:
+      - key: ZHIWEI_PLAIN_HTTP
+        value: "1"
+      # 控制台凭据。generateValue 让 Render 生成一次并跨部署保持——
+      # 这样即使没有持久卷，重启后 token 也不会变，且去 Environment 页面
+      # 就能读到（免费层没有 Shell，这是唯一能拿到凭据的地方）。
+      - key: ZHIWEI_ADMIN_TOKEN
+        generateValue: true
+      # 入网令牌。不设的话 monitor 每次启动会随机生成一个、只打印到日志里且
+      # 10 分钟失效——免费层没 Shell 根本抢不到。设成固定值后长期有效，
+      # 加节点时直接用这个值。
+      # 想要更强隔离可以自己填一个随机串（>=16 字符），别用默认的。
+      - key: ZHIWEI_BOOTSTRAP_TOKEN
+        generateValue: true
+      - key: RUST_LOG
+        value: "info,zhiwei=debug"
+      - key: ZHIWEI_DATA_DIR
+        value: /var/lib/zhiwei
+    disk:
+      name: zhiwei-data
+      mountPath: /var/lib/zhiwei
+      sizeGB: 1
+    healthCheckPath: /healthz

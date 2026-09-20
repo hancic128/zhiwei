@@ -1,0 +1,123 @@
+import { clsx, type ClassValue } from "clsx";
+import { twMerge } from "tailwind-merge";
+import dayjs from "dayjs";
+import utc from "dayjs/plugin/utc";
+import timezone from "dayjs/plugin/timezone";
+
+dayjs.extend(utc);
+dayjs.extend(timezone);
+
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
+}
+
+/** 规范 05：时区选项（6 个） */
+/**
+ * 规范 05 的 6 个时区。
+ *
+ * `key` 是语言包里的键（`tz.<key>`），**标签不能硬编码中文**——
+ * 切到英文时时区列表也得跟着变。
+ */
+export const TIMEZONES = [
+  { key: "beijing", tz: "Asia/Shanghai" },
+  { key: "tokyo", tz: "Asia/Tokyo" },
+  { key: "singapore", tz: "Asia/Singapore" },
+  { key: "london", tz: "Europe/London" },
+  { key: "newYork", tz: "America/New_York" },
+  { key: "losAngeles", tz: "America/Los_Angeles" },
+] as const;
+
+/** 规范 05：时间统一 YYYY-MM-DD HH:mm，24 小时制，必须带时区 */
+export function formatTime(msOrDate: number | Date, tz: string): string {
+  return dayjs(msOrDate).tz(tz).format("YYYY-MM-DD HH:mm");
+}
+
+export function formatClock(msOrDate: number | Date, tz: string): string {
+  return dayjs(msOrDate).tz(tz).format("HH:mm:ss");
+}
+
+/** 相对时间（用于「x 分钟前」），基于真实时刻差值，与时区无关 */
+export function relativeTime(
+  ms: number,
+  t: (k: string, o?: Record<string, unknown>) => string,
+): string {
+  const diff = Math.max(0, Date.now() - ms);
+  const s = Math.floor(diff / 1000);
+  if (s < 60) return t("time.secondsAgo", { n: s });
+  const m = Math.floor(s / 60);
+  if (m < 60) return t("time.minutesAgo", { n: m });
+  const h = Math.floor(m / 60);
+  if (h < 24) return t("time.hoursAgo", { n: h });
+  return t("time.daysAgo", { n: Math.floor(h / 24) });
+}
+
+export function formatPercent(n: number, digits = 1): string {
+  if (!Number.isFinite(n)) return "—";
+  return `${n.toFixed(digits)}%`;
+}
+
+export function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
+  const i = Math.min(
+    Math.floor(Math.log(n) / Math.log(1024)),
+    units.length - 1,
+  );
+  const v = n / Math.pow(1024, i);
+  return `${v >= 100 ? v.toFixed(0) : v.toFixed(1)} ${units[i]}`;
+}
+
+/** 速率（bytes/s）：`1.2 MB/s` */
+export function formatRate(bytesPerSecond: number): string {
+  if (!Number.isFinite(bytesPerSecond)) return "—";
+  return `${formatBytes(bytesPerSecond)}/s`;
+}
+
+/** 运行时长：天 + 小时（不足一天给「小时 + 分」），禁止裸显秒数 */
+export function formatUptime(
+  seconds: number | undefined | null,
+  t: (k: string, o?: Record<string, unknown>) => string,
+): string {
+  if (!seconds || seconds <= 0) return "—";
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  if (d > 0) return t("detail.uptimeFormat", { d, h });
+  const m = Math.floor((seconds % 3600) / 60);
+  return `${h}h ${m}m`;
+}
+
+/**
+ * 密钥 / 令牌的密文展示：只留头 8 位与尾 4 位。
+ * 完整值不落在 DOM 里（复制按钮需要时才取原值），避免随手截图泄密。
+ */
+export function maskSecret(value: string | undefined | null): string {
+  if (!value) return "—";
+  if (value.length <= 16) return "……";
+  return `${value.slice(0, 8)}……${value.slice(-4)}`;
+}
+
+/** 规范 10 / 08：禁止向用户裸显 HTTP 状态码或原始异常，统一友好文案 */
+export function friendlyError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err ?? "");
+  if (/401|unauthor|未授权/i.test(raw)) return "err.unauthorized";
+  if (/network|fetch|ECONN|timeout|超时/i.test(raw)) return "err.network";
+  // 裸状态码（http_502 / 502 Bad Gateway）不直接给用户看
+  if (/^http_\d+$/.test(raw) || /^\d{3}\b/.test(raw)) {
+    return /^http_4/.test(raw) ? "err.generic" : "err.server";
+  }
+  // 服务端给的是一句人话（如「kill_process 需要 pid」「signal 只能是 term 或 kill」），
+  // 直接用它——比「出错了」有用；异常栈与状态码仍然不外露。
+  if (raw.trim()) return raw;
+  return "err.generic";
+}
+
+/** 节点存活判定：在线 / 滞后 / 离线 */
+export type Liveness = "online" | "lagging" | "offline" | "unknown";
+
+export function livenessOf(lastSeenMs: number | null | undefined): Liveness {
+  if (!lastSeenMs) return "unknown";
+  const age = Date.now() - lastSeenMs;
+  if (age < 60_000) return "online";
+  if (age < 5 * 60_000) return "lagging";
+  return "offline";
+}
