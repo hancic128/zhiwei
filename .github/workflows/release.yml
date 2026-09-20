@@ -34,10 +34,13 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
           # 本地开发 / 自建。
+          # 两个 darwin 都在 macos-latest（Apple Silicon）上编：Apple 工具链
+          # 原生就能交叉到 x86_64，不需要专门找 Intel runner——旧的 macos-13
+          # 标签随时可能被 GitHub 退役，那样整条流水线会红。
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-latest
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -75,7 +78,12 @@ jobs:
           staging="$(mktemp -d)"
           cp "$dir/zhiwei-node" "$staging/"
           cp "$dir/zhiwei-monitor" "$staging/"
-          cp README.md LICENSE "$staging/" 2>/dev/null || true
+          # 分开 copy 并逐个判存在：`cp README.md LICENSE dest/` 在 LICENSE
+          # 缺失时会整条失败，可能连 README 都拷不进去（各平台 cp 行为不一致）。
+          # 本仓库当前没有 LICENSE 文件，所以这条路径是常态而非异常。
+          for f in README.md LICENSE NOTICE; do
+            if [ -f "$f" ]; then cp "$f" "$staging/"; fi
+          done
           printf '%s\n' "$version" > "$staging/VERSION"
 
           tar -C "$staging" -czf "$asset.tar.gz" .
