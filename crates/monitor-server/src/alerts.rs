@@ -211,7 +211,14 @@ pub fn channel_body(
         })
         .to_string(),
         // webhook（含未知 kind，按 webhook 处理）：结构化 JSON
+        //
+        // `title` + `text` 是 Bluebird / 通用 webhook 接收端约定：
+        // 收到 payload 后用 `title` 作为通知标题、`text` 作为正文；
+        // 缺这两个字段的 webhook 会被通用接收端 `ignored` 掉（蓝鸟实测验证）。
+        // 同时保留 `rule`/`severity`/... 让自建接收端也能消费。
         _ => serde_json::json!({
+            "title": plain_text(rule, hostname, message).lines().next().unwrap_or("").to_string(),
+            "text": plain_text(rule, hostname, message),
             "rule": rule.name,
             "severity": rule.severity,
             "hostname": hostname,
@@ -679,6 +686,10 @@ mod tests {
         assert_eq!(v["severity"], "warning");
         assert_eq!(v["hostname"], "shark-9");
         assert_eq!(v["at_unix_nano"], 42);
+        // 通用 webhook 接收端约定（Bluebird 等）
+        assert_eq!(v["title"], "[警告] 磁盘使用率过高");
+        assert!(v["text"].as_str().unwrap().contains("主机：shark-9"));
+        assert!(v["text"].as_str().unwrap().contains("磁盘 91%"));
     }
 
     #[test]
