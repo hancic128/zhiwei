@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::{bail, Context};
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, RootCertStore};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio_rustls::TlsConnector;
 use zhiwei_common::auth::{HEADER_NODE, HEADER_NONCE, HEADER_SIGNATURE, HEADER_TIMESTAMP};
 use zhiwei_common::{KeyPair, SignedHeaders};
@@ -177,21 +177,155 @@ impl HttpTransport {
 
         AsyncWriteExt::write_all(&mut io, req.as_bytes()).await?;
         AsyncWriteExt::write_all(&mut io, body).await?;
-        let mut resp = Vec::new();
-        AsyncReadExt::read_to_end(&mut io, &mut resp).await?;
 
-        let split = resp
-            .windows(4)
-            .position(|w| w == b"\r\n\r\n")
-            .context("响应缺少头部终止符")?;
-        let head = String::from_utf8_lossy(&resp[..split]).to_string();
-        let status: u16 = head
-            .split_whitespace()
-            .nth(1)
-            .and_then(|s| s.parse().ok())
-            .context("无法解析响应状态码")?;
+        read_response(&mut io).await
+    }
+}
 
-        Ok((status, resp[split + 4..].to_vec()))
+/// 读 HTTP/1.1 响应,按 framing 拆出 body。
+///
+/// 支持三种 framing(按 RFC 7230 优先级):
+///   1. `Transfer-Encoding: chunked` —— chunked 解码
+///   2. `Content-Length: N`           —— 读定长
+///   3. 都没有(`Connection: close`)   —— 读到 EOF
+///
+/// 历史上这里只用 `read_to_end` + 按 `\r\n\r\n` 切 header,把整段 body 喂给
+/// `serde_json` —— 这条路径在 Render / Cloudflare 这类「HTTP/1.1 + close
+/// 时强制 chunked」的边缘后面会爆炸,body 被 `<hex>\r\n...\r\n0\r\n\r\n`
+/// 污染,JSON 解析报 `trailing characters at line 1 column 2`(2026-09-21)。
+pub(crate) async fn read_response<R>(io: &mut R) -> anyhow::Result<(u16, Vec<u8>)>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+
+    let mut br = BufReader::new(io);
+
+    // ---- 状态行 ----
+    let mut status_line = Vec::new();
+    br.read_until(b'\n', &mut status_line).await?;
+    if status_line.is_empty() {
+        anyhow::bail!("响应:状态行缺失(对端立即关闭?)");
+    }
+    let status_line_str = std::str::from_utf8(&status_line)
+        .map_err(|e| anyhow::anyhow!("响应:状态行非 UTF-8: {e}"))?
+        .trim_end_matches(|c| c == '\r' || c == '\n');
+    let mut parts = status_line_str.split_whitespace();
+    let _version = parts.next().context("响应:状态行为空")?;
+    let status: u16 = parts
+        .next()
+        .and_then(|s| s.parse().ok())
+        .with_context(|| format!("响应:无法解析状态码: {status_line_str:?}"))?;
+
+    // ---- header 列表(直到空行)----
+    let mut transfer_encoding: Option<String> = None;
+    let mut content_length: Option<usize> = None;
+    loop {
+        let mut line = Vec::new();
+        let n = br.read_until(b'\n', &mut line).await?;
+        if n == 0 {
+            anyhow::bail!("响应:header 中途 EOF");
+        }
+        if line == b"\r\n" || line == b"\n" {
+            break;
+        }
+        let s = std::str::from_utf8(&line)
+            .map_err(|e| anyhow::anyhow!("响应:header 非 UTF-8: {e}"))?
+            .trim_end_matches(|c| c == '\r' || c == '\n');
+        let Some((k, v)) = s.split_once(':') else { continue };
+        match k.trim().to_ascii_lowercase().as_str() {
+            "transfer-encoding" => transfer_encoding = Some(v.trim().to_string()),
+            "content-length" => content_length = v.trim().parse().ok(),
+            _ => {}
+        }
+    }
+
+    let is_chunked = transfer_encoding
+        .as_deref()
+        .map(|s| {
+            s.split(',')
+                .any(|t| t.trim().eq_ignore_ascii_case("chunked"))
+        })
+        .unwrap_or(false);
+
+    // ---- body ----
+    let body = if is_chunked {
+        decode_chunked_body(&mut br).await?
+    } else if let Some(len) = content_length {
+        let mut body = vec![0u8; len];
+        br.read_exact(&mut body)
+            .await
+            .with_context(|| format!("响应:读 Content-Length={len} 字节失败"))?;
+        body
+    } else {
+        // close-delimited:RFC 允许无 framing 信息,读到 EOF(对端按 Connection: close 关连接)
+        let mut body = Vec::new();
+        br.read_to_end(&mut body).await?;
+        body
+    };
+
+    Ok((status, body))
+}
+
+/// 解码 chunked transfer-encoding(RFC 7230 §4.1)。
+///
+/// chunk = size-line CRLF data CRLF,size-line = 1*HEX [ ";" ext ]。
+/// 终止 chunk = "0" CRLF *( trailer CRLF ) CRLF。
+pub(crate) async fn decode_chunked_body<R>(br: &mut tokio::io::BufReader<R>) -> anyhow::Result<Vec<u8>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+
+    let mut out = Vec::new();
+    loop {
+        // size-line
+        let mut size_line = Vec::new();
+        let n = br.read_until(b'\n', &mut size_line).await?;
+        if n == 0 {
+            anyhow::bail!("chunked:期望 size 行,先收到 EOF");
+        }
+        let size_str = std::str::from_utf8(&size_line)
+            .map_err(|e| anyhow::anyhow!("chunked:size 行非 UTF-8: {e}"))?
+            .trim_end_matches(|c| c == '\r' || c == '\n');
+        let size_hex = size_str
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim();
+        let size = usize::from_str_radix(size_hex, 16).map_err(|e| {
+            anyhow::anyhow!("chunked:无法解析 size {size_hex:?}: {e}")
+        })?;
+
+        if size == 0 {
+            // 终止 chunk:后面跟 0 个或多个 trailer(每行 CRLF),最后空行 CRLF 收尾
+            loop {
+                let mut trailer = Vec::new();
+                let n = br.read_until(b'\n', &mut trailer).await?;
+                if n == 0 || trailer == b"\r\n" || trailer == b"\n" {
+                    break;
+                }
+                // 非终止 trailer:继续读
+            }
+            return Ok(out);
+        }
+
+        // data
+        let mut chunk = vec![0u8; size];
+        br.read_exact(&mut chunk).await.map_err(|e| {
+            anyhow::anyhow!("chunked:读 {size} 字节 data 失败: {e}")
+        })?;
+        out.extend_from_slice(&chunk);
+
+        // data 后的 CRLF
+        let mut crlf = [0u8; 2];
+        br.read_exact(&mut crlf).await?;
+        if &crlf != b"\r\n" {
+            anyhow::bail!(
+                "chunked:data 后期望 CRLF,实际 {:?}",
+                std::str::from_utf8(&crlf).unwrap_or("<bin>")
+            );
+        }
     }
 }
 
@@ -266,4 +400,161 @@ impl rustls::client::danger::ServerCertVerifier for NoVerify {
             rustls::SignatureScheme::RSA_PSS_SHA256,
         ]
     }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 把字节流喂给被测代码:实现 `AsyncRead`,把 `inner` 用完就返回 EOF。
+    /// 绕开 TCP listener / duplex 的 race,专心测 framing 解码。
+    struct PreloadedStream {
+        inner: Vec<u8>,
+        pos: usize,
+    }
+
+    impl PreloadedStream {
+        fn from_static(bytes: &'static [u8]) -> Self {
+            Self {
+                inner: bytes.to_vec(),
+                pos: 0,
+            }
+        }
+        fn from_vec(bytes: Vec<u8>) -> Self {
+            Self { inner: bytes, pos: 0 }
+        }
+    }
+
+    impl tokio::io::AsyncRead for PreloadedStream {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            let remaining = self.inner.len() - self.pos;
+            if remaining == 0 {
+                return std::task::Poll::Ready(Ok(()));
+            }
+            let n = remaining.min(buf.remaining());
+            buf.put_slice(&self.inner[self.pos..self.pos + n]);
+            self.pos += n;
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// 把字节流喂给 `read_response`,拿到 (status, body)。
+    async fn read_from_payload(payload: &'static [u8]) -> (u16, Vec<u8>) {
+        let mut s = PreloadedStream::from_static(payload);
+        read_response(&mut s).await.unwrap()
+    }
+
+    /// 历史上 send() 在 chunked 响应上炸 —— body 是 `2\r\nok\r\n0\r\n\r\n`,
+    /// 原实现直接喂给调用方,JSON 解析报 `trailing characters at line 1 column 2`。
+    /// 修后应得到干净 body `ok`。
+    #[tokio::test]
+    async fn decodes_chunked_single_chunk() {
+        let (status, body) = read_from_payload(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n2\r\nok\r\n0\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body, b"ok");
+    }
+
+    #[tokio::test]
+    async fn decodes_chunked_multiple_chunks() {
+        let (status, body) = read_from_payload(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body, b"hello world");
+    }
+
+    #[tokio::test]
+    async fn decodes_chunked_with_extension() {
+        // RFC 7230 §4.1.1:chunk size 后可带 `;ext=val`
+        let (status, body) = read_from_payload(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5;foo=bar\r\nhello\r\n0\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body, b"hello");
+    }
+
+    #[tokio::test]
+    async fn decodes_chunked_with_trailers() {
+        // 终止 chunk 后允许 trailer(常见于云厂商给签名 / trace id)
+        let (status, body) = read_from_payload(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\nX-Trace-Id: abc\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body, b"ok");
+    }
+
+    #[tokio::test]
+    async fn decodes_chunked_zero_body() {
+        let (status, body) = read_from_payload(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body, b"");
+    }
+
+    #[tokio::test]
+    async fn decodes_content_length() {
+        let (status, body) = read_from_payload(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\nhello world",
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body, b"hello world");
+    }
+
+    #[tokio::test]
+    async fn decodes_close_delimited_no_body() {
+        // 204 No Content:无 framing,Connection: close
+        let (status, body) = read_from_payload(
+            b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 204);
+        assert_eq!(body, b"");
+    }
+
+    #[tokio::test]
+    async fn decodes_close_delimited_with_body() {
+        // 自定义文本响应,无 Content-Length 也无 chunked —— 历史上由 EOF 终止
+        let (status, body) = read_from_payload(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nhello",
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body, b"hello");
+    }
+
+    /// 关键回归:`/v1/probe-config` 与 `/v1/cert-config` 在 Render 边缘返回的真实
+    /// 形态 —— HTTP/1.1 + close + JSON + chunked。修后 body 必须是合法 JSON,
+    /// `serde_json::from_slice::<Value>` 不能失败。
+    #[tokio::test]
+    async fn probe_config_json_response_parses_as_json() {
+        let body =
+            r#"{"node_id":"abc","probes":[{"id":"p1","service":"s1","name":"n","kind":"tcp","target":{"host":"127.0.0.1","port":80},"expect":{},"interval_seconds":60,"timeout_ms":1000}]}"#;
+        let payload = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n",
+            body.len(),
+            body
+        );
+        let mut s = PreloadedStream::from_vec(payload.into_bytes());
+        let (status, resp_body) = read_response(&mut s).await.unwrap();
+        assert_eq!(status, 200);
+        let v: serde_json::Value =
+            serde_json::from_slice(&resp_body).expect("chunked JSON 必须能解析");
+        assert_eq!(v["node_id"], "abc");
+        assert_eq!(v["probes"].as_array().unwrap().len(), 1);
+    }
+
 }
