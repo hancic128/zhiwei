@@ -242,11 +242,12 @@ BIN="${INSTALL_DIR}/zhiwei-node"
 # 2) 写 env 文件
 printf '\033[36m==>\033[0m 写 %s\n' "$ENV_FILE"
 tmp="$(mktemp)"
-printf 'ZHIWEI_MONITOR_URL=%s\nZHIWEI_BOOTSTRAP_TOKEN=%s\n' "$URL" "$TOKEN" > "$tmp"
+printf 'ZHIWEI_MONITOR_URL=%s\nZHIWEI_BOOTSTRAP_TOKEN=%s\nZHIWEI_INTERVAL=%s\n' \
+  "$URL" "$TOKEN" "$INTERVAL" > "$tmp"
 # 保留老文件里的额外变量
 if [ -f "$ENV_FILE" ]; then
   note "已存在 $ENV_FILE，合并 URL/token，旧的额外变量保留"
-  grep -v '^ZHIWEI_MONITOR_URL=\|^ZHIWEI_BOOTSTRAP_TOKEN=' "$ENV_FILE" >> "$tmp" || true
+  grep -v '^ZHIWEI_MONITOR_URL=\|^ZHIWEI_BOOTSTRAP_TOKEN=\|^ZHIWEI_INTERVAL=' "$ENV_FILE" >> "$tmp" || true
 fi
 mkdir -p "$(dirname "$ENV_FILE")"
 chmod 0750 "$(dirname "$ENV_FILE")" 2>/dev/null || true
@@ -270,7 +271,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=$ENV_FILE
-ExecStart=$BIN --state-dir $STATE_DIR --interval $INTERVAL
+ExecStart=$BIN --state-dir $STATE_DIR   # interval 走 env ZHIWEI_INTERVAL（见 /etc/zhiwei/node.env）
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM
@@ -317,11 +318,11 @@ EOF
   <array>
     <string>$BIN</string>
     <string>--state-dir</string><string>$STATE_DIR</string>
-    <string>--interval</string><string>$INTERVAL</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
     <key>ZHIWEI_MONITOR_URL</key><string>$URL</string>
+    <key>ZHIWEI_INTERVAL</key><string>$INTERVAL</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict>
@@ -357,7 +358,8 @@ EOF
       setsid env \
         ZHIWEI_MONITOR_URL="$URL" \
         ZHIWEI_BOOTSTRAP_TOKEN="$TOKEN" \
-        "$BIN" --state-dir "$STATE_DIR" --interval "$INTERVAL" \
+        ZHIWEI_INTERVAL="$INTERVAL" \
+        "$BIN" --state-dir "$STATE_DIR" \
         </dev/null >>"$logfile" 2>&1 &
     else
       nohup env \
@@ -395,6 +397,12 @@ cat <<EOF
   查状态：    $0 status
   看日志：    $0 logs
   卸  载：    $0 uninstall
+
+  想改 telemetry 频率（默认 30 秒）：
+    sudo vim $ENV_FILE   # 改 ZHIWEI_INTERVAL=60
+    sudo systemctl restart zhiwei-node
+  改 inventory / 证书 / 节点名 / state-dir 同理（ZHIWEI_INVENTORY_INTERVAL、
+  ZHIWEI_CERT_GLOBS、ZHIWEI_NODE_NAME、ZHIWEI_STATE_DIR）。
 
   入网成功后，建议从 $ENV_FILE 里删掉 ZHIWEI_BOOTSTRAP_TOKEN，
   重启服务即撤销该入网密钥（节点本地有 signing.key，不再需要它）。

@@ -44,8 +44,12 @@ struct Args {
     #[arg(long, default_value = "data/node", env = "ZHIWEI_STATE_DIR")]
     state_dir: PathBuf,
 
-    /// Telemetry interval (seconds)
-    #[arg(long, default_value_t = 30)]
+    /// Telemetry interval (seconds).
+    ///
+    /// 默认 30；env `ZHIWEI_INTERVAL` 可覆盖（与 install 脚本写到
+    /// /etc/zhiwei/node.env 的 KEY 一致——想改 telemetry 频率只动 env 文件，
+    /// `systemctl restart zhiwei-node` 即可，不用碰 unit）。
+    #[arg(long, default_value_t = 30, env = "ZHIWEI_INTERVAL")]
     interval: u64,
 
     /// Inventory（主机信息 / 容器 / 进程 / 证书快照）上报间隔（秒）
@@ -776,5 +780,43 @@ async fn fetch_cert_sources(
             tracing::debug!(error = %e, "拉取证书配置失败，本轮只用本机基线路径");
             Vec::new()
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+    use std::sync::Mutex;
+
+    /// 全局 env 在同一进程内是共享的；cargo test 默认并行跑测试，
+    /// 设 env 的测试会互相污染。下面这把锁强制相关测试串行。
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// 锁定 `Args.interval` 的 env 集成行为：env 覆盖默认；命令行覆盖 env。
+    /// 之前装好的节点改不了 interval，是因为漏了 `env = "ZHIWEI_INTERVAL"`——
+    /// systemd unit 写了 `EnvironmentFile=/etc/zhiwei/node.env`，但 clap 不读
+    /// 这个 key 就形同虚设；这条测试把这条约束钉死。
+    #[test]
+    fn interval_reads_from_env() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("ZHIWEI_INTERVAL", "120");
+        let a = Args::try_parse_from(["zhiwei-node", "--monitor", "http://x"]).unwrap();
+        assert_eq!(a.interval, 120, "env ZHIWEI_INTERVAL=120 应被采纳");
+        std::env::remove_var("ZHIWEI_INTERVAL");
+    }
+
+    #[test]
+    fn interval_cli_overrides_env() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("ZHIWEI_INTERVAL", "120");
+        let a = Args::try_parse_from([
+            "zhiwei-node",
+            "--monitor", "http://x",
+            "--interval", "5",
+        ]).unwrap();
+        assert_eq!(a.interval, 5, "命令行 --interval 5 应覆盖 env");
+        std::env::remove_var("ZHIWEI_INTERVAL");
     }
 }
