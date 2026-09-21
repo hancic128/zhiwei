@@ -280,7 +280,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=$ENV_FILE
-ExecStart=$BIN --state-dir $STATE_DIR   # interval 走 env ZHIWEI_INTERVAL（见 /etc/zhiwei/node.env）
+# interval 走 env ZHIWEI_INTERVAL（见 /etc/zhiwei/node.env），不再写在 ExecStart 命令行里
+ExecStart=$BIN --state-dir $STATE_DIR
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM
