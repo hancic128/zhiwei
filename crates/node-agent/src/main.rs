@@ -46,10 +46,10 @@ struct Args {
 
     /// Telemetry interval (seconds).
     ///
-    /// 默认 30；env `ZHIWEI_INTERVAL` 可覆盖（与 install 脚本写到
+    /// 默认 5；env `ZHIWEI_INTERVAL` 可覆盖（与 install 脚本写到
     /// /etc/zhiwei/node.env 的 KEY 一致——想改 telemetry 频率只动 env 文件，
     /// `systemctl restart zhiwei-node` 即可，不用碰 unit）。
-    #[arg(long, default_value_t = 30, env = "ZHIWEI_INTERVAL")]
+    #[arg(long, default_value_t = 5, env = "ZHIWEI_INTERVAL")]
     interval: u64,
 
     /// Inventory（主机信息 / 容器 / 进程 / 证书快照）上报间隔（秒）

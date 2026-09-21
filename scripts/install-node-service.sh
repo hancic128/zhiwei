@@ -29,7 +29,7 @@
 #   --token <token>    入网令牌（也可 ZHIWEI_BOOTSTRAP_TOKEN）
 #   --url   <url>      monitor URL（也可 ZHIWEI_MONITOR_URL；不传则交互问）
 #   --state-dir <dir>  节点状态目录，默认 /var/lib/zhiwei-node
-#   --interval <sec>   上报间隔，默认 30
+#   --interval <sec>   上报间隔，默认 5
 #   --dir <dir>        二进制目录，默认 /usr/local/bin
 #   --repo <o/r>       默认 hancic128/zhiwei
 #   --branch <name>    默认 main（私有仓库切换）
@@ -42,7 +42,7 @@ REPO="${ZHIWEI_REPO:-hancic128/zhiwei}"
 BRANCH="${ZHIWEI_BRANCH:-main}"
 INSTALL_DIR="${ZHIWEI_INSTALL_DIR:-/usr/local/bin}"
 STATE_DIR="${ZHIWEI_STATE_DIR:-/var/lib/zhiwei-node}"
-INTERVAL="${ZHIWEI_INTERVAL:-30}"
+INTERVAL="${ZHIWEI_INTERVAL:-5}"
 ENV_FILE="${ZHIWEI_ENV_FILE:-/etc/zhiwei/node.env}"
 TOKEN="${ZHIWEI_BOOTSTRAP_TOKEN:-}"
 URL="${ZHIWEI_MONITOR_URL:-}"
@@ -230,14 +230,23 @@ ensure_root "$@"
 ask_url
 ask_token
 
-# 1) 装二进制
-printf '\033[36m==>\033[0m 装 zhiwei-node 二进制\n'
-tmpdir="$(mktemp -d)"
-trap 'rm -rf "$tmpdir"' EXIT INT TERM
-fetch "https://raw.githubusercontent.com/${REPO}/${BRANCH}/scripts/install.sh" "$tmpdir/install.sh"
-sh "$tmpdir/install.sh" --bin node --dir "$INSTALL_DIR"
+# 1) 装二进制：已存在就跳过下载（env 覆盖 + 重启服务即可，不必重装）
 BIN="${INSTALL_DIR}/zhiwei-node"
-[ -x "$BIN" ] || die "二进制没装好：$BIN"
+if [ -x "$BIN" ]; then
+  note "$BIN 已存在，跳过下载（重跑只更新 env / 覆盖 unit / 重启服务）"
+  if "$BIN" --help >/dev/null 2>&1; then
+    ok "现有二进制可用"
+  else
+    die "$BIN 存在但 --help 失败，可能不是 zhiwei-node（删掉再重装，或换 --dir）"
+  fi
+else
+  printf '\033[36m==>\033[0m 装 zhiwei-node 二进制\n'
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT INT TERM
+  fetch "https://raw.githubusercontent.com/${REPO}/${BRANCH}/scripts/install.sh" "$tmpdir/install.sh"
+  sh "$tmpdir/install.sh" --bin node --dir "$INSTALL_DIR"
+  [ -x "$BIN" ] || die "二进制没装好：$BIN"
+fi
 
 # 2) 写 env 文件
 printf '\033[36m==>\033[0m 写 %s\n' "$ENV_FILE"
@@ -365,7 +374,7 @@ EOF
       nohup env \
         ZHIWEI_MONITOR_URL="$URL" \
         ZHIWEI_BOOTSTRAP_TOKEN="$TOKEN" \
-        "$BIN" --state-dir "$STATE_DIR" --interval "$INTERVAL" \
+        "$BIN" --state-dir "$STATE_DIR" \
         </dev/null >>"$logfile" 2>&1 &
     fi
     sleep 0.5
@@ -398,7 +407,7 @@ cat <<EOF
   看日志：    $0 logs
   卸  载：    $0 uninstall
 
-  想改 telemetry 频率（默认 30 秒）：
+  想改 telemetry 频率（默认 5 秒）：
     sudo vim $ENV_FILE   # 改 ZHIWEI_INTERVAL=60
     sudo systemctl restart zhiwei-node
   改 inventory / 证书 / 节点名 / state-dir 同理（ZHIWEI_INVENTORY_INTERVAL、
