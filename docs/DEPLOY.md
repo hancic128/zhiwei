@@ -425,6 +425,15 @@ zhiwei-node --state-dir /var/lib/zhiwei-node --interval 30
 >
 > 卸载：`curl -fsSL ... | sudo sh -s -- uninstall`
 
+> 同样也可以用独立脚本 `uninstall-node-service.sh`，效果一致但可单独下载：
+>
+> ```sh
+> curl -fsSL https://raw.githubusercontent.com/hancic128/zhiwei/main/scripts/uninstall-node-service.sh \
+>   | sudo sh -s -- --purge --remove-binary
+> ```
+>
+> `--purge` 连 state-dir 一起删（节点身份永久失效，要重新 enroll），`--remove-binary` 顺带 rm 二进制。
+
 入网令牌怎么来见上面的
 [「入网令牌从哪来」](#入网令牌从哪来zhiwei_bootstrap_token)——托管平台用
 `ZHIWEI_BOOTSTRAP_TOKEN`，自建可以抢启动日志里那个 10 分钟的一次性 token。
