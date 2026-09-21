@@ -141,8 +141,14 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: release-assets-*
-          path: .
+          path: ./_artifacts
           merge-multiple: true
+
+      - name: Flatten artifacts to repo root
+        run: |
+          find ./_artifacts -type f -exec mv -t . {} +
+          rm -rf ./_artifacts
+          ls -la *.tar.gz *.sha256 2>/dev/null | head -20
 
       - uses: actions/setup-python@v5
         with:
