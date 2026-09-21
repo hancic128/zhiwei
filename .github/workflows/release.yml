@@ -123,12 +123,13 @@ jobs:
             zhiwei-${{ matrix.target }}.tar.gz
             zhiwei-${{ matrix.target }}.tar.gz.sha256
 
-  # 同步 release 资产 + scripts 到腾讯云 COS，国内服务器脚本可稳定拉取。
-  # 注：公开仓库之间的 reusable workflow 调用不让传 secret（GitHub 安全限制）。
-  # 改成本仓库直接用 COS secret + .github/scripts/upload.py。
-  # 凭证收敛降级为：每个 caller 仓库配同名 secret，值由 tencent.env 单点管理。
+  # 同步 release 资产 + scripts 到阿里云 OSS，国内服务器脚本可稳定拉取。
+  # 注：
+  #   1. 公开仓库之间 GitHub 不让 reusable workflow 传 secret，所以本仓库直接跑
+  #   2. 腾讯云 COS 在本环境实测 10 KB/s（6MB 文件 6 分钟），不可用；阿里云 OSS 正常
+  # 本仓库配 OSS_ACCESS_KEY_ID / OSS_ACCESS_KEY_SECRET 两个 secret。
   mirror:
-    name: Mirror release assets to COS
+    name: Mirror release assets to OSS
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
@@ -154,19 +155,19 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install cos-python-sdk-v5
-        run: pip install cos-python-sdk-v5
+      - name: Install oss2
+        run: pip install oss2
 
-      - name: Upload artifacts to COS
+      - name: Upload artifacts to OSS
         env:
-          COS_BUCKET:         public-artifacts-1310342032
-          COS_REGION:         ap-nanjing
-          COS_KEY_PREFIX:     hancic128/zhiwei
-          COS_FILE_PATTERN:   'zhiwei-*.tar.gz zhiwei-*.tar.gz.sha256'
-          COS_EXTRA_PATHS:    scripts
-          COS_VERSION_TAG:    ${{ github.ref_name }}
-          COS_INCLUDE_LATEST: 'true'
-          COS_MAKE_PUBLIC:    'true'
-          COS_SECRET_ID:      ${{ secrets.COS_SECRET_ID }}
-          COS_SECRET_KEY:     ${{ secrets.COS_SECRET_KEY }}
+          OSS_ENDPOINT:          https://oss-cn-hangzhou.aliyuncs.com
+          OSS_BUCKET:            hancic-public-artifacts
+          OSS_KEY_PREFIX:        hancic128/zhiwei
+          OSS_FILE_PATTERN:      'zhiwei-*.tar.gz zhiwei-*.tar.gz.sha256'
+          OSS_EXTRA_PATHS:       scripts
+          OSS_VERSION_TAG:       ${{ github.ref_name }}
+          OSS_INCLUDE_LATEST:    'true'
+          OSS_MAKE_PUBLIC:       'true'
+          OSS_ACCESS_KEY_ID:     ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
         run: python .github/scripts/upload.py
