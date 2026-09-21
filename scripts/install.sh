@@ -92,8 +92,14 @@ fetch() { # fetch <url> <dest>
 # 资产名不带版本号，所以 latest 有稳定路径可走。
 asset="zhiwei-${target}.tar.gz"
 if [ -n "${ZHIWEI_BASE_URL:-}" ]; then
-  # 镜像站 / 内网分发：直接给前缀，本脚本不再拼 GitHub 的路径。
-  base="${ZHIWEI_BASE_URL%/}"
+  # 镜像站 / 内网分发：BASE_URL 是仓库根（不含 v<tag>），由本脚本拼
+  # latest/ 或 v<VERSION>/ 子路径。OSS 目录布局见
+  # https://github.com/hancic128/hancic-public-artifacts。
+  if [ "$VERSION" = "latest" ]; then
+    base="${ZHIWEI_BASE_URL%/}/latest"
+  else
+    base="${ZHIWEI_BASE_URL%/}/v${VERSION#v}"
+  fi
 elif [ "$VERSION" = "latest" ]; then
   base="https://github.com/${REPO}/releases/latest/download"
 else
