@@ -160,7 +160,7 @@ jobs:
 
       - name: Upload artifacts to OSS
         env:
-          OSS_ENDPOINT:          https://oss-cn-hangzhou.aliyuncs.com
+          OSS_ENDPOINT:          https://oss-cn-beijing.aliyuncs.com
           OSS_BUCKET:            hancic-public-artifacts
           OSS_KEY_PREFIX:        hancic128/zhiwei
           OSS_FILE_PATTERN:      'zhiwei-*.tar.gz zhiwei-*.tar.gz.sha256'
