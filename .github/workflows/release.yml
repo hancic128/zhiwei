@@ -124,20 +124,43 @@ jobs:
             zhiwei-${{ matrix.target }}.tar.gz.sha256
 
   # 同步 release 资产 + scripts 到腾讯云 COS，国内服务器脚本可稳定拉取。
-  # hancic-public-artifacts 是公开仓库，跨公开仓库调 reusable workflow 时，
-  # GitHub 不让 secrets: inherit / GITHUB_TOKEN 默认传 — 必须显式 list。
-  # zhiwei 仓库配同名 secret（值与 hancic-public-artifacts 一致）。
+  # 注：公开仓库之间的 reusable workflow 调用不让传 secret（GitHub 安全限制）。
+  # 改成本仓库直接用 COS secret + .github/scripts/upload.py。
+  # 凭证收敛降级为：每个 caller 仓库配同名 secret，值由 tencent.env 单点管理。
   mirror:
     name: Mirror release assets to COS
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
-    uses: hancic128/hancic-public-artifacts/.github/workflows/oss-release.yml@main
-    secrets:
-      COS_SECRET_ID:  ${{ secrets.COS_SECRET_ID }}
-      COS_SECRET_KEY: ${{ secrets.COS_SECRET_KEY }}
-    with:
-      bucket: public-artifacts-1310342032
-      region: ap-nanjing
-      key_prefix: hancic128/zhiwei
-      file_pattern: 'zhiwei-*.tar.gz zhiwei-*.tar.gz.sha256'
-      extra_paths: 'scripts'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-assets-*
+          path: .
+          merge-multiple: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install cos-python-sdk-v5
+        run: pip install cos-python-sdk-v5
+
+      - name: Upload artifacts to COS
+        env:
+          COS_BUCKET:         public-artifacts-1310342032
+          COS_REGION:         ap-nanjing
+          COS_KEY_PREFIX:     hancic128/zhiwei
+          COS_FILE_PATTERN:   'zhiwei-*.tar.gz zhiwei-*.tar.gz.sha256'
+          COS_EXTRA_PATHS:    scripts
+          COS_VERSION_TAG:    ${{ github.ref_name }}
+          COS_INCLUDE_LATEST: 'true'
+          COS_MAKE_PUBLIC:    'true'
+          COS_SECRET_ID:      ${{ secrets.COS_SECRET_ID }}
+          COS_SECRET_KEY:     ${{ secrets.COS_SECRET_KEY }}
+        run: python .github/scripts/upload.py
