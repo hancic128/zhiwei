@@ -120,7 +120,7 @@
     "metricCpu": "CPU",
     "metricMem": "memory",
     "topNodesEmpty": "No nodes yet",
-    "topNodesEmptyHint": "Run ./scripts/dev.sh start to enroll a local node."
+    "topNodesEmptyHint": "No nodes yet. Generate an enroll command in Settings → Enroll Tokens, then run it on the target machine."
   },
   "services": {
     "title": "Services",
@@ -216,7 +216,7 @@
     "colLastSeen": "Last update",
     "searchPlaceholder": "Search hostname / ID / IP",
     "empty": "No nodes yet",
-    "emptyHint": "Run ./scripts/dev.sh start to enroll a local node.",
+    "emptyHint": "No nodes yet. Generate an enroll command in Settings → Enroll Tokens, then run it on the target machine.",
     "searchEmpty": "No matching nodes",
     "searchEmptyHint": "Try a different keyword.",
     "total": "{{n}} matched",
