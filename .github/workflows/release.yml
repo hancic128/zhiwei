@@ -171,3 +171,39 @@ jobs:
           OSS_ACCESS_KEY_ID:     ${{ secrets.OSS_ACCESS_KEY_ID }}
           OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
         run: python .github/scripts/upload.py
+
+      # 再同步一份到 bj 制品仓库（自建 nginx WebDAV，国内直连）。
+      # 目录形状与 OSS 一致：<prefix>/v<tag>/<file> + <prefix>/latest/<file>，
+      # 所以用户只要换 ZHIWEI_BASE_URL 就能切到自建源：
+      #   ZHIWEI_BASE_URL=http://49.232.168.161:8888/releases/hancic128/zhiwei
+      # 先 PUT 到 /upload/ 暂存、再 MOVE 到 /releases/：制品目录里只会出现
+      # 完整传完的文件。--retry-all-errors 是为 429（写配额 30r/m）留的余量。
+      - name: Upload to bj artifacts
+        env:
+          HOST: ${{ secrets.ARTIFACTS_HOST }}
+          USER: ${{ secrets.ARTIFACTS_USER }}
+          PASS: ${{ secrets.ARTIFACTS_PASS }}
+        run: |
+          set -euo pipefail
+          prefix="hancic128/zhiwei"
+          tag="${GITHUB_REF_NAME}"
+          curl_() { curl -fsS --retry 5 --retry-delay 3 --retry-all-errors -u "$USER:$PASS" "$@"; }
+
+          mapfile -t files < <(ls zhiwei-*.tar.gz zhiwei-*.tar.gz.sha256)
+          mapfile -t scripts < <(find scripts -maxdepth 1 -type f | sort)
+          echo "待同步：${#files[@]} 个制品 + ${#scripts[@]} 个脚本"
+
+          for stage in "$tag" latest; do
+            for f in "${files[@]}" "${scripts[@]}"; do
+              target="$prefix/$stage/$f"
+              curl_ -T "$f" "http://$HOST/upload/$target"
+              curl_ -X MOVE \
+                -H "Destination: http://$HOST/releases/$target" \
+                -H "Overwrite: T" \
+                "http://$HOST/upload/$target"
+            done
+          done
+
+          echo "已同步 → http://$HOST/releases/$prefix/latest/"
+          curl_ -o /dev/null -w 'latest/ 抽查 HTTP=%{http_code}\n' \
+            "http://$HOST/releases/$prefix/latest/$(basename "${files[0]}")"
