@@ -177,7 +177,7 @@ jobs:
       # 所以用户只要换 ZHIWEI_BASE_URL 就能切到自建源：
       #   ZHIWEI_BASE_URL=http://49.232.168.161:8888/releases/hancic128/zhiwei
       # 先 PUT 到 /upload/ 暂存、再 MOVE 到 /releases/：制品目录里只会出现
-      # 完整传完的文件。--retry-all-errors 是为 429（写配额 30r/m）留的余量。
+      # 完整传完的文件。
       - name: Upload to bj artifacts
         env:
           HOST: ${{ secrets.ARTIFACTS_HOST }}
@@ -187,7 +187,27 @@ jobs:
           set -euo pipefail
           prefix="hancic128/zhiwei"
           tag="${GITHUB_REF_NAME}"
-          curl_() { curl -fsS --retry 5 --retry-delay 3 --retry-all-errors -u "$USER:$PASS" "$@"; }
+
+          # 写配额 30r/m（burst 20），一次发版 20–40 次写请求，偶尔会撞 429。
+          # 这里自己退避重试，不用 curl 的 --retry-all-errors —— 那个选项要
+          # curl ≥ 7.71，老机器上直接报 unknown option。
+          call() {
+            local attempt code
+            for attempt in 1 2 3 4 5; do
+              code=$(curl -sS -o /dev/null -w '%{http_code}' -u "$USER:$PASS" "$@" || echo 000)
+              case "$code" in
+                2*) return 0 ;;
+                429|5*)
+                  echo "  [第 $attempt 次] HTTP $code，等 $((attempt * 3))s 重试" >&2
+                  sleep $((attempt * 3)) ;;
+                *)
+                  echo "  HTTP $code（不重试）：$*" >&2
+                  return 1 ;;
+              esac
+            done
+            echo "  重试 5 次仍失败：$*" >&2
+            return 1
+          }
 
           mapfile -t files < <(ls zhiwei-*.tar.gz zhiwei-*.tar.gz.sha256)
           mapfile -t scripts < <(find scripts -maxdepth 1 -type f | sort)
@@ -196,8 +216,8 @@ jobs:
           for stage in "$tag" latest; do
             for f in "${files[@]}" "${scripts[@]}"; do
               target="$prefix/$stage/$f"
-              curl_ -T "$f" "http://$HOST/upload/$target"
-              curl_ -X MOVE \
+              call -T "$f" "http://$HOST/upload/$target"
+              call -X MOVE \
                 -H "Destination: http://$HOST/releases/$target" \
                 -H "Overwrite: T" \
                 "http://$HOST/upload/$target"
