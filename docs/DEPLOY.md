@@ -115,7 +115,7 @@ docker build --platform linux/amd64 -t zhiwei-monitor .
 `cat <data-dir>/admin.token`」这条路走不通，而且**不挂盘时每次冷启动都会换
 一个新 token**，旧的就登录不上了。把 `ZHIWEI_ADMIN_TOKEN` 设成一个固定值
 （或在 Render 面板里用 `generateValue`）就能稳定下来——凭据在部署面板里，
-不需要进容器。仓库自带的 [`render.yaml`](../render.yaml) 已经这么配了。
+不需要进容器。
 
 日志里仍然会打印 `[ADMIN TOKEN] <token>`，但**只在随机生成时打印**：环境变量
 来源不打印（避免明文凭据留在日志系统里），也不写盘。
@@ -304,11 +304,11 @@ Northflank 只在**端口被标为 Public** 时才分配域名，格式是
 > 没配自动检测时的症状：Render 把明文 HTTP 转发给容器，容器却按 TLS 处理握手，
 > 日志里出现 `TLS handshake failed error=received corrupt message of type
 > InvalidContentType`——边缘发的 `GET /healthz` 被容器当成 ClientHello 解析。
-> 修法就是打开明文 HTTP。仓库根目录的 `render.yaml` 是开箱即用的 Blueprint。
+> 修法就是打开明文 HTTP（`ZHIWEI_PLAIN_HTTP=1`）。
 
-### 命令通道在 Render 上的当前状态
+### 命令通道在托管平台上的当前状态
 
-`render.yaml` 只起了一个 Web Service（`zhiwei-monitor`），**没有起 ops-server**。
+托管平台的部署只起了一个 Web Service（`zhiwei-monitor`），**没有起 ops-server**。
 后果是 monitor 启动时读不到 `data/ops.pub`（或读到的内容为空），enroll 时不下发
 `ops_public_key`，节点 `state.ops_public_key` 一直是 `None` —— 节点日志里会出现：
 
@@ -327,8 +327,8 @@ WARN zhiwei_node::control: 未持有 ops 公钥，控制通道不会拉取命令
    ops-server 把 `ops.pub` 写到 `ZHIWEI_DATA_DIR` 共享卷（最简单）
 2. **拆 Service**：起一个独立的 `zhiwei-ops` Service，让它的 `ops.pub` 通过
    共享卷 / 外部存储（KMS / Secrets Manager / S3）传给 monitor —— 这种部署形态
-   暂未实装，需要先在 `crates/ops-server/Cargo.toml` 加 Dockerfile + 在
-   `render.yaml` 加第二个 service。
+   暂未实装，需要先在 `crates/ops-server/Cargo.toml` 加 Dockerfile + 在部署定义里
+   加第二个 service。
 
 无论哪条路线，节点侧不需要改 —— 一旦 monitor 把 `ops_public_key` 填进
 `EnrollResponse`，节点就会自动写到 `state_dir/ops.pub` 并开始拉命令。
