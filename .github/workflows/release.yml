@@ -225,5 +225,5 @@ jobs:
           done
 
           echo "已同步 → http://$HOST/releases/$prefix/latest/"
-          curl_ -o /dev/null -w 'latest/ 抽查 HTTP=%{http_code}\n' \
-            "http://$HOST/releases/$prefix/latest/$(basename "${files[0]}")"
+          echo -n "抽查 latest/ 制品："
+          call "http://$HOST/releases/$prefix/latest/$(basename "${files[0]}")" && echo ok
