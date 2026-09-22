@@ -304,6 +304,10 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+
+    // 加载帮助页 markdown。找不到/读不动就降级为空字符串——前端会显示
+    // 「帮助文档尚未打包」占位。
+    let help = load_help_markdown(&args.ui_dir).await;
     let state = AppState {
         storage,
         data_dir: data_dir.clone(),
@@ -317,6 +321,7 @@ async fn main() -> anyhow::Result<()> {
         server_cert_cn: cfg.server_cert_cn.clone(),
         tls_terminated_locally: !plain_http,
         ui_dir: ui_dir.clone(),
+        help,
     };
 
     if let Err(e) = alerts::seed_default_rules(&state).await {
@@ -458,4 +463,29 @@ mod listen_tests {
             assert!(!listen_is_loopback(addr), "{addr} 不应判为回环");
         }
     }
+}
+
+/// 加载帮助页 markdown。优先看 `<ui_dir>/../assets/help.md`，再退到 `assets/help.md`。
+///
+/// 这里不 panic：内容缺失是合理状态（例如 dev 模式还没生成 UI 构建），
+/// UI 会展示「帮助文档尚未打包」。`locale` 固定 zh-CN——v0.1.0 阶段
+/// 不翻译帮助（spec 里明确），等真的做翻译时再加多语言解析。
+async fn load_help_markdown(ui_dir: &std::path::Path) -> crate::state::HelpContent {
+    // 候选路径（按优先级）：
+    //   1) `<ui_dir>/../assets/help.md`  — 与 ui/dist 平级（最常见的「仓库根」布局）
+    //   2) `<ui_dir>/help.md`             — ui/dist 内联（未来 UI 打包脚本塞进去）
+    //   3) `assets/help.md`               — 当前 crate 的相对路径
+    let candidates: [std::path::PathBuf; 3] = [
+        ui_dir.join("../assets/help.md"),
+        ui_dir.join("help.md"),
+        std::path::PathBuf::from("assets/help.md"),
+    ];
+    for path in &candidates {
+        if let Ok(s) = tokio::fs::read_to_string(path).await {
+            tracing::info!(path = %path.display(), "loaded help markdown");
+            return crate::state::HelpContent::new("zh-CN", s);
+        }
+    }
+    tracing::warn!("help markdown not found in any candidate path; UI will show placeholder");
+    crate::state::HelpContent::new("zh-CN", String::new())
 }

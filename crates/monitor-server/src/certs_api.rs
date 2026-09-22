@@ -137,7 +137,7 @@ pub async fn list_cert_sources_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -224,7 +224,7 @@ pub async fn create_cert_source_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -305,7 +305,7 @@ pub async fn patch_cert_source_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -382,7 +382,7 @@ pub async fn delete_cert_source_handler(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -423,7 +423,7 @@ pub async fn test_cert_source_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",

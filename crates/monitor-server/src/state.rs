@@ -33,4 +33,39 @@ pub struct AppState {
     pub tls_terminated_locally: bool,
     /// 控制台构建目录（存在时由 monitor 托管，供 SPA 兜底渲染 index.html）
     pub ui_dir: Option<PathBuf>,
+    /// 帮助页 markdown 内容（启动时从 `assets/help.md` 加载）
+    pub help: crate::state::HelpContent,
+}
+
+/// Help markdown content (loaded from `assets/help.md` at startup).
+/// `None` if the file is missing — UI shows a placeholder in that case.
+#[derive(Clone)]
+pub struct HelpContent(pub Arc<std::sync::RwLock<HelpInner>>);
+
+#[derive(Default)]
+pub struct HelpInner {
+    pub locale: String,
+    pub body: String,
+}
+
+impl HelpContent {
+    pub fn new(locale: impl Into<String>, body: impl Into<String>) -> Self {
+        Self(Arc::new(std::sync::RwLock::new(HelpInner {
+            locale: locale.into(),
+            body: body.into(),
+        })))
+    }
+    pub fn snapshot(&self) -> HelpSnapshot {
+        let g = self.0.read().unwrap_or_else(|e| e.into_inner());
+        HelpSnapshot {
+            locale: g.locale.clone(),
+            body: g.body.clone(),
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct HelpSnapshot {
+    pub locale: String,
+    pub body: String,
 }

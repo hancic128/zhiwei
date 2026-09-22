@@ -20,7 +20,7 @@ use axum::{
 use parking_lot::Mutex;
 use prost::Message as _;
 use rand::RngCore;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 use zhiwei_common::NodeId;
 use zhiwei_proto::common::{EnrollRequest, EnrollResponse};
@@ -119,6 +119,23 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/todo", get(crate::todo_api::todo_handler))
         .route("/v1/retention", get(crate::retention::retention_handler))
+        .route("/v1/help", get(help_handler))
+        .route(
+            "/v1/ai-tokens",
+            get(list_ai_tokens_handler).post(create_ai_token_handler),
+        )
+        .route(
+            "/v1/ai-tokens/:id",
+            axum::routing::delete(delete_ai_token_handler),
+        )
+        .route(
+            "/v1/enroll-tokens",
+            get(list_enroll_tokens_handler).post(create_enroll_token_handler),
+        )
+        .route(
+            "/v1/enroll-tokens/:id",
+            axum::routing::delete(delete_enroll_token_handler),
+        )
         .route("/v1/series/nodes", get(all_nodes_series_handler))
         .route("/v1/commands", get(node_commands_handler))
         .route("/v1/commands/:id/result", post(command_result_handler))
@@ -214,23 +231,97 @@ pub(crate) async fn verify_node(
 
 /// 读端点只认一种凭据：`Authorization: Bearer <admin token>`
 /// （浏览器控制台用）。节点走签名鉴权，且不读这些端点。
-pub(crate) fn read_auth_ok(state: &AppState, headers: &HeaderMap) -> bool {
+/// 鉴权层级 v2：不仅返回 bool，还区分凭据类型。
+///
+/// 当前所有受保护端点都是读端点，所以 AI token 实际权限 = admin token 的全部
+/// 权限（去掉 admin 改 admin.token 自身的能力）。后续 manage 类写端点落地时，
+/// handler 里加 `matches!(kind, Admin | AiToken)` 即可对 AI token 开放。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReadAuthKind {
+    /// 控制台 / 浏览器 / 拥有 admin token 的人。
+    Admin,
+    /// AI token，附带 token id（用于审计 last_used_at）。
+    AiToken(String),
+    /// 没有合法凭据。
+    None,
+}
+
+/// 解析 Authorization 头，返回凭据类型。
+///
+/// 顺序：admin token（内存 ct_eq 比对，最快）→ AI token（SHA-256 后查 SQLite）。
+/// AI token 不命中或已撤销都返回 None。
+pub(crate) async fn read_auth_ok_v2(state: &AppState, headers: &HeaderMap) -> ReadAuthKind {
     let Some(value) = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
     else {
-        return false;
+        return ReadAuthKind::None;
     };
     let Some(token) = value.strip_prefix("Bearer ") else {
-        return false;
+        return ReadAuthKind::None;
     };
-    let current = state.admin_token.read().unwrap_or_else(|e| e.into_inner());
-    crate::admin::ct_eq(token.as_bytes(), current.as_bytes())
+
+    // 1. admin token
+    // 把 String 取出来就 drop guard，否则 RwLockReadGuard 不是 Send，
+    // 后续 await 时整个 handler future 就不是 Send，axum 不认。
+    let admin_ok = {
+        let current = state.admin_token.read().unwrap_or_else(|e| e.into_inner());
+        crate::admin::ct_eq(token.as_bytes(), current.as_bytes())
+    };
+    if admin_ok {
+        return ReadAuthKind::Admin;
+    }
+
+    // 2. AI token
+    let hash = sha256_hex(token.as_bytes());
+    match state.storage.ai_tokens().find_active_by_hash(&hash).await {
+        Ok(Some(t)) => {
+            // best-effort: 更新 last_used_at。失败不影响主请求。
+            let id = t.id.clone();
+            let now = zhiwei_common::Timestamp::now().unix_nano();
+            let repo = state.storage.ai_tokens();
+            tokio::spawn(async move {
+                let _ = repo.touch_last_used(&id, now).await;
+            });
+            ReadAuthKind::AiToken(t.id)
+        }
+        _ => ReadAuthKind::None,
+    }
+}
+
+/// 旧接口：保留兼容。新代码请直接用 `read_auth_ok_v2`。
+///
+/// 等价于 `matches!(v2(...), Admin | AiToken(_))`，但不 unwrap 也不分发 ——
+/// 调用方已经在用 bool，没必要为新代码增加心智负担。
+pub(crate) async fn read_auth_ok(state: &AppState, headers: &HeaderMap) -> bool {
+    !matches!(read_auth_ok_v2(state, headers).await, ReadAuthKind::None)
+}
+
+/// SHA-256 → 小写 hex（用 ring，已在依赖里）。AI token 哈希专用。
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
+    digest
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// 一个入网令牌的元信息。`id` 给 UI 展示 + 撤销用；`token` 字符串本身只在校验路径用。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BootstrapTokenMeta {
+    pub id: String,
+    pub label: String,
+    pub created_at_unix: u64,
+    pub expires_at_unix: u64,
+    /// 长期有效（来自 ZHIWEI_BOOTSTRAP_TOKEN）时为 true，UI 可单独标识。
+    pub permanent: bool,
 }
 
 #[derive(Default)]
 pub struct BootstrapTokens {
-    inner: Mutex<HashMap<String, u64>>, // token -> expires_at_unix
+    /// token 字符串 -> 元信息
+    inner: Mutex<HashMap<String, BootstrapTokenMeta>>,
 }
 
 /// 永不失效的过期时间戳。给 `ZHIWEI_BOOTSTRAP_TOKEN` 用——托管平台
@@ -243,16 +334,42 @@ impl BootstrapTokens {
         self.inner.lock().is_empty()
     }
     pub async fn add(&self, token: String, ttl_secs: u64) {
-        let expires = SystemTime::now()
+        self.add_with_label(token, ttl_secs, String::new()).await;
+    }
+    /// 添加一个带 label 的临时 token。`label` 为空也合法。
+    /// `id` 自动生成（`boot-<6 hex>`），仅用于 UI 展示和撤销。
+    pub async fn add_with_label(&self, token: String, ttl_secs: u64, label: String) {
+        let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() + ttl_secs)
+            .map(|d| d.as_secs())
             .unwrap_or(0);
-        self.inner.lock().insert(token, expires);
+        let expires = now + ttl_secs;
+        let id = format!("boot-{}", &hex_encode(&rand_bytes_3())[..6]);
+        let meta = BootstrapTokenMeta {
+            id,
+            label,
+            created_at_unix: now,
+            expires_at_unix: expires,
+            permanent: false,
+        };
+        self.inner.lock().insert(token, meta);
     }
     /// 登记一个长期有效的入网令牌（`ZHIWEI_BOOTSTRAP_TOKEN`）。
     /// 删掉环境变量并重启即等于撤销。
     pub fn add_static(&self, token: String) {
-        self.inner.lock().insert(token, NEVER_EXPIRES);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let id = format!("boot-static-{}", &hex_encode(&rand_bytes_3())[..6]);
+        let meta = BootstrapTokenMeta {
+            id,
+            label: "ZHIWEI_BOOTSTRAP_TOKEN".into(),
+            created_at_unix: now,
+            expires_at_unix: NEVER_EXPIRES,
+            permanent: true,
+        };
+        self.inner.lock().insert(token, meta);
     }
     pub fn mint() -> String {
         let mut buf = [0u8; 24];
@@ -266,7 +383,7 @@ impl BootstrapTokens {
             .unwrap_or(0);
         let mut guard = self.inner.lock();
         match guard.get(token) {
-            Some(exp) if *exp > now => true,
+            Some(meta) if meta.expires_at_unix > now => true,
             Some(_) => {
                 guard.remove(token);
                 false
@@ -274,6 +391,40 @@ impl BootstrapTokens {
             None => false,
         }
     }
+    /// 列出当前未过期的 token 元信息。**不含明文 token**。
+    pub fn list_active(&self) -> Vec<BootstrapTokenMeta> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.inner
+            .lock()
+            .values()
+            .filter(|m| m.expires_at_unix > now)
+            .cloned()
+            .collect()
+    }
+    /// 按 id 撤销（找到第一个匹配的 token 字符串后移除）。
+    /// 返回是否真的撤销了什么。
+    pub fn revoke_by_id(&self, id: &str) -> bool {
+        let mut guard = self.inner.lock();
+        let target = guard
+            .iter()
+            .find(|(_, m)| m.id == id)
+            .map(|(t, _)| t.clone());
+        if let Some(token) = target {
+            guard.remove(&token);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+fn rand_bytes_3() -> [u8; 3] {
+    let mut buf = [0u8; 3];
+    rand::thread_rng().fill_bytes(&mut buf);
+    buf
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -587,7 +738,7 @@ async fn index_handler(State(state): State<AppState>, headers: HeaderMap) -> Res
     Json(IndexBody {
         service: "zhiwei-monitor",
         version: env!("CARGO_PKG_VERSION"),
-        authenticated: read_auth_ok(&state, &headers),
+        authenticated: read_auth_ok(&state, &headers).await,
         endpoints: vec![
             "GET  /v1/nodes",
             "GET  /v1/nodes/:id/telemetry?limit=10",
@@ -654,7 +805,7 @@ fn latest_view(ts_unix_nano: i64, batch: &TelemetryBatch) -> NodeLatestView {
 }
 
 async fn list_nodes_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -727,7 +878,7 @@ async fn node_telemetry_handler(
     axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -835,7 +986,7 @@ async fn node_series_handler(
     axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -934,7 +1085,7 @@ async fn all_nodes_series_handler(
     axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -1430,7 +1581,7 @@ async fn node_containers_handler(
     axum::extract::Path(node_id): axum::extract::Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -1473,7 +1624,7 @@ async fn node_processes_handler(
     axum::extract::Path(node_id): axum::extract::Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -1514,7 +1665,7 @@ struct ContainerGroupView {
 
 /// `GET /v1/containers`：所有节点的容器，按节点分组（容器页一次请求拿全）
 async fn all_containers_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -1563,7 +1714,7 @@ struct NodeCertsView {
 
 /// `GET /v1/certificates`：所有节点的证书（证书页一次拿全，前端按到期日排序）
 async fn all_certificates_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -1610,7 +1761,7 @@ struct AlertsView {
 }
 
 async fn alerts_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -1635,7 +1786,7 @@ async fn silence_alert_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -1662,7 +1813,7 @@ async fn silence_alert_handler(
 }
 
 async fn list_rules_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -1682,7 +1833,7 @@ async fn create_rule_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -1742,7 +1893,7 @@ async fn patch_rule_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -1776,7 +1927,7 @@ async fn delete_rule_handler(
     axum::extract::Path(id): axum::extract::Path<i64>,
     headers: HeaderMap,
 ) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -1793,7 +1944,7 @@ async fn delete_rule_handler(
 }
 
 async fn list_channels_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -1828,7 +1979,7 @@ struct CaView {
 }
 
 async fn ca_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -1901,7 +2052,7 @@ async fn create_channel_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -1971,7 +2122,7 @@ async fn test_channel_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !read_auth_ok(&_state, &headers) {
+    if !read_auth_ok(&_state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -2069,7 +2220,7 @@ async fn patch_channel_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -2102,7 +2253,7 @@ async fn delete_channel_handler(
     axum::extract::Path(id): axum::extract::Path<i64>,
     headers: HeaderMap,
 ) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -2275,7 +2426,7 @@ struct ExecBody {
 
 /// 控制台发起命令：转给 ops-server 签名后落库（见 crates/ops-server）。
 async fn exec_handler(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -2338,7 +2489,7 @@ struct CommandHistoryView {
 }
 
 async fn command_history_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -2648,5 +2799,242 @@ mod bootstrap_token_tests {
         let tokens = BootstrapTokens::default();
         tokens.add("zhi-bt-short-lived".into(), 0).await; // 立刻过期
         assert!(!tokens.check("zhi-bt-short-lived"));
+    }
+}
+
+/// `GET /v1/help` —— 帮助页 markdown 内容。
+///
+/// 鉴权：admin token 或 AI token 都可读（AI 客户端如果要做 onboarding 也用得到）。
+/// 没找到 help 文件时返回空 body，UI 端展示占位文案。
+async fn help_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !read_auth_ok(&state, &headers).await {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "authentication required (Bearer admin or AI token)",
+        );
+    }
+    Json(state.help.snapshot()).into_response()
+}
+
+// ---------- AI Tokens ----------
+
+/// `GET /v1/ai-tokens` —— 列出所有 AI token 元信息（不含明文）。
+async fn list_ai_tokens_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !read_auth_ok(&state, &headers).await {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "authentication required (Bearer admin token)",
+        );
+    }
+    match state.storage.ai_tokens().list_all().await {
+        Ok(rows) => Json(serde_json::json!({ "tokens": rows })).into_response(),
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("list ai tokens: {e}"),
+        ),
+    }
+}
+
+/// `POST /v1/ai-tokens` —— 创建 AI token。返回明文 token（**仅这一次**）。
+async fn create_ai_token_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !read_auth_ok(&state, &headers).await {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "authentication required (Bearer admin token)",
+        );
+    }
+    #[derive(Deserialize)]
+    struct Body {
+        name: String,
+    }
+    let b: Body = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(e) => return err(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
+    };
+    let name = b.name.trim();
+    if name.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "name 不能为空");
+    }
+    if name.chars().count() > 64 {
+        return err(StatusCode::BAD_REQUEST, "name 过长（>64 字符）");
+    }
+
+    // 生成 32 字节熵的明文 token → base64url 编码。
+    // 前缀 `ait_` 与 bootstrap token 的 `zhi-bt-` 区分，便于 grep。
+    let mut buf = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut buf);
+    use base64::Engine;
+    let token = format!(
+        "ait_{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&buf)
+    );
+    let id = format!("ait-{}", &hex_encode(&rand_bytes_3())[..6]);
+    let hash = sha256_hex(token.as_bytes());
+    let now_unix_nano = zhiwei_common::Timestamp::now().unix_nano();
+
+    match state
+        .storage
+        .ai_tokens()
+        .create(&id, &hash, name, now_unix_nano)
+        .await
+    {
+        Ok(row) => Json(serde_json::json!({
+            "id": row.id,
+            "name": row.name,
+            "token": token,
+            "created_at_unix_nano": row.created_at_unix_nano,
+            "warning": "明文 token 仅返回一次，请立即复制保存",
+        }))
+        .into_response(),
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("create ai token: {e}"),
+        ),
+    }
+}
+
+/// `DELETE /v1/ai-tokens/:id` —— 撤销。立即生效（下次请求 401）。
+async fn delete_ai_token_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    if !read_auth_ok(&state, &headers).await {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "authentication required (Bearer admin token)",
+        );
+    }
+    let now_unix_nano = zhiwei_common::Timestamp::now().unix_nano();
+    match state.storage.ai_tokens().revoke(&id, now_unix_nano).await {
+        Ok(true) => Json(serde_json::json!({ "ok": true, "id": id })).into_response(),
+        Ok(false) => err(
+            StatusCode::NOT_FOUND,
+            "id 不存在或已撤销",
+        ),
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("revoke ai token: {e}"),
+        ),
+    }
+}
+
+// ---------- Enroll Tokens（运行时入网命令） ----------
+
+/// `GET /v1/enroll-tokens` —— 列出当前所有未过期的入网令牌元信息。
+async fn list_enroll_tokens_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !read_auth_ok(&state, &headers).await {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "authentication required (Bearer admin token)",
+        );
+    }
+    Json(serde_json::json!({ "tokens": state.bootstrap_tokens.list_active() }))
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct CreateEnrollTokenBody {
+    /// TTL 秒数；默认 86400 (24h)。最长 7 天。
+    #[serde(default)]
+    ttl_secs: Option<u64>,
+    /// 可选 label；为空也合法。
+    #[serde(default)]
+    label: Option<String>,
+}
+
+/// `POST /v1/enroll-tokens` —— 创建一个临时入网令牌，返回完整 enroll 命令。
+async fn create_enroll_token_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !read_auth_ok(&state, &headers).await {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "authentication required (Bearer admin token)",
+        );
+    }
+    let b: CreateEnrollTokenBody = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(e) => return err(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
+    };
+    let ttl_secs = b.ttl_secs.unwrap_or(86_400);
+    if ttl_secs == 0 || ttl_secs > 7 * 24 * 3600 {
+        return err(StatusCode::BAD_REQUEST, "ttl_secs 必须在 1..=604800");
+    }
+    let label = b.label.unwrap_or_default().trim().to_string();
+    if label.chars().count() > 64 {
+        return err(StatusCode::BAD_REQUEST, "label 过长（>64 字符）");
+    }
+
+    let token = BootstrapTokens::mint();
+    state
+        .bootstrap_tokens
+        .add_with_label(token.clone(), ttl_secs, label.clone())
+        .await;
+    let now_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let expires_at_unix = now_unix + ttl_secs;
+
+    // 从请求头推断 monitor 公开 URL：
+    //   1) 优先 `X-Forwarded-Proto` + `Host`（托管平台会注入）
+    //   2) 回退 `Host` 头 + 默认 scheme（自建/反代靠 TLS 终结层处理）
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("https");
+    let host = headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("localhost:8443");
+    let monitor_url = format!("{scheme}://{host}");
+
+    let enroll_command = format!(
+        "curl -sSL {monitor_url}/install-node.sh \\\n  | ZHIWEI_MONITOR_URL={monitor_url} \\\n    ZHIWEI_BOOTSTRAP_TOKEN={token} \\\n    bash -s"
+    );
+
+    // 从 list_active 找到刚加的那条 id（保证 id 与服务端一致）。
+    let just_added = state
+        .bootstrap_tokens
+        .list_active()
+        .into_iter()
+        .find(|m| m.label == label && m.expires_at_unix == expires_at_unix)
+        .map(|m| m.id);
+
+    Json(serde_json::json!({
+        "id": just_added,
+        "token": token,
+        "label": label,
+        "created_at_unix": now_unix,
+        "expires_at_unix": expires_at_unix,
+        "monitor_url": monitor_url,
+        "enroll_command": enroll_command,
+    }))
+    .into_response()
+}
+
+/// `DELETE /v1/enroll-tokens/:id` —— 撤销一个入网令牌。立即生效。
+async fn delete_enroll_token_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    if !read_auth_ok(&state, &headers).await {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "authentication required (Bearer admin token)",
+        );
+    }
+    if state.bootstrap_tokens.revoke_by_id(&id) {
+        Json(serde_json::json!({ "ok": true, "id": id })).into_response()
+    } else {
+        err(StatusCode::NOT_FOUND, "id 不存在或已过期")
     }
 }

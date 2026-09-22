@@ -120,7 +120,7 @@
     "metricCpu": "CPU",
     "metricMem": "内存",
     "topNodesEmpty": "还没有节点接入",
-    "topNodesEmptyHint": "运行 ./scripts/dev.sh start 会在本地入网一个 node。"
+    "topNodesEmptyHint": "还没有节点。在「设置 → 入网令牌」生成命令，粘贴到目标机器运行。"
   },
   "services": {
     "title": "服务",
@@ -216,7 +216,7 @@
     "colLastSeen": "上次更新",
     "searchPlaceholder": "搜索主机名 / ID / IP",
     "empty": "还没有节点接入",
-    "emptyHint": "运行 ./scripts/dev.sh start 会在本地入网一个 node。",
+    "emptyHint": "还没有节点。在「设置 → 入网令牌」生成命令，粘贴到目标机器运行。",
     "searchEmpty": "没有匹配的节点",
     "searchEmptyHint": "换一个关键词试试。",
     "total": "匹配 {{n}} 台",

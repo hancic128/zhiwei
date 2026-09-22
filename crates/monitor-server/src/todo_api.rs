@@ -115,7 +115,7 @@ pub struct Summary {
 
 /// `GET /v1/todo` —— 默认页：把「今天要处理的事」汇成一条流。
 pub async fn todo_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",

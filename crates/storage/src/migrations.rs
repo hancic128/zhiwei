@@ -378,5 +378,37 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     }
 
+
+    // Migration 012: AI token（MCP / 外部 AI 客户端用的读端点凭据）
+    //
+    // 设计：
+    // - id 形如 `ait_<12 hex>`，展示用，不参与校验
+    // - token_hash 是 SHA-256(明文 token) 的小写 hex，校验时算一遍再比
+    // - revoked_at 非空即失效；本次不做过期
+    // - 唯一索引只覆盖未撤销的，让「同 hash 撤销后重建」合法
+    let has_012: Option<i64> =
+        sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 12")
+            .fetch_optional(pool)
+            .await?;
+    if has_012.is_none() {
+        sqlx::query(
+            r#"
+            CREATE TABLE ai_tokens (
+                id TEXT PRIMARY KEY,
+                token_hash TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                created_at_unix_nano INTEGER NOT NULL,
+                last_used_at_unix_nano INTEGER,
+                revoked_at_unix_nano INTEGER
+            );
+            CREATE INDEX idx_ai_tokens_active
+                ON ai_tokens(token_hash) WHERE revoked_at_unix_nano IS NULL;
+            INSERT INTO schema_version (version) VALUES (12);
+            "#,
+        )
+        .execute(pool)
+        .await?;
+    }
+
     Ok(())
 }

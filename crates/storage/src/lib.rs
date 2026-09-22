@@ -1,5 +1,6 @@
 //! SQLite-backed storage for zhiwei monitor.
 
+pub mod ai_tokens_repo;
 pub mod alerts_repo;
 pub mod cert_sources_repo;
 pub mod commands_repo;
@@ -13,6 +14,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use std::path::Path;
 use std::str::FromStr;
+pub use ai_tokens_repo::AiTokensRepo;
 
 pub use alerts_repo::AlertsRepo;
 pub use cert_sources_repo::CertSourcesRepo;
@@ -75,5 +77,9 @@ impl Storage {
 
     pub fn cert_sources(&self) -> CertSourcesRepo {
         CertSourcesRepo::new(self.pool.clone())
+    }
+
+    pub fn ai_tokens(&self) -> AiTokensRepo {
+        AiTokensRepo::new(self.pool.clone())
     }
 }

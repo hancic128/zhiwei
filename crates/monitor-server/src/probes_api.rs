@@ -212,7 +212,7 @@ pub async fn services_timeline_handler(
     Query(q): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -297,7 +297,7 @@ pub async fn services_timeline_handler(
 }
 
 pub async fn list_services_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -317,7 +317,7 @@ pub async fn create_service_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -372,7 +372,7 @@ pub async fn patch_service_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -422,7 +422,7 @@ pub async fn delete_service_handler(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -457,7 +457,7 @@ pub async fn delete_service_handler(
 
 /// 扁平探针列表（含状态）：给「探针」独立视图与节点详情用
 pub async fn list_probes_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -521,7 +521,7 @@ pub async fn create_probe_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -613,7 +613,7 @@ pub async fn patch_probe_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -686,7 +686,7 @@ pub async fn delete_probe_handler(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
@@ -716,7 +716,7 @@ pub async fn probe_results_handler(
     Query(q): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",

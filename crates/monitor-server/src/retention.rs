@@ -126,7 +126,7 @@ const RETENTION_SOURCE_REF: &str = "retention";
 /// `GET /v1/retention` —— 留存策略。设置页展示用：
 /// 数字只有 retention.rs 一处定义，前端不硬编码，避免两边漂移。
 pub async fn retention_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !read_auth_ok(&state, &headers) {
+    if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
