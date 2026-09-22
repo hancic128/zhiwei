@@ -494,7 +494,7 @@ curl -sSL https://<your-monitor>/install-node.sh \
 
 ### 8.2 在目标机器上执行
 
-要求 **root**（脚本要写 `/usr/local/bin` 和 systemd unit）：
+要求 **root**（脚本要写 `/usr/local/bin` 和 systemd unit / launchd plist）：
 
 ```sh
 curl -sSL https://<your-monitor>/install-node.sh | sudo -E bash -s
@@ -510,10 +510,15 @@ curl -sSL https://<your-monitor>/install-node.sh | sudo -E bash -s
 2. 校验 `.sha256`（有就校验，没有就跳过）
 3. 装二进制到 `/usr/local/bin/zhiwei-node`
 4. 写 `/etc/zhiwei-node.env`（mode `0600`，含 `ZHIWEI_MONITOR_URL` + `ZHIWEI_BOOTSTRAP_TOKEN`）
-5. 写 `/etc/systemd/system/zhiwei-node.service`，`systemctl enable --now`
+5. 装常驻服务并设开机自启：
+   - Linux：`/etc/systemd/system/zhiwei-node.service`，`systemctl enable --now`
+   - macOS：`/Library/LaunchDaemons/com.zhiwei.node.plist`，`launchctl bootstrap system`
+     （用 LaunchDaemon 而不是 LaunchAgent：脚本本来就要求 root，daemon 不依赖
+     「有人登录桌面」也开机自启。plist 是 0644，**不内嵌令牌**——它先 `source`
+     那个 0600 的 env 文件，再 exec 二进制，等价于 systemd 的 `EnvironmentFile`）
 6. 节点随后出现在控制台「节点」页
 
-支持 `x86_64` / `aarch64` 的 Linux。**macOS 暂不支持**（没有 launchd 分支）。
+支持 Linux（`x86_64` / `aarch64`，systemd）与 macOS（`arm64` / `x86_64`，launchd）。
 
 卸载：
 
