@@ -31,6 +31,7 @@ mod ca;
 mod certs_api;
 mod config;
 mod probes_api;
+mod mcp;
 mod retention;
 mod routes;
 mod state;
@@ -322,6 +323,12 @@ async fn main() -> anyhow::Result<()> {
         tls_terminated_locally: !plain_http,
         ui_dir: ui_dir.clone(),
         help,
+        // MCP server 调自己 REST 时用。listen 是 host:port，
+        // 内部通信强制走 127.0.0.1（外面到不了）。
+        mcp_base_url: format!(
+            "http://127.0.0.1:{}",
+            listen.rsplit(':').next().unwrap_or("8443")
+        ),
     };
 
     if let Err(e) = alerts::seed_default_rules(&state).await {

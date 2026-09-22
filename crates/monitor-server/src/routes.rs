@@ -120,6 +120,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/todo", get(crate::todo_api::todo_handler))
         .route("/v1/retention", get(crate::retention::retention_handler))
         .route("/v1/help", get(help_handler))
+        .route("/mcp/sse", axum::routing::post(crate::mcp::sse_handler))
         .route(
             "/v1/ai-tokens",
             get(list_ai_tokens_handler).post(create_ai_token_handler),

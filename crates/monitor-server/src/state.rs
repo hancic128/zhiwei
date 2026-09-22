@@ -35,6 +35,9 @@ pub struct AppState {
     pub ui_dir: Option<PathBuf>,
     /// 帮助页 markdown 内容（启动时从 `assets/help.md` 加载）
     pub help: crate::state::HelpContent,
+    /// MCP server 内部调自己 REST 时用的 base URL，
+    /// 形如 `http://127.0.0.1:8443`。见 `mcp.rs`。
+    pub mcp_base_url: String,
 }
 
 /// Help markdown content (loaded from `assets/help.md` at startup).
