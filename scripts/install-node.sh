@@ -16,6 +16,8 @@
 #   2. 写 /etc/zhiwei-node.env（mode 0600，仅 root 可读）
 #   3. 写 /etc/systemd/system/zhiwei-node.service 并 enable
 #   4. systemctl daemon-reload + enable --now 启动并设置开机自启
+#   5. 换 monitor 时清掉旧节点身份（身份只对签发它的那台 monitor 有效）
+#   6. 等节点写回 node.id，确认真的入网了——「脚本跑通」不等于「节点入网」
 #
 # 当前只支持 Linux（macOS 暂不实现 launchd 步骤）；必须 root 运行（请用 sudo）。
 #
@@ -52,7 +54,7 @@ UNIT_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 log() { printf '[zhiwei-install] %s\n' "$*" >&2; }
 die() { printf '[zhiwei-install] 错误: %s\n' "$*" >&2; exit 1; }
 
-usage() { sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # ---- 参数解析 ----
 ACTION="install"
@@ -67,6 +69,15 @@ done
 # ---- root 检查（必须在所有写盘操作之前）----
 if [ "$(id -u)" -ne 0 ]; then
   die "必须 root 运行，请用 sudo: curl ... | sudo bash -s"
+fi
+
+# ---- 上一次安装指向哪台 monitor（必须在覆盖 ${ENV_FILE} 之前读）----
+# 见「旧节点身份」一节的用途；identity_state 记本次是否沿用了旧身份，
+# 决定最后能不能说「节点已入网」（沿用旧身份时 node.id 本来就在，证明不了什么）。
+prev_monitor_url=""
+identity_state="none"
+if [ -f "${ENV_FILE}" ]; then
+  prev_monitor_url="$(sed -n 's/^ZHIWEI_MONITOR_URL=//p' "${ENV_FILE}" | tail -n1)"
 fi
 
 # ---- 平台检测 ----
@@ -162,8 +173,13 @@ pkg_version="$(cat "${tmpdir}/VERSION" 2>/dev/null || echo "${VERSION:-unknown}"
 mkdir -p "$INSTALL_DIR"
 if [ -x "${INSTALL_DIR}/${BIN_NAME}" ]; then
   # 已装：读版本（假设 binary --version 最后一行最后字段是版本号；不识别则当作 ? 强制覆盖）
+  #
+  # `|| true` 是必需的：--version 不是合法参数时 clap 以 2 退出，而 `set -o pipefail`
+  # 让这个管道整体失败，赋值语句一失败 `set -e` 就把整个脚本终止在这里——偏偏
+  # `2>/dev/null` 把唯一的报错也吞了，于是只有最前面几行日志、后面 env 文件 /
+  # unit / 服务全都没写，看起来却像装成功了（2026-09-22 就是这么踩的）。
   installed_ver="$("${INSTALL_DIR}/${BIN_NAME}" --version 2>/dev/null \
-    | tail -n1 | awk '{print $NF}')"
+    | tail -n1 | awk '{print $NF}' || true)"
   if [ -n "$installed_ver" ] && [ "$installed_ver" = "$pkg_version" ]; then
     log "${BIN_NAME} ${pkg_version} 已装，跳过覆盖"
   else
@@ -241,6 +257,26 @@ fi
 rm -f "$tmp_unit"
 
 # ============================================================
+# 旧节点身份：节点只要看到 <state>/node.id 存在就认为「已入网」，不再 enroll。
+# 而一个 node_id 只对签发它的那台 monitor 有效——换了 monitor（或对端数据被
+# 重置）却留着旧身份，节点会一直 401「节点签名校验失败」，控制台里永远看不到
+# 这台机器，本脚本却一路报成功（2026-09-22 踩过）。目标变了就清掉，让它重新入网。
+# ============================================================
+if [ -f "${STATE_DIR}/node.id" ]; then
+  if [ -n "$prev_monitor_url" ] && [ "$prev_monitor_url" != "$ZHIWEI_MONITOR_URL" ]; then
+    log "monitor 由 ${prev_monitor_url} 换成 ${ZHIWEI_MONITOR_URL}，清掉旧节点身份以便重新入网"
+    rm -f "${STATE_DIR}/node.id" "${STATE_DIR}/signing.key" \
+          "${STATE_DIR}/ops.pub" "${STATE_DIR}/ca.crt.pem"
+    identity_state="fresh"
+  else
+    log "本机已有节点身份（保留 ${STATE_DIR}/node.id）"
+    log "  若控制台里看不到它，多半是这个身份不属于 ${ZHIWEI_MONITOR_URL}："
+    log "  rm -rf ${STATE_DIR} 后重跑本脚本即可重新入网"
+    identity_state="kept"
+  fi
+fi
+
+# ============================================================
 # 启动 / 重启
 # ============================================================
 systemctl daemon-reload
@@ -259,7 +295,33 @@ else
   fi
 fi
 
-log "✓ 安装完成"
+# ============================================================
+# 确认真的入网了：脚本跑通 ≠ 节点入网。
+# 服务没起来、令牌被撤 / 过期、旧身份与当前 monitor 对不上，都会让节点安静地
+# 留在控制台外面，而脚本这一路全是「成功」提示（2026-09-22 的教训）。
+# 入网成功的凭据是节点自己写下的 <state>/node.id；但沿用旧身份时这个文件本来
+# 就在，它证明不了「当前 monitor 认这台机器」——那种情况去看日志里的 401。
+# ============================================================
+i=0
+while [ "$i" -lt 10 ] && [ ! -s "${STATE_DIR}/node.id" ]; do
+  sleep 1
+  i=$((i + 1))
+done
+
+if [ "$identity_state" = "kept" ]; then
+  log "✓ 安装完成，沿用本机已有身份 node_id=$(cat "${STATE_DIR}/node.id" 2>/dev/null)，未重新入网"
+  if journalctl -u "${SERVICE_NAME}" --since '-2min' --no-pager 2>/dev/null \
+     | grep -q '节点签名校验失败'; then
+    log "! 但这个身份不被 ${ZHIWEI_MONITOR_URL} 认可（401 节点签名校验失败）——"
+    log "  控制台里看不到这台机器就是这个原因：rm -rf ${STATE_DIR} 后重跑本脚本"
+  fi
+elif [ -s "${STATE_DIR}/node.id" ]; then
+  log "✓ 安装完成，节点已入网 node_id=$(cat "${STATE_DIR}/node.id")"
+else
+  log "! 安装完成，但节点还没入网（${STATE_DIR}/node.id 未生成）——别当成装好了"
+  log "  常见原因: 服务没起来 / 入网令牌失效 / 旧身份与当前 monitor 对不上"
+  log "  查日志:   journalctl -u ${SERVICE_NAME} -n 50 --no-pager"
+fi
 log "  二进制  ${INSTALL_DIR}/${BIN_NAME} ${pkg_version}"
 log "  env     ${ENV_FILE}"
 log "  unit    ${UNIT_FILE}"
