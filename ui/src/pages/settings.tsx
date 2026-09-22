@@ -10,20 +10,27 @@ import {
   EyeOff,
   Info,
   KeyRound,
+  PlugZap,
   Plus,
   ShieldCheck,
   Trash2,
 } from "lucide-react";
 import {
+  aiTokens,
   alertsApi,
+  enrollTokens,
   getToken,
   setToken,
   retentionApi,
   settingsApi,
+  type AiTokenMeta,
   type AlertRule,
+  type EnrollTokenMeta,
   type NotifyChannel,
 } from "@/api";
 import { NewRuleButton, RulesTable } from "@/components/alert-rules";
+import { AiTokenDialog } from "@/components/ai-token-dialog";
+import { EnrollTokenDialog } from "@/components/enroll-token-dialog";
 import { DotBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
@@ -41,11 +48,13 @@ export function Settings() {
   const { t } = useTranslation();
   return (
     <div className="space-y-4 md:space-y-6">
+      <EnrollTokensSection />
       <CaSection />
       <CredentialSection />
       <AlertRulesSection />
       <ChannelsSection />
       <AiSection />
+      <AiTokensSection />
       <CollectSection />
       <UiSection />
       <p className="text-xs text-ink-400">{t("settings.caWarn")}</p>
@@ -694,6 +703,340 @@ function AiSection() {
         </div>
       </CardBody>
     </Card>
+  );
+}
+
+/**
+ * 入网令牌（enroll-tokens）—— 给目标机器的一次性 `curl | bash` 命令。
+ *
+ * 列出当前还没过期的入网令牌元信息（**不**含明文 token 字符串）；
+ * 长期有效的来自 `ZHIWEI_BOOTSTRAP_TOKEN` 环境变量，单独标 `permanent`。
+ */
+function EnrollTokensSection() {
+  const { t } = useTranslation();
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [dialogOpen, setDialogOpen] = React.useState(false);
+  const [pendingRevoke, setPendingRevoke] = React.useState<EnrollTokenMeta | null>(
+    null,
+  );
+
+  const q = useQuery({
+    queryKey: ["enroll-tokens"],
+    queryFn: enrollTokens.list,
+    // 入网操作很罕见，挂着就行，不主动重试
+    staleTime: 30_000,
+  });
+
+  const invalidate = () =>
+    void qc.invalidateQueries({ queryKey: ["enroll-tokens"] });
+
+  const revoke = useMutation({
+    mutationFn: (id: string) => enrollTokens.revoke(id),
+    onSuccess: () => {
+      toast.push("success", t("settings.enrollTokenRevoked"));
+      setPendingRevoke(null);
+      invalidate();
+    },
+    onError: (e) => toast.push("error", t(friendlyError(e))),
+  });
+
+  const tokens = q.data?.tokens ?? [];
+
+  return (
+    <Card>
+      <CardHeader
+        icon={<PlugZap className="w-5 h-5 text-brand-600" aria-hidden="true" />}
+        title={t("settings.enrollTokensTitle")}
+        description={t("settings.enrollTokensSubtitle")}
+        action={
+          <>
+            <DotBadge tone="neutral">{tokens.length}</DotBadge>
+            <Button size="sm" onClick={() => setDialogOpen(true)}>
+              <Plus className="w-4 h-4" aria-hidden="true" />
+              {t("settings.enrollTokensCreate")}
+            </Button>
+          </>
+        }
+      />
+      <CardBody compact className="space-y-4">
+        {q.isError ? (
+          <ErrorState
+            compact
+            message={t(friendlyError(q.error))}
+            onRetry={() => void q.refetch()}
+            retrying={q.isFetching}
+          />
+        ) : q.isLoading ? (
+          <Skeleton className="h-20 w-full" />
+        ) : tokens.length === 0 ? (
+          <EmptyState
+            title={t("settings.enrollTokensEmpty")}
+            description={t("settings.enrollTokensEmptyHint")}
+          />
+        ) : (
+          <div className="overflow-hidden rounded-lg border border-surface-3 dark:border-ink-700">
+            <Table>
+              <THead>
+                <tr>
+                  <Th>{t("settings.enrollTokenColLabel")}</Th>
+                  <Th>{t("settings.enrollTokenColKind")}</Th>
+                  <Th>{t("settings.enrollTokenColExpires")}</Th>
+                  <Th align="right">{t("alerts.colActions")}</Th>
+                </tr>
+              </THead>
+              <TBody>
+                {tokens.map((tok) => (
+                  <Tr key={tok.id}>
+                    <Td>
+                      <div className="text-sm font-medium text-ink-900 dark:text-surface-0">
+                        {tok.label || (
+                          <span className="text-ink-400">—</span>
+                        )}
+                      </div>
+                      <div className="text-xs tabular-nums text-ink-400">
+                        {tok.id}
+                      </div>
+                    </Td>
+                    <Td>
+                      {tok.permanent ? (
+                        <DotBadge tone="success">
+                          {t("settings.enrollTokenPermanent")}
+                        </DotBadge>
+                      ) : (
+                        <DotBadge tone="neutral">
+                          {t("settings.enrollTokenEphemeral")}
+                        </DotBadge>
+                      )}
+                    </Td>
+                    <Td>
+                      <EnrollTokenExpiry meta={tok} />
+                    </Td>
+                    <Td align="right">
+                      <Button
+                        variant="secondary"
+                        size="icon"
+                        aria-label={t("alerts.delete")}
+                        onClick={() => setPendingRevoke(tok)}
+                      >
+                        <Trash2
+                          className="w-4 h-4 text-rose-600"
+                          aria-hidden="true"
+                        />
+                      </Button>
+                    </Td>
+                  </Tr>
+                ))}
+              </TBody>
+            </Table>
+          </div>
+        )}
+        <p className="text-xs text-ink-400">
+          {t("settings.enrollTokensNote")}
+        </p>
+      </CardBody>
+
+      <EnrollTokenDialog
+        open={dialogOpen}
+        onClose={() => setDialogOpen(false)}
+      />
+
+      <ConfirmDialog
+        open={!!pendingRevoke}
+        title={t("settings.enrollTokenRevokeTitle")}
+        message={t("settings.enrollTokenRevokeMessage")}
+        confirmLabel={t("settings.enrollTokenRevoke")}
+        cancelLabel={t("alerts.cancel")}
+        danger
+        loading={revoke.isPending}
+        onCancel={() => setPendingRevoke(null)}
+        onConfirm={() => pendingRevoke && revoke.mutate(pendingRevoke.id)}
+      />
+    </Card>
+  );
+}
+
+/** 入网令牌的过期时间展示：「长期」或「N 小时 / N 天后过期」 */
+function EnrollTokenExpiry({ meta }: { meta: EnrollTokenMeta }) {
+  const { t } = useTranslation();
+  if (meta.permanent) {
+    return (
+      <span className="text-sm text-emerald-600 dark:text-emerald-400">
+        {t("settings.enrollTokenPermanentExpiry")}
+      </span>
+    );
+  }
+  const remain = meta.expires_at_unix - Math.floor(Date.now() / 1000);
+  let label: string;
+  if (remain <= 0) label = t("time.secondsAgo", { n: 0 });
+  else if (remain < 3600) {
+    const m = Math.max(1, Math.ceil(remain / 60));
+    label = t("time.minutesAgo", { n: m });
+  } else if (remain < 86400) {
+    const h = Math.round(remain / 3600);
+    label = t("time.hoursAgo", { n: h });
+  } else {
+    const d = Math.round(remain / 86400);
+    label = t("time.daysAgo", { n: d });
+  }
+  return (
+    <span className="text-sm tabular-nums text-ink-700 dark:text-surface-4">
+      {t("settings.enrollTokenExpiresIn", { at: label })}
+    </span>
+  );
+}
+
+/**
+ * AI 令牌（ai-tokens）—— 外部 agent 读集群数据用的长期凭据。
+ *
+ * 撤销前必须 confirm：撤销当下所有持有这个 token 的 AI 客户端都会立刻 401。
+ * 明文 token **只在创建时**显示一次，本页只管列表。
+ */
+function AiTokensSection() {
+  const { t } = useTranslation();
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [dialogOpen, setDialogOpen] = React.useState(false);
+  const [pendingRevoke, setPendingRevoke] = React.useState<AiTokenMeta | null>(
+    null,
+  );
+
+  const q = useQuery({
+    queryKey: ["ai-tokens"],
+    queryFn: aiTokens.list,
+  });
+
+  const invalidate = () =>
+    void qc.invalidateQueries({ queryKey: ["ai-tokens"] });
+
+  const revoke = useMutation({
+    mutationFn: (id: string) => aiTokens.revoke(id),
+    onSuccess: () => {
+      toast.push("success", t("settings.aiTokenRevoked"));
+      setPendingRevoke(null);
+      invalidate();
+    },
+    onError: (e) => toast.push("error", t(friendlyError(e))),
+  });
+
+  const tokens = q.data?.tokens ?? [];
+
+  return (
+    <Card>
+      <CardHeader
+        icon={<Bot className="w-5 h-5 text-brand-600" aria-hidden="true" />}
+        title={t("settings.aiTokensTitle")}
+        description={t("settings.aiTokensSubtitle")}
+        action={
+          <>
+            <DotBadge tone="neutral">{tokens.length}</DotBadge>
+            <Button size="sm" onClick={() => setDialogOpen(true)}>
+              <Plus className="w-4 h-4" aria-hidden="true" />
+              {t("settings.aiTokensCreate")}
+            </Button>
+          </>
+        }
+      />
+      <CardBody compact className="space-y-4">
+        {q.isError ? (
+          <ErrorState
+            compact
+            message={t(friendlyError(q.error))}
+            onRetry={() => void q.refetch()}
+            retrying={q.isFetching}
+          />
+        ) : q.isLoading ? (
+          <Skeleton className="h-20 w-full" />
+        ) : tokens.length === 0 ? (
+          <EmptyState
+            title={t("settings.aiTokensEmpty")}
+            description={t("settings.aiTokensEmptyHint")}
+          />
+        ) : (
+          <div className="overflow-hidden rounded-lg border border-surface-3 dark:border-ink-700">
+            <Table>
+              <THead>
+                <tr>
+                  <Th>{t("settings.aiTokenColName")}</Th>
+                  <Th>{t("settings.aiTokenColCreated")}</Th>
+                  <Th>{t("settings.aiTokenColLastUsed")}</Th>
+                  <Th align="right">{t("alerts.colActions")}</Th>
+                </tr>
+              </THead>
+              <TBody>
+                {tokens.map((tok) => (
+                  <Tr key={tok.id}>
+                    <Td>
+                      <div className="text-sm font-medium text-ink-900 dark:text-surface-0">
+                        {tok.name}
+                      </div>
+                      <div className="text-xs tabular-nums text-ink-400">
+                        {tok.id}
+                      </div>
+                    </Td>
+                    <Td>
+                      <AiTokenTime tsUnixNano={tok.created_at_unix_nano} />
+                    </Td>
+                    <Td>
+                      {tok.last_used_at_unix_nano == null ? (
+                        <span className="text-sm text-ink-400">
+                          {t("time.never")}
+                        </span>
+                      ) : (
+                        <AiTokenTime tsUnixNano={tok.last_used_at_unix_nano} />
+                      )}
+                    </Td>
+                    <Td align="right">
+                      <Button
+                        variant="secondary"
+                        size="icon"
+                        aria-label={t("alerts.delete")}
+                        onClick={() => setPendingRevoke(tok)}
+                        disabled={tok.revoked_at_unix_nano != null}
+                      >
+                        <Trash2
+                          className="w-4 h-4 text-rose-600"
+                          aria-hidden="true"
+                        />
+                      </Button>
+                    </Td>
+                  </Tr>
+                ))}
+              </TBody>
+            </Table>
+          </div>
+        )}
+        <p className="text-xs text-ink-400">{t("settings.aiTokensNote")}</p>
+      </CardBody>
+
+      <AiTokenDialog
+        open={dialogOpen}
+        onClose={() => setDialogOpen(false)}
+      />
+
+      <ConfirmDialog
+        open={!!pendingRevoke}
+        title={t("settings.aiTokenRevokeTitle")}
+        message={t("settings.aiTokenRevokeMessage")}
+        confirmLabel={t("settings.aiTokenRevoke")}
+        cancelLabel={t("alerts.cancel")}
+        danger
+        loading={revoke.isPending}
+        onCancel={() => setPendingRevoke(null)}
+        onConfirm={() => pendingRevoke && revoke.mutate(pendingRevoke.id)}
+      />
+    </Card>
+  );
+}
+
+/** 纳秒时间戳统一转 ms 后用 formatTime 显示。 */
+function AiTokenTime({ tsUnixNano }: { tsUnixNano: number }) {
+  const { timezone } = usePrefs();
+  const ms = Math.floor(tsUnixNano / 1e6);
+  return (
+    <span className="text-sm tabular-nums text-ink-700 dark:text-surface-4">
+      {formatTime(ms, timezone)}
+    </span>
   );
 }
 

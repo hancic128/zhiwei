@@ -143,6 +143,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/exec", post(exec_handler))
         .route("/v1/commands/history", get(command_history_handler))
         .route("/healthz", get(healthz))
+        // 节点入网脚本。**故意不鉴权**：目标机器此刻还没有任何凭据，
+        // 真正的秘密是 enroll 命令里带过去的 ZHIWEI_BOOTSTRAP_TOKEN。
+        // 脚本本身不含任何秘密，公开它等于公开安装方式（同 Tailscale 等做法）。
+        .route("/install-node.sh", get(install_node_script_handler))
         // 兜底：控制台静态资源 + SPA 深链（未构建控制台时返回 404）
         .fallback(ui_handler)
         .with_state(state)
@@ -2871,7 +2875,7 @@ async fn create_ai_token_handler(
     use base64::Engine;
     let token = format!(
         "ait_{}",
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&buf)
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
     );
     let id = format!("ait-{}", &hex_encode(&rand_bytes_3())[..6]);
     let hash = sha256_hex(token.as_bytes());
@@ -3015,6 +3019,9 @@ async fn create_enroll_token_handler(
         "label": label,
         "created_at_unix": now_unix,
         "expires_at_unix": expires_at_unix,
+        // UI 的 EnrollTokenCreated 类型 extends EnrollTokenMeta，字段要对齐。
+        // 运行时生成的令牌永远是 ephemeral（长期那种来自环境变量，不在这条路径）。
+        "permanent": false,
         "monitor_url": monitor_url,
         "enroll_command": enroll_command,
     }))
@@ -3037,5 +3044,117 @@ async fn delete_enroll_token_handler(
         Json(serde_json::json!({ "ok": true, "id": id })).into_response()
     } else {
         err(StatusCode::NOT_FOUND, "id 不存在或已过期")
+    }
+}
+
+/// `GET /install-node.sh` —— 原样吐出节点入网脚本（`text/plain`）。
+///
+/// 不鉴权：目标机器执行 `curl ... | bash` 时还没有凭据；秘密在 enroll 命令的
+/// 环境变量里。脚本内容启动时已从 `assets/install-node.sh` 读进内存。
+async fn install_node_script_handler(State(state): State<AppState>) -> Response {
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        state.install_script.clone(),
+    )
+        .into_response()
+}
+
+#[cfg(test)]
+mod ai_token_auth_tests {
+    use super::*;
+
+    #[test]
+    fn sha256_hex_is_lowercase_and_stable() {
+        // 已知向量：空串的 SHA-256 是 e3b0c44298fc1c149afbf4c8996fb924...
+        let h = sha256_hex(b"");
+        assert_eq!(
+            h,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        // 同样输入两次结果一致
+        assert_eq!(h, sha256_hex(b""));
+    }
+
+    #[test]
+    fn sha256_hex_distinguishes_inputs() {
+        assert_ne!(sha256_hex(b"ait_a"), sha256_hex(b"ait_b"));
+    }
+
+    #[test]
+    fn sha256_hex_accepts_binary_bytes() {
+        // 0x00 与 UTF-8 NUL 字符串同字节序列，哈希应一致
+        let bytes = [0u8, 159, 146, 150];
+        assert_eq!(sha256_hex(&bytes), sha256_hex(&bytes[..]));
+    }
+}
+
+#[cfg(test)]
+mod enroll_token_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn add_with_label_records_metadata() {
+        let tokens = BootstrapTokens::default();
+        tokens
+            .add_with_label("zhi-bt-labeled".into(), 3600, "prod-web".into())
+            .await;
+        let metas = tokens.list_active();
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].label, "prod-web");
+        assert!(!metas[0].permanent);
+        // id 形如 boot-<6 hex>
+        assert!(metas[0].id.starts_with("boot-"), "got id={}", metas[0].id);
+    }
+
+    #[tokio::test]
+    async fn expired_tokens_drop_out_of_list_active() {
+        let tokens = BootstrapTokens::default();
+        tokens.add_with_label("zhi-bt-expired".into(), 0, String::new()).await;
+        // TTL=0 → expires_at == now，过滤条件是 `> now`，所以立刻不可见
+        assert!(tokens.list_active().is_empty());
+        assert!(!tokens.check("zhi-bt-expired"));
+    }
+
+    #[tokio::test]
+    async fn revoke_by_id_removes_the_token() {
+        let tokens = BootstrapTokens::default();
+        tokens.add_with_label("zhi-bt-a".into(), 3600, "a".into()).await;
+        tokens.add_with_label("zhi-bt-b".into(), 3600, "b".into()).await;
+        let target_id = tokens
+            .list_active()
+            .into_iter()
+            .find(|m| m.label == "a")
+            .expect("label a present")
+            .id;
+
+        assert!(tokens.revoke_by_id(&target_id));
+        // a 已被撤销，b 还在
+        assert!(!tokens.check("zhi-bt-a"));
+        assert!(tokens.check("zhi-bt-b"));
+
+        // 再撤一次同一个 id：找不到，返回 false
+        assert!(!tokens.revoke_by_id(&target_id));
+    }
+
+    #[tokio::test]
+    async fn revoke_unknown_id_is_a_noop() {
+        let tokens = BootstrapTokens::default();
+        tokens.add("zhi-bt-x".into(), 3600).await;
+        assert!(!tokens.revoke_by_id("boot-does-not-exist"));
+        assert!(tokens.check("zhi-bt-x"));
+    }
+
+    #[tokio::test]
+    async fn static_token_is_marked_permanent() {
+        let tokens = BootstrapTokens::default();
+        tokens.add_static("zhi-bt-static".into());
+        let metas = tokens.list_active();
+        assert_eq!(metas.len(), 1);
+        assert!(metas[0].permanent);
+        assert_eq!(metas[0].expires_at_unix, NEVER_EXPIRES);
     }
 }

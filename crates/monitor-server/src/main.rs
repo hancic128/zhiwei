@@ -306,9 +306,9 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // 加载帮助页 markdown。找不到/读不动就降级为空字符串——前端会显示
-    // 「帮助文档尚未打包」占位。
-    let help = load_help_markdown(&args.ui_dir).await;
+    // 帮助页与入网脚本都是 `include_str!` 内嵌的常量，这里只是挂到 state 上。
+    let help = load_help_markdown();
+    let install_script = INSTALL_NODE_SH.to_string();
     let state = AppState {
         storage,
         data_dir: data_dir.clone(),
@@ -329,6 +329,7 @@ async fn main() -> anyhow::Result<()> {
             "http://127.0.0.1:{}",
             listen.rsplit(':').next().unwrap_or("8443")
         ),
+        install_script,
     };
 
     if let Err(e) = alerts::seed_default_rules(&state).await {
@@ -437,6 +438,22 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+/// 内嵌的节点入网安装脚本。
+///
+/// 用 `include_str!` 编进二进制，而不是运行时读文件：Docker 运行镜像只拷
+/// `zhiwei-monitor` + `ui/dist`，不带 `crates/`，运行时路径根本不存在。
+/// 内嵌同时也让「单二进制 + 无外部资源」这个定位成立。
+const INSTALL_NODE_SH: &str = include_str!("../assets/install-node.sh");
+
+/// 内嵌的帮助页 markdown（理由同上）。
+const HELP_MD: &str = include_str!("../assets/help.md");
+
+/// 帮助页内容。`locale` 固定 zh-CN——v0.1.0 阶段不翻译帮助（spec 里明确），
+/// 等真的做翻译时再按 locale 返回不同 body。
+fn load_help_markdown() -> crate::state::HelpContent {
+    crate::state::HelpContent::new("zh-CN", HELP_MD)
+}
+
 #[cfg(test)]
 mod listen_tests {
     use super::listen_is_loopback;
@@ -472,27 +489,3 @@ mod listen_tests {
     }
 }
 
-/// 加载帮助页 markdown。优先看 `<ui_dir>/../assets/help.md`，再退到 `assets/help.md`。
-///
-/// 这里不 panic：内容缺失是合理状态（例如 dev 模式还没生成 UI 构建），
-/// UI 会展示「帮助文档尚未打包」。`locale` 固定 zh-CN——v0.1.0 阶段
-/// 不翻译帮助（spec 里明确），等真的做翻译时再加多语言解析。
-async fn load_help_markdown(ui_dir: &std::path::Path) -> crate::state::HelpContent {
-    // 候选路径（按优先级）：
-    //   1) `<ui_dir>/../assets/help.md`  — 与 ui/dist 平级（最常见的「仓库根」布局）
-    //   2) `<ui_dir>/help.md`             — ui/dist 内联（未来 UI 打包脚本塞进去）
-    //   3) `assets/help.md`               — 当前 crate 的相对路径
-    let candidates: [std::path::PathBuf; 3] = [
-        ui_dir.join("../assets/help.md"),
-        ui_dir.join("help.md"),
-        std::path::PathBuf::from("assets/help.md"),
-    ];
-    for path in &candidates {
-        if let Ok(s) = tokio::fs::read_to_string(path).await {
-            tracing::info!(path = %path.display(), "loaded help markdown");
-            return crate::state::HelpContent::new("zh-CN", s);
-        }
-    }
-    tracing::warn!("help markdown not found in any candidate path; UI will show placeholder");
-    crate::state::HelpContent::new("zh-CN", String::new())
-}

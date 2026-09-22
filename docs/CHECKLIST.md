@@ -78,7 +78,7 @@ artifacts 齐了只说明「看起来很规范」，说明不了「别人为什�
 - [ ] `docs/deployment.md`：自托管 / Docker / Kubernetes / systemd
 - [ ] `docs/operations.md`：日常运维 Runbook
 - [ ] `docs/security.md`：威胁模型 + 加固建议（基于 SECURITY.md）
-- [ ] `docs/api.md`：HTTP API + MCP 工具参考（auto-gen from proto）
+- [x] `docs/api.md`：HTTP API + MCP 工具参考（手写；`GET /v1/help` 之外暂无 auto-gen）
 - [ ] `docs/comparisons.md`：与 Prometheus / Grafana / Zabbix / Netdata 等对比
 - [ ] `docs/roadmap.md`：未来 6-12 个月方向
 - [ ] `docs/faq.md`：常见问题

@@ -462,3 +462,82 @@ zhiwei-node --state-dir /var/lib/zhiwei-node --interval 30
 - [ ] 已确认节点能连到 monitor 的地址（含防火墙 / 安全组）
 - [ ] `RUST_LOG` 已按需调整，避免生产环境刷 debug 日志
 - [ ] 固定入网令牌 ≥16 字符（建议 ≥32）；节点入网后删掉变量并重启更稳
+
+---
+
+## 8. 节点入网（托管平台，不用下载代码）
+
+早期文档里出现过 `./scripts/dev.sh start` 这类命令——那是**本地开发**用的。
+部署到 Render / Northflank 之后，用户手上没有仓库代码，也不该去翻构建日志。
+正确的入网路径是**在控制台里生成一条命令**：
+
+### 8.1 生成入网命令
+
+1. 打开控制台 →「设置 → 入网令牌」→「新建入网令牌」
+2. 选 TTL（1 小时 / 24 小时 / 7 天，默认 24 小时），可选填一个 label（例如 `prod-web-01`）
+3. 点「创建」，弹窗会给出整段**可直接复制**的命令：
+
+```sh
+curl -sSL https://<your-monitor>/install-node.sh \
+  | ZHIWEI_MONITOR_URL=https://<your-monitor> \
+    ZHIWEI_BOOTSTRAP_TOKEN=zhi-bt-xxxxxxxx \
+    bash -s
+```
+
+其中 `<your-monitor>` 由后端从请求的 `X-Forwarded-Proto` + `Host` 推断——
+托管平台边缘会注入这两个头，所以生成出来的就是平台签发的 HTTPS 域名，
+不需要在部署面板里额外配置。
+
+> 命令里的 token 是**一次性凭据**：TTL 到期后自动失效。
+> 也可以在「入网令牌」列表里手动撤销，撤销立即生效。
+
+### 8.2 在目标机器上执行
+
+要求 **root**（脚本要写 `/usr/local/bin` 和 systemd unit）：
+
+```sh
+curl -sSL https://<your-monitor>/install-node.sh | sudo -E bash -s
+```
+
+脚本做的事：
+
+1. 从 GitHub Release 下载 `zhiwei-<target>.tar.gz`（内含 `zhiwei-node` 与 `VERSION`）
+2. 校验 `.sha256`（有就校验，没有就跳过）
+3. 装二进制到 `/usr/local/bin/zhiwei-node`
+4. 写 `/etc/zhiwei-node.env`（mode `0600`，含 `ZHIWEI_MONITOR_URL` + `ZHIWEI_BOOTSTRAP_TOKEN`）
+5. 写 `/etc/systemd/system/zhiwei-node.service`，`systemctl enable --now`
+6. 节点随后出现在控制台「节点」页
+
+支持 `x86_64` / `aarch64` 的 Linux。**macOS 暂不支持**（没有 launchd 分支）。
+
+卸载：
+
+```sh
+curl -sSL https://<your-monitor>/install-node.sh | sudo bash -s -- --uninstall
+```
+
+保留 `/var/lib/zhiwei-node`（节点的签名私钥与 `node.id`）——
+重装不会换身份，也就不会在控制台里多出一个「幽灵节点」。
+要连数据一起清理，手动 `rm -rf /var/lib/zhiwei-node`。
+
+### 8.3 长期入网令牌（可选）
+
+如果不想每次生成一次性命令（例如内网里批量铺节点），可以设环境变量
+`ZHIWEI_BOOTSTRAP_TOKEN=<一个 >=16 字符的随机串>`：
+
+- 它在**整个进程生命周期内长期有效**（重启也不变，因为来自环境变量）
+- 在「入网令牌」列表里会标成 `长期`
+- **撤销方式**：删掉环境变量并重新部署
+
+> 一次性令牌和长期令牌共用同一个 `BootstrapTokens` 存储，
+> 但一次性令牌只活在内存里，重启即失效——这也是为什么清单里建议
+> 托管平台用一次性令牌：泄漏窗口更小。
+
+### 8.4 排查
+
+| 现象 | 原因 | 处理 |
+| --- | --- | --- |
+| 命令执行后 404 | release 还没产出该平台资产 | 确认 GitHub Release 里有 `zhiwei-<target>.tar.gz` |
+| `install-node.sh` 下载到 HTML | 反代把脚本路径也喂给了 SPA 兜底 | 确认 `/install-node.sh` 是 monitor 在服务（不是 CDN 覆盖） |
+| 节点没出现在控制台 | token 过期 / 已被撤销 / 网络不通 | 看 `/var/log/syslog` 里的 `zhiwei-node` 日志 |
+| 卸载后重装多出一个节点 | 手动删过 `/var/lib/zhiwei-node` | 那等于换身份，属预期；不删数据目录则不会 |

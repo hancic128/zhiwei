@@ -153,3 +153,101 @@ impl AiTokensRepo {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    /// 内存库 + 跑一遍迁移，拿到可用的 repo。
+    async fn repo() -> AiTokensRepo {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::migrations::run(&pool).await.expect("migrations");
+        AiTokensRepo::new(pool)
+    }
+
+    #[tokio::test]
+    async fn create_then_find_by_hash_round_trips() {
+        let r = repo().await;
+        let created = r
+            .create("ait-abc123", "deadbeef", "claude-home", 1_000)
+            .await
+            .unwrap();
+        assert_eq!(created.id, "ait-abc123");
+        assert!(created.is_active());
+        assert_eq!(created.last_used_at_unix_nano, None);
+
+        let found = r.find_active_by_hash("deadbeef").await.unwrap();
+        let found = found.expect("active row");
+        assert_eq!(found.name, "claude-home");
+    }
+
+    #[tokio::test]
+    async fn unknown_hash_yields_none() {
+        let r = repo().await;
+        assert!(r.find_active_by_hash("nope").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn revoke_makes_the_token_unfindable_by_hash() {
+        let r = repo().await;
+        r.create("ait-1", "hash-1", "n1", 1).await.unwrap();
+        assert!(r.find_active_by_hash("hash-1").await.unwrap().is_some());
+
+        assert!(r.revoke("ait-1", 2).await.unwrap());
+        // find_active_by_hash 只回未撤销的
+        assert!(r.find_active_by_hash("hash-1").await.unwrap().is_none());
+        // 但 find 仍能查到（审计需要看到 revoked_at）
+        let row = r.find("ait-1").await.unwrap().expect("row still present");
+        assert!(!row.is_active());
+        assert_eq!(row.revoked_at_unix_nano, Some(2));
+    }
+
+    #[tokio::test]
+    async fn revoking_twice_reports_false_the_second_time() {
+        let r = repo().await;
+        r.create("ait-2", "hash-2", "n2", 1).await.unwrap();
+        assert!(r.revoke("ait-2", 5).await.unwrap());
+        assert!(!r.revoke("ait-2", 6).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn revoking_unknown_id_reports_false() {
+        let r = repo().await;
+        assert!(!r.revoke("ait-nope", 1).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn touch_last_used_updates_the_row() {
+        let r = repo().await;
+        r.create("ait-3", "hash-3", "n3", 100).await.unwrap();
+        r.touch_last_used("ait-3", 200).await.unwrap();
+        let row = r.find("ait-3").await.unwrap().unwrap();
+        assert_eq!(row.last_used_at_unix_nano, Some(200));
+    }
+
+    #[tokio::test]
+    async fn list_all_includes_revoked_and_orders_newest_first() {
+        let r = repo().await;
+        r.create("ait-old", "h-old", "old", 10).await.unwrap();
+        r.create("ait-new", "h-new", "new", 20).await.unwrap();
+        r.revoke("ait-old", 30).await.unwrap();
+
+        let all = r.list_all().await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].id, "ait-new", "newest first");
+        assert_eq!(all[1].id, "ait-old");
+    }
+
+    #[tokio::test]
+    async fn duplicate_hash_is_rejected() {
+        let r = repo().await;
+        r.create("ait-x", "same-hash", "first", 1).await.unwrap();
+        let err = r.create("ait-y", "same-hash", "second", 2).await;
+        assert!(err.is_err(), "token_hash UNIQUE 应该拒绝重复");
+    }
+}

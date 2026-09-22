@@ -38,6 +38,9 @@ pub struct AppState {
     /// MCP server 内部调自己 REST 时用的 base URL，
     /// 形如 `http://127.0.0.1:8443`。见 `mcp.rs`。
     pub mcp_base_url: String,
+    /// 节点入网安装脚本正文（启动时从 `assets/install-node.sh` 加载，
+    /// 由 `GET /install-node.sh` 原样吐出）。
+    pub install_script: String,
 }
 
 /// Help markdown content (loaded from `assets/help.md` at startup).

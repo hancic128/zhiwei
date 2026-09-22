@@ -966,3 +966,81 @@ export const servicesApi = {
   results: (id: string, limit = 50) =>
     request<ProbeResultView[]>(`/v1/probes/${id}/results?limit=${limit}`),
 };
+
+// ---------- 入网令牌（运行时生成的临时 bootstrap 命令） ----------
+
+/** 后端 BootstrapTokens::list_active 返回的元信息 */
+export interface EnrollTokenMeta {
+  id: string;
+  label: string;
+  created_at_unix: number;
+  expires_at_unix: number;
+  /** 来自 ZHIWEI_BOOTSTRAP_TOKEN（永不失效），与 UI 临时生成的区分 */
+  permanent: boolean;
+}
+
+/** POST /v1/enroll-tokens 返回。多带 `enroll_command` 完整一行复制可用的命令。 */
+export interface EnrollTokenCreated extends EnrollTokenMeta {
+  /** 明文 token，形如 `zhi-bt-<hex>` */
+  token: string;
+  /** 后端从 X-Forwarded-Proto + Host 推断，UI 一般用不到 */
+  monitor_url: string;
+  /** 拼接好的整段安装命令 */
+  enroll_command: string;
+}
+
+export const enrollTokens = {
+  list: () =>
+    request<{ tokens: EnrollTokenMeta[] }>("/v1/enroll-tokens"),
+  create: (body: { ttl_secs?: number; label?: string }) =>
+    request<EnrollTokenCreated>("/v1/enroll-tokens", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  revoke: (id: string) =>
+    request<{ ok: boolean; id: string }>(
+      `/v1/enroll-tokens/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+    ),
+};
+
+// ---------- AI Token（外部 agent 用，长期） ----------
+
+export interface AiTokenMeta {
+  id: string;
+  name: string;
+  created_at_unix_nano: number;
+  last_used_at_unix_nano: number | null;
+  revoked_at_unix_nano: number | null;
+}
+
+export const aiTokens = {
+  list: () => request<{ tokens: AiTokenMeta[] }>("/v1/ai-tokens"),
+  /** 注意：明文 token **只这一次**返回——展示后必须立即让用户复制下来 */
+  create: (name: string) =>
+    request<{
+      id: string;
+      name: string;
+      token: string;
+      created_at_unix_nano: number;
+      warning: string;
+    }>("/v1/ai-tokens", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    }),
+  revoke: (id: string) =>
+    request<{ ok: boolean; id: string }>(
+      `/v1/ai-tokens/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+    ),
+};
+
+// ---------- 帮助页 markdown ----------
+
+export const help = {
+  /** locale 现在恒为 zh-CN（后端只准备了中文版），保留字段方便将来扩展 */
+  fetch: () =>
+    request<{ locale: string; body: string }>("/v1/help"),
+};

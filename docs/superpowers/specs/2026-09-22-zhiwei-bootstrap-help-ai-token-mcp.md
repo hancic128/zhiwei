@@ -227,3 +227,40 @@ zhiwei 还没实现,留 TODO 等真实端点落地):
 - AI token 的过期(只有撤销)
 - 节点批量入网 UI
 - 新二进制(在 monitor-server 内加 SSE route)
+
+---
+
+## 实现说明（与上述设计的偏差）
+
+以下偏离在设计评审后、实现过程中确定，理由记录在此：
+
+1. **帮助页真源**：设计稿写「`docs/HELP.md` 是真源，build 时同步到 assets」。
+   实际改为 **`crates/monitor-server/assets/help.md` 是唯一真源**——多一份
+   `docs/HELP.md` 只会漂移，而 build 期同步脚本在 zhiwei 当前（无 build.rs）
+   的形态下是额外的活动部件。内容直接 `include_str!` 进二进制。
+
+2. **资源内嵌而非运行时读文件**：设计稿按「启动时读 `<ui_dir>/../assets/`」写。
+   实际改为 `include_str!`。原因：Dockerfile 的运行镜像只拷
+   `zhiwei-monitor` + `ui/dist`，不带 `crates/`，运行时按路径找必然是空的。
+   内嵌同时让「单二进制、无外部资源」这个定位成立。
+
+3. **入网脚本资产名**：设计稿假设新增 `zhiwei-node-<ver>-<triple>.tar.gz`。
+   实际改为复用现有 release.yml 产出的 `zhiwei-<triple>.tar.gz`
+   （内含 `zhiwei-node` + `zhiwei-monitor` + `VERSION`）。理由是零流水线改动、
+   对已发布的 tag 也生效；代价是下载包略大（多一个 monitor 二进制）。
+
+4. **`GET /install-node.sh` 不鉴权**：设计稿未提。目标机器执行
+   `curl | bash` 时还没有任何凭据，真正的秘密是 enroll 命令里带过去的
+   bootstrap token。脚本本身不含秘密，公开它等于公开安装方式（Tailscale 等同做法）。
+
+5. **MCP `get_node` 实现**：后端没有 `GET /v1/nodes/:id` 端点。改为调
+   `GET /v1/nodes` 后按 id 客户端过滤；找不到时返回 `isError: true`。
+
+6. **MCP `list_alerts` 无 limit**：后端 `alerts_handler` 不接受 `limit`
+   （固定「全部活跃 + 最近 50 条已解决」）。工具 schema 里去掉该参数，
+   避免给出「能翻页」的错觉。
+
+7. **MCP 传输**：只实现 `POST /mcp/sse`（同步返回 SSE 事件）。
+   `GET /mcp/sse`（服务端主动推送）留 TODO——本次所有工具都是短操作。
+
+8. **迁移编号**：AI token 表落在 **012**（设计稿未指定编号）。

@@ -2,11 +2,13 @@ import * as React from "react";
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useQuery } from "@tanstack/react-query";
-import { Server } from "lucide-react";
+import { Plus, Server } from "lucide-react";
 import { api, osLabel, primaryIp, trendApi, type NodeView } from "@/api";
+import { EnrollTokenDialog } from "@/components/enroll-token-dialog";
 import { LineChart } from "@/components/chart";
 import { StatCards, type StatCard } from "@/components/stat-cards";
 import { DotBadge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
 import { Segmented } from "@/components/ui/segmented";
 import {
@@ -72,6 +74,8 @@ export function Nodes() {
   const [page, setPage] = React.useState(1);
   const [pageSize, setPageSize] = React.useState(10);
   const [range, setRange] = React.useState<TimeRange>(() => presetRange("1h"));
+  /** 生成入网命令的弹窗——空状态点击按钮触发 */
+  const [enrollDialogOpen, setEnrollDialogOpen] = React.useState(false);
 
   const nodesQ = useQuery({ queryKey: ["nodes"], queryFn: api.nodes });
   const nodes: NodeView[] = nodesQ.data ?? [];
@@ -190,10 +194,27 @@ export function Nodes() {
   ];
 
   return (
+    <>
     <div className="space-y-4">
     <StatCards cards={cards} />
 
-    <NodesTrend range={range} onRange={setRange} />
+    {!nodesQ.isLoading && nodes.length === 0 && (
+      <div className="rounded-xl border border-dashed border-surface-3 dark:border-ink-700 bg-surface-0 dark:bg-ink-700 p-2">
+        <EmptyState
+          icon={<Server className="w-12 h-12" aria-hidden="true" />}
+          title={t("overview.topNodesEmpty")}
+          description={t("overview.topNodesEmptyHint")}
+          action={
+            <Button onClick={() => setEnrollDialogOpen(true)}>
+              <Plus className="w-4 h-4" aria-hidden="true" />
+              {t("dialog.createEnrollToken")}
+            </Button>
+          }
+        />
+      </div>
+    )}
+
+    {nodes.length > 0 && <NodesTrend range={range} onRange={setRange} />}
 
     <TableShell>
       <TableToolbar>
@@ -251,6 +272,12 @@ export function Nodes() {
           icon={<Server className="w-12 h-12" aria-hidden="true" />}
           title={t("nodes.empty")}
           description={t("nodes.emptyHint")}
+          action={
+            <Button onClick={() => setEnrollDialogOpen(true)}>
+              <Plus className="w-4 h-4" aria-hidden="true" />
+              {t("dialog.createEnrollToken")}
+            </Button>
+          }
         />
       ) : filtered.length === 0 ? (
         <SearchEmptyState
@@ -414,6 +441,12 @@ export function Nodes() {
       )}
     </TableShell>
     </div>
+
+    <EnrollTokenDialog
+      open={enrollDialogOpen}
+      onClose={() => setEnrollDialogOpen(false)}
+    />
+    </>
   );
 }
 

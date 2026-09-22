@@ -59,7 +59,7 @@ fn tools_list() -> Value {
             ),
             tool_def(
                 "get_node",
-                "获取单节点详情：host_info（操作系统/内核/CPU/内存）+ 最新一帧 telemetry。",
+                "获取单节点详情：host_info（操作系统/内核/CPU/内存）+ 最新指标。不存在则报错。",
                 json!({
                     "type": "object",
                     "properties": {
@@ -84,12 +84,10 @@ fn tools_list() -> Value {
             ),
             tool_def(
                 "list_alerts",
-                "列出告警（活跃 + 已解决，最近 N 条）。",
+                "列出告警：全部活跃 + 最近 50 条已解决（服务端固定窗口，不支持翻页）。",
                 json!({
                     "type": "object",
-                    "properties": {
-                        "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 50 }
-                    },
+                    "properties": {},
                     "additionalProperties": false,
                 }),
             ),
@@ -306,13 +304,10 @@ async fn call_tool_impl(
 
     let url_path = match name {
         "list_nodes" => "/v1/nodes".to_string(),
-        "get_node" => {
-            let node_id = arguments
-                .get("node_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("node_id required"))?;
-            format!("/v1/nodes/{node_id}")
-        }
+        // 注意：后端没有 `GET /v1/nodes/:id` 这个端点（只有 telemetry/series/
+        // containers/processes 四个子资源）。`/v1/nodes` 列表本身已经带
+        // host_info + 最新指标，所以「单节点详情」用列表 + 客户端过滤实现。
+        "get_node" => "/v1/nodes".to_string(),
         "get_telemetry" => {
             let node_id = arguments
                 .get("node_id")
@@ -324,13 +319,9 @@ async fn call_tool_impl(
                 .unwrap_or(100);
             format!("/v1/nodes/{node_id}/telemetry?limit={limit}")
         }
-        "list_alerts" => {
-            let limit = arguments
-                .get("limit")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(50);
-            format!("/v1/alerts?limit={limit}")
-        }
+        // 后端 alerts_handler 不接受 limit（固定返回活跃 + 最近 50 条已解决），
+        // 所以这里不加查询参数，避免给出「能翻页」的错觉。
+        "list_alerts" => "/v1/alerts".to_string(),
         "list_certs" => "/v1/cert-sources".to_string(),
         "list_containers" => {
             let node_id = arguments
@@ -359,12 +350,34 @@ async fn call_tool_impl(
     if !status.is_success() {
         anyhow::bail!("monitor API {status}: {body}");
     }
+
+    // get_node 走的是列表端点，这里按 id 过滤出一个节点。
+    // 找不到时明确报错，别让 AI 拿到整个列表还以为拿到了详情。
+    if name == "get_node" {
+        let node_id = arguments
+            .get("node_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("node_id required"))?;
+        let list: Value = serde_json::from_str(&body)
+            .map_err(|e| anyhow::anyhow!("nodes response not JSON: {e}"))?;
+        let found = list
+            .as_array()
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|n| n.get("id").and_then(|v| v.as_str()) == Some(node_id))
+            })
+            .cloned();
+        return match found {
+            Some(node) => Ok(serde_json::to_string_pretty(&node)?),
+            None => anyhow::bail!("node not found: {node_id}"),
+        };
+    }
     // 直接返回 JSON 字符串（pretty 一下方便 AI 解析）
     // body 在 unwrap_or 里被 move 进 Value::String，closure 里就拿不到了。
     // 先存一份 fallback 字符串。
     let body_owned = body;
     let v: Value = serde_json::from_str(&body_owned).unwrap_or(Value::String(body_owned.clone()));
-    Ok(serde_json::to_string_pretty(&v).unwrap_or_else(|_| body_owned))
+    Ok(serde_json::to_string_pretty(&v).unwrap_or(body_owned))
 }
 
 /// 把单个 JSON-RPC 响应包装成 SSE 事件流。
@@ -395,3 +408,69 @@ fn err_response(status: StatusCode, msg: impl Into<String>) -> Response {
         .into_response()
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tools_list_exposes_the_seven_read_tools() {
+        let v = tools_list();
+        let names: Vec<String> = v["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .map(|t| t["name"].as_str().unwrap_or_default().to_string())
+            .collect();
+        for expected in [
+            "list_nodes",
+            "get_node",
+            "get_telemetry",
+            "list_alerts",
+            "list_certs",
+            "list_containers",
+            "list_processes",
+        ] {
+            assert!(names.contains(&expected.to_string()), "missing {expected}");
+        }
+        assert_eq!(names.len(), 7, "unexpected tool count: {names:?}");
+    }
+
+    #[test]
+    fn every_tool_ships_a_json_schema_object() {
+        let v = tools_list();
+        for t in v["tools"].as_array().unwrap() {
+            let schema = &t["inputSchema"];
+            assert_eq!(schema["type"], "object", "tool {t:?} schema missing type");
+            assert!(t["description"].as_str().is_some());
+        }
+    }
+
+    #[test]
+    fn rpc_result_carries_id_and_result() {
+        let v = rpc_result(json!(7), json!({"ok": true}));
+        assert_eq!(v["jsonrpc"], "2.0");
+        assert_eq!(v["id"], 7);
+        assert_eq!(v["result"]["ok"], true);
+        assert!(v.get("error").is_none());
+    }
+
+    #[test]
+    fn rpc_error_carries_code_and_message() {
+        let v = rpc_error(Value::Null, -32601, "method not found: nope");
+        assert_eq!(v["jsonrpc"], "2.0");
+        assert_eq!(v["error"]["code"], -32601);
+        assert!(v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("method not found"));
+        assert!(v.get("result").is_none());
+    }
+
+    #[test]
+    fn server_info_reports_this_binary() {
+        let v = server_info();
+        assert_eq!(v["name"], "zhiwei-monitor");
+        assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
+    }
+}
