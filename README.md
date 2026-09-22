@@ -215,6 +215,17 @@ curl -fsSL https://raw.githubusercontent.com/hancic128/zhiwei/main/scripts/insta
 
 装 node-agent 是默认行为；装 monitor 加 `-s -- --bin monitor`。
 
+**国内服务器**（连不上 GitHub Releases / 托管平台）加一个 `ZHIWEI_BASE_URL` 即可走
+自建源，不需要改代码：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/hancic128/zhiwei/main/scripts/install.sh \
+  | ZHIWEI_BASE_URL=https://artifacts.hancic.site/releases/hancic128/zhiwei sh
+```
+
+节点入网同理（`install-node.sh` 也认这个变量）。完整方案见
+[docs/DEPLOY.md 第 9 节「国内 / 隔离网络部署」](./docs/DEPLOY.md#9-国内--隔离网络部署)。
+
 > 仓库目前是私有的——开源之前这条匿名 `curl` 走不通，需要
 > `export GITHUB_TOKEN=<PAT>`，或把仓库设为 public。详见
 > [docs/DEPLOY.md](./docs/DEPLOY.md#装二进制一行命令)。

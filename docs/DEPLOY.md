@@ -499,9 +499,13 @@ curl -sSL https://<your-monitor>/install-node.sh \
 curl -sSL https://<your-monitor>/install-node.sh | sudo -E bash -s
 ```
 
+> 国内机器或出网受限环境，另见[第 9 节「国内 / 隔离网络部署」](#9-国内--隔离网络部署)——
+> 需要额外带 `ZHIWEI_BASE_URL` 把下载换到自建源。
+
 脚本做的事：
 
-1. 从 GitHub Release 下载 `zhiwei-<target>.tar.gz`（内含 `zhiwei-node` 与 `VERSION`）
+1. 从 GitHub Release 下载 `zhiwei-<target>.tar.gz`（内含 `zhiwei-node` 与 `VERSION`）；
+   设了 `ZHIWEI_BASE_URL` 则改从自建源下载
 2. 校验 `.sha256`（有就校验，没有就跳过）
 3. 装二进制到 `/usr/local/bin/zhiwei-node`
 4. 写 `/etc/zhiwei-node.env`（mode `0600`，含 `ZHIWEI_MONITOR_URL` + `ZHIWEI_BOOTSTRAP_TOKEN`）
@@ -541,3 +545,98 @@ curl -sSL https://<your-monitor>/install-node.sh | sudo bash -s -- --uninstall
 | `install-node.sh` 下载到 HTML | 反代把脚本路径也喂给了 SPA 兜底 | 确认 `/install-node.sh` 是 monitor 在服务（不是 CDN 覆盖） |
 | 节点没出现在控制台 | token 过期 / 已被撤销 / 网络不通 | 看 `/var/log/syslog` 里的 `zhiwei-node` 日志 |
 | 卸载后重装多出一个节点 | 手动删过 `/var/lib/zhiwei-node` | 那等于换身份，属预期；不删数据目录则不会 |
+
+---
+
+## 9. 国内 / 隔离网络部署
+
+默认形态有两个隐含依赖，国内机器（或任何出网受限的机器）都不满足：
+
+| 依赖 | 默认值 | 国内实际体验 |
+| --- | --- | --- |
+| monitor 地址 | 托管平台域名（如 `zhiwei.onrender.com`） | 连不上 |
+| 二进制下载 | `github.com/.../releases/latest/download/...` | 数十 KB/s 到超时 |
+
+两处都可以换掉，**不需要改代码**，靠环境变量：
+
+1. **monitor 自建在国内主机**（Render / Northflank 那套是给公网用户用的）
+2. **下载源换成自建制品仓库**（`ZHIWEI_BASE_URL`）
+
+### 9.1 步骤一：在国内主机起 monitor
+
+任意一台国内 Linux 都能跑（SQLite，无外部依赖）。注意公网部署要给它一个域名，
+否则节点侧拿 HTTPS 会失败：
+
+```sh
+# 在国内主机 A 上
+curl -fsSL https://raw.githubusercontent.com/hancic128/zhiwei/main/scripts/install.sh \
+  | ZHIWEI_BIN=monitor \
+    ZHIWEI_BASE_URL=https://artifacts.hancic.site/releases/hancic128/zhiwei \
+    sh -s -- --version 0.1.0-alpha.2
+```
+
+> `install.sh` 在目标目录不可写时会自己 `sudo`，不需要手工加。
+> `ZHIWEI_BASE_URL` 同样适用（国内直连，不然 GitHub 拉二进制会很慢）。
+
+详细参数（数据目录、监听地址、admin token）见第 2 节。跑起来后控制台入口是
+`http://<A>:8081`（或 `ZHIWEI_LISTEN` 指定的地址）。
+
+> **国内机器起 monitor 的两个前提**：① 有公网 IP 或内网可达；② 走 HTTPS 需自备证书，
+> 或者用前置 nginx 终结 TLS（`ZHIWEI_PLAIN_HTTP=1` + 反代）。
+> 节点侧对 monitor 的地址只做 `https://` 前缀校验，不做 CA pinning（见第 4 节末），
+> 所以换成任何可信域名都行。
+
+### 9.2 步骤二：节点走自建下载源
+
+`install-node.sh` 支持 `ZHIWEI_BASE_URL`（与 `install.sh` 同一套语义）。国内机器执行
+控制台生成的入网命令时，多带一个变量即可：
+
+```sh
+curl -sSL https://zhiwei.<国内域名>/install-node.sh \
+  | ZHIWEI_BASE_URL=https://artifacts.hancic.site/releases/hancic128/zhiwei \
+    ZHIWEI_MONITOR_URL=https://zhiwei.<国内域名> \
+    ZHIWEI_BOOTSTRAP_TOKEN=zhi-bt-xxxxxxxx \
+    sudo -E bash -s
+```
+
+| 变量 | 作用 |
+| --- | --- |
+| `ZHIWEI_MONITOR_URL` | 入网目标，控制台生成时已经填好（国内 monitor 的域名） |
+| `ZHIWEI_BOOTSTRAP_TOKEN` | 一次性入网凭据，控制台生成时已经填好 |
+| `ZHIWEI_BASE_URL` | **要手动加**：把二进制下载从 GitHub 换成自建仓库 |
+| `ZHIWEI_VERSION` | 可选，指定版本（如 `0.1.0-alpha.2`）；不设则取 `latest/` |
+
+自建源的目录形状必须与 GitHub Release 一致：
+
+```
+<ZHIWEI_BASE_URL>/latest/<asset>            # 或
+<ZHIWEI_BASE_URL>/v<version>/<asset>
+```
+
+`hancic-artifacts` 由 zhiwei 的 release 工作流在每次打 tag 时自动同步，形状天然对齐。
+
+### 9.3 步骤三（可选）：长期令牌
+
+内网批量铺节点时，不想每次去控制台点生成，就设长期令牌：
+
+```sh
+# monitor 侧
+ZHIWEI_BOOTSTRAP_TOKEN=<>=32 字符随机串>
+
+# 节点侧
+curl -sSL https://zhiwei.<国内域名>/install-node.sh \
+  | ZHIWEI_BASE_URL=... \
+    ZHIWEI_MONITOR_URL=https://zhiwei.<国内域名> \
+    ZHIWEI_BOOTSTRAP_TOKEN=<同一个串> \
+    sudo -E bash -s
+```
+
+### 9.4 国内部署排查
+
+| 现象 | 原因 | 处理 |
+| --- | --- | --- |
+| `curl: (7) Failed to connect` 到 monitor | monitor 只在境外 | 按 9.1 在国内起一个 |
+| 下载卡住 / 数十 KB/s | 走了 GitHub Releases | 带上 `ZHIWEI_BASE_URL`（9.2） |
+| `下载失败: .../v1.2.3/...` | 自建源没同步该 tag | 确认 release 工作流的 artifacts job 成功，或去掉 `ZHIWEI_VERSION` 用 `latest` |
+| 节点能连 monitor 但控制台看不到 | 国内 monitor 的 `ZHIWEI_LISTEN` 绑了回环 | 见第 2 节，托管/公网场景要 `0.0.0.0:<port>` |
+| 入网命令里的域名是境外域名 | 生成命令时访问的是境外 monitor | 在国内 monitor 的控制台里重新生成 |

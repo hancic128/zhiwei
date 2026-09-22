@@ -136,7 +136,7 @@ export function EnrollTokenDialog({
             <pre
               className={cn(
                 "overflow-x-auto scrollbar-thin rounded-md",
-                "bg-surface-2 dark:bg-ink-700/60 px-3 py-2 pr-24",
+                "bg-surface-2 dark:bg-ink-700/60 px-3 py-2 pr-12",
                 "text-xs font-mono text-ink-700 dark:text-surface-4",
                 "whitespace-pre-wrap break-all",
               )}
@@ -146,13 +146,13 @@ export function EnrollTokenDialog({
             <Button
               variant="secondary"
               size="sm"
+              aria-label={t("dialog.copyCommand")}
               className="absolute top-2 right-2"
               onClick={() =>
                 copy(created.enroll_command, t("dialog.commandCopied"))
               }
             >
               <Copy className="w-4 h-4" aria-hidden="true" />
-              {t("dialog.copyCommand")}
             </Button>
           </div>
           <p className="text-xs text-ink-400">

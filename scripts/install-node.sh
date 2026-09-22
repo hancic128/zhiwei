@@ -32,6 +32,10 @@
 #   ZHIWEI_INSTALL_DIR       二进制目录（默认 /usr/local/bin）
 #   ZHIWEI_STATE_DIR         状态目录（默认 /var/lib/zhiwei-node）
 #   ZHIWEI_ENV_FILE          env 文件路径（默认 /etc/zhiwei-node.env）
+#   ZHIWEI_BASE_URL          自建下载源（同 install.sh 语义）。设了就不走 GitHub Releases。
+#                            已知可用值：
+#                              - https://artifacts.hancic.site/releases/hancic128/zhiwei
+#                                （hancic-artifacts 国内直连，由 CI 每次 tag 同步）
 
 set -euo pipefail
 umask 077
@@ -111,9 +115,19 @@ log "平台 ${target} / 版本 ${VERSION:-latest}"
 
 # ============================================================
 # 下载
+# 国内服务器 / 隔离网络可设 ZHIWEI_BASE_URL 走自建镜像；
+# 不设就走 GitHub Releases latest。
 # ============================================================
 asset="zhiwei-${target}.tar.gz"
-url="https://github.com/${REPO}/releases/latest/download/${asset}"
+if [ -n "${ZHIWEI_BASE_URL:-}" ]; then
+  if [ -n "${VERSION}" ]; then
+    url="${ZHIWEI_BASE_URL%/}/v${VERSION#v}/${asset}"
+  else
+    url="${ZHIWEI_BASE_URL%/}/latest/${asset}"
+  fi
+else
+  url="https://github.com/${REPO}/releases/latest/download/${asset}"
+fi
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT INT TERM
 

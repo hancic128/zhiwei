@@ -34,14 +34,19 @@ const THEME_SWATCH: Record<Theme, string> = {
   slate: "#475569",
 };
 
-/** 规范 7.16.6：气泡菜单列出**所有**可用页面视图（与侧边栏同一份清单） */
+/**
+ * 气泡菜单列出可用页面视图。
+ *
+ * 不含「设置」：设置是常驻入口（侧边栏固定可见），在悬浮气泡里重复
+ * 只会让「快捷控制」这组变浑浊——本人 2026-09-22 明确要求。
+ * 其余页面项与侧边栏保持同一份清单。
+ */
 const NAV_ITEMS = [
   { to: "/", key: "todo", icon: Inbox },
   { to: "/nodes", key: "nodes", icon: Server },
   { to: "/services", key: "services", icon: Activity },
   { to: "/containers", key: "containers", icon: Box },
   { to: "/certificates", key: "certificates", icon: ShieldCheck },
-  { to: "/settings", key: "settings", icon: Settings },
   { to: "/help", key: "help", icon: HelpCircle },
 ] as const;
 
