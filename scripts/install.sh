@@ -12,10 +12,17 @@
 #   ZHIWEI_INSTALL_DIR  /usr/local/bin      默认 /usr/local/bin；不可写时自动 sudo。
 #   ZHIWEI_LIBC         musl | gnu          Linux 专用，默认 musl（静态、不挑 glibc）。
 #   ZHIWEI_BASE_URL     自定义下载前缀     给镜像站 / 内网分发用；默认走 GitHub Release。
+#                       已知可用值：
+#                         - https://artifacts.hancic.site/releases/hancic128/zhiwei
+#                           （自建制品仓库，国内直连，由 CI 每次 tag 同步）
 #   GITHUB_TOKEN        私有仓库下载用      仓库公开后不需要。
 #
 # 例：
 #   ... | sh -s -- --bin monitor --version 0.1.0
+#
+# 例（走自建制品仓库，国内加速）：
+#   ZHIWEI_BASE_URL=https://artifacts.hancic.site/releases/hancic128/zhiwei \
+#     ... | sh -s -- --bin node --version latest
 
 set -eu
 
@@ -93,8 +100,9 @@ fetch() { # fetch <url> <dest>
 asset="zhiwei-${target}.tar.gz"
 if [ -n "${ZHIWEI_BASE_URL:-}" ]; then
   # 镜像站 / 内网分发：BASE_URL 是仓库根（不含 v<tag>），由本脚本拼
-  # latest/ 或 v<VERSION>/ 子路径。OSS 目录布局见
-  # https://github.com/hancic128/hancic-public-artifacts。
+  # latest/ 或 v<VERSION>/ 子路径。两种已知来源布局一致：
+  #   - 自建制品仓库 (artifacts.hancic.site/releases/hancic128/zhiwei/)
+  #   - 任意按 <owner>/<repo>/v<tag>/<file> 排的镜像（ghcr clone / 内部站点）
   if [ "$VERSION" = "latest" ]; then
     base="${ZHIWEI_BASE_URL%/}/latest"
   else

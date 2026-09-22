@@ -388,8 +388,8 @@ Linux 默认装 musl 静态版（不挑 glibc 版本，老发行版也能跑）�
 # 指定版本 / 目录 / 用动态链接版
 ... | sh -s -- --version 0.1.0 --dir ~/.local/bin --libc gnu
 
-# 走镜像站或内网分发
-ZHIWEI_BASE_URL=https://mirror.example.com/zhiwei ... | sh
+# 走自建制品仓库（国内加速，每次发版由 release.yml 自动同步）
+ZHIWEI_BASE_URL=https://artifacts.hancic.site/releases/hancic128/zhiwei ... | sh
 ```
 
 > **仓库现在是私有的**：匿名 `curl` 拿不到 raw 文件和 release 资产。开源前想用这条

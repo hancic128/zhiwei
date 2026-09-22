@@ -103,9 +103,9 @@ jobs:
             zhiwei-${{ matrix.target }}.tar.gz.sha256
           fail_on_unmatched_files: true
 
-      # 把二进制传给 mirror job（reusable workflow）— GitHub 限制 reusable
-      # workflow 只能在顶级 jobs.*.uses 引用，所以拆成独立 job + artifact 传递。
-      - name: Upload artifacts for COS mirror
+      # 把二进制传给 artifacts job（用 artifact 传递，避免每个 build job
+      # 重复跑上传逻辑；先做一个 matrix 内统一的命名空间）。
+      - name: Upload artifacts for hancic-artifacts mirror
         if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4
         with:
@@ -123,13 +123,22 @@ jobs:
             zhiwei-${{ matrix.target }}.tar.gz
             zhiwei-${{ matrix.target }}.tar.gz.sha256
 
-  # 同步 release 资产 + scripts 到阿里云 OSS，国内服务器脚本可稳定拉取。
-  # 注：
-  #   1. 公开仓库之间 GitHub 不让 reusable workflow 传 secret，所以本仓库直接跑
-  #   2. 腾讯云 COS 在本环境实测 10 KB/s（6MB 文件 6 分钟），不可用；阿里云 OSS 正常
-  # 本仓库配 OSS_ACCESS_KEY_ID / OSS_ACCESS_KEY_SECRET 两个 secret。
-  mirror:
-    name: Mirror release assets to OSS
+  # 同步 release 资产 + scripts 到自建制品仓库（hancic-artifacts，nginx WebDAV + HTTPS）。
+  # 目录形状与 GitHub Release 一致：
+  #   <prefix>/v<tag>/<file> + <prefix>/latest/<file>
+  # 所以用户只要把 install.sh 的 ZHIWEI_BASE_URL 设成下面那个域名
+  # 就能切到自建源，国内直连。
+  #
+  # 先 PUT 到 /upload/ 暂存、再 MOVE 到 /releases/：制品目录里只会出现
+  # 完整传完的文件。Destination 必须指向后端 :8888（MOVE 是后端 nginx
+  # 实际发起的，不能让它再去走 443 反代）。
+  #
+  # 本仓库配 3 个 secret（详见 zhiwei → README「发布 → GitHub Actions」）：
+  #   ARTIFACTS_HOST  = artifacts.hancic.site   （不带端口）
+  #   ARTIFACTS_USER  = artifacts-uploader
+  #   ARTIFACTS_PASS  = htpasswd 口令（从 /root/repos/secrets/hancic-artifacts.env 管道直传）
+  artifacts:
+    name: Mirror release assets to hancic-artifacts
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
@@ -151,37 +160,10 @@ jobs:
           rm -rf ./_artifacts
           ls -la *.tar.gz *.sha256 2>/dev/null | head -20
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install oss2
-        run: pip install oss2
-
-      - name: Upload artifacts to OSS
+      - name: Upload to hancic-artifacts
         env:
-          OSS_ENDPOINT:          https://oss-cn-beijing.aliyuncs.com
-          OSS_BUCKET:            hancic-public-artifacts
-          OSS_KEY_PREFIX:        hancic128/zhiwei
-          OSS_FILE_PATTERN:      'zhiwei-*.tar.gz zhiwei-*.tar.gz.sha256'
-          OSS_EXTRA_PATHS:       scripts
-          OSS_VERSION_TAG:       ${{ github.ref_name }}
-          OSS_INCLUDE_LATEST:    'true'
-          OSS_MAKE_PUBLIC:       'true'
-          OSS_ACCESS_KEY_ID:     ${{ secrets.OSS_ACCESS_KEY_ID }}
-          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
-        run: python .github/scripts/upload.py
-
-      # 再同步一份到 bj 制品仓库（自建 nginx WebDAV，国内直连）。
-      # 目录形状与 OSS 一致：<prefix>/v<tag>/<file> + <prefix>/latest/<file>，
-      # 所以用户只要换 ZHIWEI_BASE_URL 就能切到自建源：
-      #   ZHIWEI_BASE_URL=http://49.232.168.161:8888/releases/hancic128/zhiwei
-      # 先 PUT 到 /upload/ 暂存、再 MOVE 到 /releases/：制品目录里只会出现
-      # 完整传完的文件。
-      - name: Upload to bj artifacts
-        env:
-          HOST: ${{ secrets.ARTIFACTS_HOST }}
-          USER: ${{ secrets.ARTIFACTS_USER }}
+          HOST: ${{ secrets.ARTIFACTS_HOST }}                # artifacts.hancic.site
+          USER: ${{ secrets.ARTIFACTS_USER }}                # artifacts-uploader
           PASS: ${{ secrets.ARTIFACTS_PASS }}
         run: |
           set -euo pipefail
@@ -213,17 +195,23 @@ jobs:
           mapfile -t scripts < <(find scripts -maxdepth 1 -type f | sort)
           echo "待同步：${#files[@]} 个制品 + ${#scripts[@]} 个脚本"
 
+          # 解析出后端主机名（artifacts.hancic.site 默认就是它走 hostname 寻址）
+          backend_host="$HOST"
+          backend_port=8888
+
           for stage in "$tag" latest; do
             for f in "${files[@]}" "${scripts[@]}"; do
               target="$prefix/$stage/$f"
-              call -T "$f" "http://$HOST/upload/$target"
+              # 公开 PUT 走 HTTPS 入口
+              call -T "$f" "https://${HOST}/upload/$target"
+              # MOVE 的 Destination 走后端 :8888（MOVE 由后端 nginx 实际发起）
               call -X MOVE \
-                -H "Destination: http://$HOST/releases/$target" \
+                -H "Destination: http://${backend_host}:${backend_port}/releases/$target" \
                 -H "Overwrite: T" \
-                "http://$HOST/upload/$target"
+                "https://${HOST}/upload/$target"
             done
           done
 
-          echo "已同步 → http://$HOST/releases/$prefix/latest/"
+          echo "已同步 → https://${HOST}/releases/$prefix/latest/"
           echo -n "抽查 latest/ 制品："
-          call "http://$HOST/releases/$prefix/latest/$(basename "${files[0]}")" && echo ok
+          call "https://${HOST}/releases/$prefix/latest/$(basename "${files[0]}")" && echo ok
