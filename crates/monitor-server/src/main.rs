@@ -309,6 +309,16 @@ async fn main() -> anyhow::Result<()> {
     // 帮助页与入网脚本都是 `include_str!` 内嵌的常量，这里只是挂到 state 上。
     let help = load_help_markdown();
     let install_script = INSTALL_NODE_SH.to_string();
+
+    // 自建分发源（可选）：设了它，控制台生成的入网命令会自动带 `ZHIWEI_BASE_URL`，
+    // 节点不再从 GitHub Releases 拉二进制。国内 / 隔离网络部署用。
+    let node_base_url = std::env::var("ZHIWEI_NODE_BASE_URL")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    if let Some(u) = &node_base_url {
+        tracing::info!(%u, "入网命令将带 ZHIWEI_BASE_URL（节点走自建分发源）");
+    }
     let state = AppState {
         storage,
         data_dir: data_dir.clone(),
@@ -330,6 +340,7 @@ async fn main() -> anyhow::Result<()> {
             listen.rsplit(':').next().unwrap_or("8443")
         ),
         install_script,
+        node_base_url,
     };
 
     if let Err(e) = alerts::seed_default_rules(&state).await {
@@ -443,7 +454,12 @@ async fn main() -> anyhow::Result<()> {
 /// 用 `include_str!` 编进二进制，而不是运行时读文件：Docker 运行镜像只拷
 /// `zhiwei-monitor` + `ui/dist`，不带 `crates/`，运行时路径根本不存在。
 /// 内嵌同时也让「单二进制 + 无外部资源」这个定位成立。
-const INSTALL_NODE_SH: &str = include_str!("../assets/install-node.sh");
+///
+/// 路径直接指向仓库根的 `scripts/install-node.sh`，**不在这里留副本**：
+/// 之前 `assets/` 下有一份拷贝，改了 `scripts/` 那份忘了同步，线上
+/// `GET /install-node.sh` 吐的还是旧脚本（国内 `ZHIWEI_BASE_URL` 因此不生效）。
+/// 单一来源后不存在漂移可能；代价是 Dockerfile 构建阶段要 `COPY scripts/`。
+const INSTALL_NODE_SH: &str = include_str!("../../../scripts/install-node.sh");
 
 /// 内嵌的帮助页 markdown（理由同上）。
 const HELP_MD: &str = include_str!("../assets/help.md");

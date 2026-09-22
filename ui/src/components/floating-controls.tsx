@@ -247,10 +247,12 @@ export function FloatingControls() {
         </div>
 
         {/* 主按钮：brand 实底，展开时图标旋转 45°。
-            图标用齿轮：折叠态下它就是「设置样式」的那个入口。 */}
+            图标用齿轮（本人指定保留），但它**不是**「设置页入口」——
+            语义是「展开快捷控制」，相应地 aria-label 也不叫设置，
+            免得这组里出现第二个叫「设置」的按钮（设置是侧边栏的常驻项）。 */}
         <button
           type="button"
-          aria-label={t("nav.settings")}
+          aria-label={t("action.quickControls")}
           aria-expanded={open}
           onClick={() => setOpen((v) => !v)}
           className={cn(

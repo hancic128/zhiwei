@@ -38,9 +38,16 @@ pub struct AppState {
     /// MCP server 内部调自己 REST 时用的 base URL，
     /// 形如 `http://127.0.0.1:8443`。见 `mcp.rs`。
     pub mcp_base_url: String,
-    /// 节点入网安装脚本正文（启动时从 `assets/install-node.sh` 加载，
+    /// 节点入网安装脚本正文（编译期从 `scripts/install-node.sh` 内嵌，
     /// 由 `GET /install-node.sh` 原样吐出）。
     pub install_script: String,
+    /// 节点二进制的自建分发源（可选，来自 `ZHIWEI_NODE_BASE_URL`）。
+    ///
+    /// 设了它，控制台生成的入网命令会自动多带一行 `ZHIWEI_BASE_URL=<此值>`，
+    /// 节点就不必从 GitHub Releases 拉二进制。国内 / 隔离网络部署用这个：
+    /// 在自己的 monitor 上设一次，之后所有入网命令天然走自建源，
+    /// 不需要让每个执行者记住多带一个变量。
+    pub node_base_url: Option<String>,
 }
 
 /// Help markdown content (loaded from `assets/help.md` at startup).

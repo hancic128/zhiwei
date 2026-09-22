@@ -51,12 +51,6 @@ export function LoginPage({ onSubmit }: { onSubmit: () => void }) {
           <h1 className="text-base font-semibold text-ink-900 dark:text-surface-0 text-center">
             {t("login.title")}
           </h1>
-          <p className="text-sm text-ink-500 text-center mt-1">
-            {t("login.hint")}
-          </p>
-          <code className="mt-2 block text-center text-xs text-ink-400">
-            cat &lt;data-dir&gt;/admin.token
-          </code>
 
           <form className="space-y-4 mt-6" onSubmit={submit}>
             <div>
@@ -80,10 +74,6 @@ export function LoginPage({ onSubmit }: { onSubmit: () => void }) {
               {submitting ? t("login.verifying") : t("login.submit")}
             </Button>
           </form>
-
-          <p className="text-xs text-ink-400 text-center mt-6">
-            {t("login.footnote")}
-          </p>
         </div>
       </div>
     </div>

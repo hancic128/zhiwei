@@ -42,7 +42,8 @@
     "results": "View results",
     "add": "Add",
     "copy": "Copy",
-    "appearance": "Appearance & preferences"
+    "appearance": "Appearance & preferences",
+    "quickControls": "Quick controls"
   },
   "confirm": {
     "logoutTitle": "Sign out",
@@ -88,10 +89,8 @@
   },
   "login": {
     "title": "Admin token",
-    "hint": "Printed when the monitor first starts; also readable from the data directory, or set ZHIWEI_ADMIN_TOKEN in your deploy panel:",
     "placeholder": "Paste admin token",
     "submit": "Enter console",
-    "footnote": "Nodes authenticate with Ed25519 request signatures — unrelated to this token.",
     "required": "Please enter a token",
     "verifying": "Verifying...",
     "invalid": "Invalid token — please check and try again"

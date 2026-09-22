@@ -3001,8 +3001,14 @@ async fn create_enroll_token_handler(
         .unwrap_or("localhost:8443");
     let monitor_url = format!("{scheme}://{host}");
 
+    // 设了 ZHIWEI_NODE_BASE_URL（国内 / 隔离网络的自建分发源）时，命令里自动
+    // 多带一行，执行者不必自己记得加。没设就保持原样（走 GitHub Releases）。
+    let base_url_line = match state.node_base_url.as_deref() {
+        Some(u) => format!("    ZHIWEI_BASE_URL={u} \\\n"),
+        None => String::new(),
+    };
     let enroll_command = format!(
-        "curl -sSL {monitor_url}/install-node.sh \\\n  | ZHIWEI_MONITOR_URL={monitor_url} \\\n    ZHIWEI_BOOTSTRAP_TOKEN={token} \\\n    bash -s"
+        "curl -sSL {monitor_url}/install-node.sh \\\n  | ZHIWEI_MONITOR_URL={monitor_url} \\\n    ZHIWEI_BOOTSTRAP_TOKEN={token} \\\n{base_url_line}    bash -s"
     );
 
     // 从 list_active 找到刚加的那条 id（保证 id 与服务端一致）。
@@ -3050,7 +3056,8 @@ async fn delete_enroll_token_handler(
 /// `GET /install-node.sh` —— 原样吐出节点入网脚本（`text/plain`）。
 ///
 /// 不鉴权：目标机器执行 `curl ... | bash` 时还没有凭据；秘密在 enroll 命令的
-/// 环境变量里。脚本内容启动时已从 `assets/install-node.sh` 读进内存。
+/// 环境变量里。脚本在**编译期**从仓库根的 `scripts/install-node.sh` 内嵌
+/// （见 `main.rs` 的 `INSTALL_NODE_SH`），启动时挂到 state 上。
 async fn install_node_script_handler(State(state): State<AppState>) -> Response {
     (
         StatusCode::OK,

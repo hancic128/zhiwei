@@ -97,6 +97,7 @@ docker build --platform linux/amd64 -t zhiwei-monitor .
 | 命令行 | `--listen` | 同 `ZHIWEI_LISTEN` |
 | 配置文件 | `data_dir` / `listen` / `server_cert_cn` | 见 `config/monitor.toml.example` |
 | 命令行 / 环境变量 | `--plain-http` / `ZHIWEI_PLAIN_HTTP` | 明文 HTTP 监听，TLS 交给前置边缘（托管平台用）；自建不要开 |
+| 环境变量 | `ZHIWEI_NODE_BASE_URL` | 节点二进制的自建分发源。设了它，控制台生成的入网命令会自动带 `ZHIWEI_BASE_URL`，节点不再从 GitHub 拉包（国内 / 隔离网络用，见第 9 节） |
 
 优先级：命令行 > 环境变量 > 配置文件 > 默认值。
 
@@ -586,10 +587,30 @@ curl -fsSL https://raw.githubusercontent.com/hancic128/zhiwei/main/scripts/insta
 > 节点侧对 monitor 的地址只做 `https://` 前缀校验，不做 CA pinning（见第 4 节末），
 > 所以换成任何可信域名都行。
 
-### 9.2 步骤二：节点走自建下载源
+### 9.2 步骤二：把自建下载源配在 monitor 上（推荐）
 
-`install-node.sh` 支持 `ZHIWEI_BASE_URL`（与 `install.sh` 同一套语义）。国内机器执行
-控制台生成的入网命令时，多带一个变量即可：
+`install-node.sh` 支持 `ZHIWEI_BASE_URL`（与 `install.sh` 同一套语义），把节点
+二进制的下载从 GitHub 换到自建仓库。
+
+**在 monitor 上设一次 `ZHIWEI_NODE_BASE_URL`**，之后控制台生成的每条入网命令
+都会自动带上这一行——执行者不用记得加：
+
+```sh
+# monitor 侧（9.1 那台）
+ZHIWEI_NODE_BASE_URL=https://artifacts.hancic.site/releases/hancic128/zhiwei
+```
+
+配好后控制台生成的命令长这样（多了一行，其余不变）：
+
+```sh
+curl -sSL https://zhiwei.<国内域名>/install-node.sh \
+  | ZHIWEI_MONITOR_URL=https://zhiwei.<国内域名> \
+    ZHIWEI_BOOTSTRAP_TOKEN=zhi-bt-xxxxxxxx \
+    ZHIWEI_BASE_URL=https://artifacts.hancic.site/releases/hancic128/zhiwei \
+    sudo -E bash -s
+```
+
+不用这个变量的场合（临时 / 单机）也可以手工加：
 
 ```sh
 curl -sSL https://zhiwei.<国内域名>/install-node.sh \
@@ -603,7 +624,7 @@ curl -sSL https://zhiwei.<国内域名>/install-node.sh \
 | --- | --- |
 | `ZHIWEI_MONITOR_URL` | 入网目标，控制台生成时已经填好（国内 monitor 的域名） |
 | `ZHIWEI_BOOTSTRAP_TOKEN` | 一次性入网凭据，控制台生成时已经填好 |
-| `ZHIWEI_BASE_URL` | **要手动加**：把二进制下载从 GitHub 换成自建仓库 |
+| `ZHIWEI_BASE_URL` | 二进制下载源。monitor 设了 `ZHIWEI_NODE_BASE_URL` 就自动带上；否则手工加 |
 | `ZHIWEI_VERSION` | 可选，指定版本（如 `0.1.0-alpha.2`）；不设则取 `latest/` |
 
 自建源的目录形状必须与 GitHub Release 一致：
@@ -614,6 +635,10 @@ curl -sSL https://zhiwei.<国内域名>/install-node.sh \
 ```
 
 `hancic-artifacts` 由 zhiwei 的 release 工作流在每次打 tag 时自动同步，形状天然对齐。
+
+> **改了 `install-node.sh` 必须重新构建 monitor**：脚本是编译期内嵌进二进制的
+> （`include_str!`），`GET /install-node.sh` 吐的永远是构建时那一份。
+> 单一来源在仓库根的 `scripts/install-node.sh`，不存在副本漂移。
 
 ### 9.3 步骤三（可选）：长期令牌
 

@@ -50,6 +50,9 @@ RUN mkdir -p crates/common/src crates/proto/src crates/storage/src \
 # which can be *older* than the stub files cargo fingerprinted in layer 1 —
 # cargo would then consider the crate unchanged and reuse the stub artifacts.
 COPY crates/ crates/
+# install-node.sh 由 monitor 用 include_str! 编进二进制（单一来源，不在
+# assets/ 留副本），构建阶段必须能读到仓库根的这份。
+COPY scripts/install-node.sh scripts/install-node.sh
 RUN find crates -name '*.rs' -exec touch {} + \
     && cargo build --release --bin zhiwei-monitor
 

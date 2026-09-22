@@ -42,7 +42,8 @@
     "results": "查看结果",
     "add": "添加",
     "copy": "复制",
-    "appearance": "外观与偏好"
+    "appearance": "外观与偏好",
+    "quickControls": "快捷控制"
   },
   "confirm": {
     "logoutTitle": "退出登录",
@@ -88,10 +89,8 @@
   },
   "login": {
     "title": "管理员令牌",
-    "hint": "在 monitor 首次启动时打印；也可从数据目录读取，或在部署面板设 ZHIWEI_ADMIN_TOKEN：",
     "placeholder": "粘贴 admin token",
     "submit": "进入控制台",
-    "footnote": "节点使用 Ed25519 请求签名接入，与此处的令牌互不影响。",
     "required": "请输入令牌",
     "verifying": "验证中...",
     "invalid": "令牌无效，请核对后重新输入"
