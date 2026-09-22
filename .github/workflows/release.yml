@@ -173,13 +173,22 @@ jobs:
           # 写配额 30r/m（burst 20），一次发版 20–40 次写请求，偶尔会撞 429。
           # 这里自己退避重试，不用 curl 的 --retry-all-errors —— 那个选项要
           # curl ≥ 7.71，老机器上直接报 unknown option。
+          #
+          # curl 自己失败（连接被重置、超时）时 -w 打印的就是 000，所以赋值而不是
+          # 追加（`|| echo 000` 会得到 "000000"，且 000 落进「不重试」分支，
+          # 一次网络抖动就整条发版红掉）。000 必须和 429/5xx 一样重试。
           call() {
             local attempt code
             for attempt in 1 2 3 4 5; do
-              code=$(curl -sS -o /dev/null -w '%{http_code}' -u "$USER:$PASS" "$@" || echo 000)
+              # stderr 不重定向：curl 的报错（如 "(56) Failure when receiving data
+              # from the peer"）跟着日志走，排查时看得到。
+              # --speed-* 兜住「连接还在、对端不再收数据」的假死：2 分钟内平均速率
+              # 低于 1 KiB/s 就自己断开走重试，别把 job 挂到 6 小时上限。
+              code=$(curl -sS -o /dev/null -w '%{http_code}' --speed-limit 1024 --speed-time 120 -u "$USER:$PASS" "$@") || code=000
+              code=${code:-000}
               case "$code" in
                 2*) return 0 ;;
-                429|5*)
+                429|5*|000)
                   echo "  [第 $attempt 次] HTTP $code，等 $((attempt * 3))s 重试" >&2
                   sleep $((attempt * 3)) ;;
                 *)
