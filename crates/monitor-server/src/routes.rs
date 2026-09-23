@@ -2252,9 +2252,16 @@ async fn create_channel_handler(
         name: String,
         #[serde(default = "default_kind")]
         kind: String,
+        #[serde(default)]
         url: String,
         #[serde(default)]
         secret: String,
+        #[serde(default)]
+        app_id: String,
+        #[serde(default)]
+        receive_id: String,
+        #[serde(default)]
+        receive_id_type: String,
         #[serde(default = "default_sev")]
         min_severity: String,
     }
@@ -2269,18 +2276,21 @@ async fn create_channel_handler(
         Ok(b) => b,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
     };
-    if b.url.trim().is_empty() {
-        return err(StatusCode::BAD_REQUEST, "url 不能为空");
+    if b.name.trim().is_empty() {
+        return err(StatusCode::BAD_REQUEST, "name 不能为空");
     }
-    if !crate::alerts::CHANNEL_KINDS.contains(&b.kind.as_str()) {
-        return err(
-            StatusCode::BAD_REQUEST,
-            format!(
-                "不支持的通知类型 {}（可选：{}）",
-                b.kind,
-                crate::alerts::CHANNEL_KINDS.join(" / ")
-            ),
-        );
+    // 只填 url 的老客户端、手写 curl 都会打到这里：缺哪个字段由类型决定，
+    // 判断口径统一放在 alerts::validate_channel，别在两处各写一份
+    let rid_type = default_receive_id_type(&b.receive_id_type);
+    if let Err(msg) = crate::alerts::validate_channel(
+        b.kind.trim(),
+        &b.url,
+        &b.secret,
+        &b.app_id,
+        &b.receive_id,
+        &rid_type,
+    ) {
+        return err(StatusCode::BAD_REQUEST, msg);
     }
     if !matches!(b.min_severity.as_str(), "warning" | "critical") {
         return err(
@@ -2289,17 +2299,32 @@ async fn create_channel_handler(
         );
     }
     let now = zhiwei_common::Timestamp::now().unix_nano();
-    match state
-        .storage
-        .alerts()
-        .create_channel(&b.name, &b.kind, &b.url, &b.secret, &b.min_severity, now)
-        .await
-    {
+    let new = zhiwei_storage::alerts_repo::NewChannel {
+        name: b.name.trim(),
+        kind: b.kind.trim(),
+        url: b.url.trim(),
+        secret: b.secret.trim(),
+        app_id: b.app_id.trim(),
+        receive_id: b.receive_id.trim(),
+        receive_id_type: &rid_type,
+        min_severity: &b.min_severity,
+    };
+    match state.storage.alerts().create_channel(&new, now).await {
         Ok(id) => (StatusCode::CREATED, Json(serde_json::json!({ "id": id }))).into_response(),
         Err(e) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("create channel: {e}"),
         ),
+    }
+}
+
+/// 飞书的 receive_id_type 缺省取 `chat_id`（与飞书自己的默认一致）
+fn default_receive_id_type(raw: &str) -> String {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        "chat_id".into()
+    } else {
+        raw.to_string()
     }
 }
 
@@ -2320,32 +2345,51 @@ async fn test_channel_handler(
     #[derive(serde::Deserialize)]
     struct Body {
         kind: String,
+        #[serde(default)]
         url: String,
         #[serde(default)]
         secret: String,
+        #[serde(default)]
+        app_id: String,
+        #[serde(default)]
+        receive_id: String,
+        #[serde(default)]
+        receive_id_type: String,
     }
     let b: Body = match serde_json::from_slice(&body) {
         Ok(b) => b,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
     };
-    if b.url.trim().is_empty() {
-        return err(StatusCode::BAD_REQUEST, "url 不能为空");
-    }
-    if !crate::alerts::CHANNEL_KINDS.contains(&b.kind.as_str()) {
-        return err(
-            StatusCode::BAD_REQUEST,
-            format!("不支持的通知类型 {}", b.kind),
-        );
+    let rid_type = default_receive_id_type(&b.receive_id_type);
+    if let Err(msg) = crate::alerts::validate_channel(
+        b.kind.trim(),
+        &b.url,
+        &b.secret,
+        &b.app_id,
+        &b.receive_id,
+        &rid_type,
+    ) {
+        return err(StatusCode::BAD_REQUEST, msg);
     }
 
     let now = zhiwei_common::Timestamp::now().unix_nano();
-    let payload = crate::alerts::channel_body(
+    let ch = crate::alerts::test_channel(
         &b.kind,
+        &b.url,
+        &b.secret,
+        &b.app_id,
+        &b.receive_id,
+        &b.receive_id_type,
+    );
+    // 与真告警共用一条投递路径：测试通过 = 真出事也发得出去
+    match crate::alerts::deliver(
+        &ch,
         &crate::alerts::test_rule(),
         &crate::alerts::test_facts(),
         now,
-    );
-    match crate::alerts::post_webhook(&b.url, &b.secret, &payload).await {
+    )
+    .await
+    {
         Ok(()) => Json(serde_json::json!({ "ok": true, "detail": "" })).into_response(),
         // 投递失败不是服务端错误——把原因如实回给控制台，用户自己判断
         Err(e) => Json(serde_json::json!({

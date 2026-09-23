@@ -149,6 +149,32 @@ function CaSection() {
   );
 }
 
+/** 飞书接收 ID 类型（与后端 FEISHU_RECEIVE_ID_TYPES 同步） */
+const RECEIVE_ID_TYPES = [
+  "chat_id",
+  "open_id",
+  "user_id",
+  "union_id",
+  "email",
+] as const;
+
+/** 表单一行：标签 + 输入 + 可选说明（渠道表单按类型拼装，字段多但都不带别的行为） */
+function Field({
+  label,
+  hint,
+  ...input
+}: { label: string; hint?: string } & React.ComponentProps<typeof Input>) {
+  return (
+    <label className="block">
+      <span className="block text-xs text-ink-500 mb-1">{label}</span>
+      <Input {...input} />
+      {hint ? (
+        <span className="mt-1 block text-xs text-ink-400">{hint}</span>
+      ) : null}
+    </label>
+  );
+}
+
 function ChannelsSection() {
   const { t } = useTranslation();
   const qc = useQueryClient();
@@ -157,9 +183,15 @@ function ChannelsSection() {
 
   const EMPTY = {
     name: "",
-    url: "",
     kind: "feishu",
+    url: "",
+    /** 通用 webhook 的 Token */
     secret: "",
+    /** 飞书的 App Secret（与上面的 Token 分开存，免得切换类型时把凭据发错地方） */
+    app_secret: "",
+    app_id: "",
+    receive_id: "",
+    receive_id_type: "chat_id",
     min_severity: "warning",
   };
   const [dialogOpen, setDialogOpen] = React.useState(false);
@@ -171,8 +203,22 @@ function ChannelsSection() {
 
   const invalidate = () => void qc.invalidateQueries({ queryKey: ["channels"] });
 
+  const isFeishu = form.kind === "feishu";
+  const isSlack = form.kind === "slack";
+  /** 表单 → 接口字段。后端的 `secret` 一列按类型复用：飞书 = App Secret，通用 webhook = Token */
+  const payload = {
+    name: form.name.trim(),
+    kind: form.kind,
+    url: isFeishu ? "" : form.url.trim(),
+    secret: isFeishu ? form.app_secret.trim() : isSlack ? "" : form.secret.trim(),
+    app_id: isFeishu ? form.app_id.trim() : "",
+    receive_id: isFeishu ? form.receive_id.trim() : "",
+    receive_id_type: form.receive_id_type,
+    min_severity: form.min_severity,
+  };
+
   const create = useMutation({
-    mutationFn: () => settingsApi.createChannel(form),
+    mutationFn: () => settingsApi.createChannel(payload),
     onSuccess: () => {
       toast.push("success", t("settings.chCreated"));
       setForm(EMPTY);
@@ -186,7 +232,7 @@ function ChannelsSection() {
   const test = async () => {
     setTesting(true);
     try {
-      const r = await settingsApi.testChannel(form);
+      const r = await settingsApi.testChannel(payload);
       if (r.ok) toast.push("success", t("settings.chTestOk"));
       else toast.push("error", t("settings.chTestFail", { detail: r.detail }));
     } catch (e) {
@@ -213,7 +259,31 @@ function ChannelsSection() {
   });
 
   const channels = chQ.data ?? [];
-  const canSubmit = !!form.name.trim() && !!form.url.trim();
+  // 三种渠道要填的东西不同：飞书用应用凭据 + 接收 ID，Slack / 通用 webhook 要地址
+  const canSubmit =
+    !!form.name.trim() &&
+    (isFeishu
+      ? !!form.app_id.trim() && !!form.app_secret.trim() && !!form.receive_id.trim()
+      : !!form.url.trim());
+
+  /** 列表「目标」列：飞书没有地址，显示它发往哪里 */
+  const targetOf = (c: NotifyChannel) =>
+    c.kind === "feishu"
+      ? `${t(`settings.chRid_${c.receive_id_type}`)} · ${c.receive_id}`
+      : c.url;
+
+  /** 凭据状态：Slack 的地址本身即凭据，没什么可标的 */
+  const secretHint = (c: NotifyChannel) =>
+    c.kind === "feishu"
+      ? // 老的自定义机器人渠道只有 url + 加签 secret，别把那个 secret 说成 App Secret
+        t(
+          c.app_id && c.secret
+            ? "settings.chAppSecretSet"
+            : "settings.chAppSecretUnset",
+        )
+      : c.kind === "webhook"
+        ? t(c.secret ? "settings.chTokenSet" : "settings.chTokenUnset")
+        : "";
 
   return (
     <Card>
@@ -252,7 +322,7 @@ function ChannelsSection() {
                 <tr>
                   <Th>{t("settings.chName")}</Th>
                   <Th className="hidden md:table-cell">{t("settings.chKind")}</Th>
-                  <Th className="hidden lg:table-cell">{t("settings.chUrl")}</Th>
+                  <Th className="hidden lg:table-cell">{t("settings.chTarget")}</Th>
                   <Th>{t("settings.chMinSeverity")}</Th>
                   <Th align="right">{t("alerts.colActions")}</Th>
                 </tr>
@@ -264,9 +334,9 @@ function ChannelsSection() {
                       <div className="text-sm font-medium text-ink-900 dark:text-surface-0">
                         {c.name}
                       </div>
-                      <div className="text-xs text-ink-400">
-                        {t("settings.chTokenSet", { n: c.secret ? 1 : 0 })}
-                      </div>
+                      {secretHint(c) ? (
+                        <div className="text-xs text-ink-400">{secretHint(c)}</div>
+                      ) : null}
                     </Td>
                     <Td className="hidden md:table-cell">
                       <span className="text-xs text-ink-500">
@@ -275,7 +345,7 @@ function ChannelsSection() {
                     </Td>
                     <Td className="hidden lg:table-cell">
                       <span className="text-xs text-ink-400 truncate max-w-[240px] block">
-                        {c.url}
+                        {targetOf(c)}
                       </span>
                     </Td>
                     <Td>
@@ -336,7 +406,7 @@ function ChannelsSection() {
             <Button
               variant="secondary"
               loading={testing}
-              disabled={!form.url.trim()}
+              disabled={!canSubmit}
               onClick={() => void test()}
             >
               {t("settings.chTest")}
@@ -369,7 +439,6 @@ function ChannelsSection() {
                 aria-label={t("settings.chKind")}
               >
                 <option value="feishu">{t("settings.chKind_feishu")}</option>
-                <option value="dingtalk">{t("settings.chKind_dingtalk")}</option>
                 <option value="slack">{t("settings.chKind_slack")}</option>
                 <option value="webhook">{t("settings.chKind_webhook")}</option>
               </Select>
@@ -390,39 +459,85 @@ function ChannelsSection() {
               </Select>
             </label>
           </div>
-          <label className="block">
-            <span className="block text-xs text-ink-500 mb-1">
-              {t("settings.chName")}
-            </span>
-            <Input
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-              placeholder="ops-webhook"
-            />
-          </label>
-          <label className="block">
-            <span className="block text-xs text-ink-500 mb-1">
-              {t("settings.chUrl")}
-            </span>
-            <Input
-              value={form.url}
-              onChange={(e) => setForm({ ...form, url: e.target.value })}
-              placeholder={t("settings.chUrlPlaceholder")}
-            />
-          </label>
-          <label className="block">
-            <span className="block text-xs text-ink-500 mb-1">
-              {t("settings.chToken")}
-            </span>
-            <Input
-              value={form.secret}
-              onChange={(e) => setForm({ ...form, secret: e.target.value })}
-              placeholder={t("settings.chTokenPlaceholder")}
-            />
-            <span className="mt-1 block text-xs text-ink-400">
-              {t("settings.chTokenNote")}
-            </span>
-          </label>
+          <Field
+            label={t("settings.chName")}
+            value={form.name}
+            onChange={(e) => setForm({ ...form, name: e.target.value })}
+            placeholder="ops-feishu"
+          />
+          {/* 飞书：应用凭据 + 接收对象（对照 bluebird 的分发渠道） */}
+          {isFeishu ? (
+            <>
+              <Field
+                label={t("settings.chAppId")}
+                value={form.app_id}
+                onChange={(e) => setForm({ ...form, app_id: e.target.value })}
+                placeholder="cli_xxxxxxxxxxxxxxxx"
+                autoComplete="off"
+              />
+              <Field
+                label={t("settings.chAppSecret")}
+                value={form.app_secret}
+                onChange={(e) => setForm({ ...form, app_secret: e.target.value })}
+                type="password"
+                autoComplete="off"
+              />
+              <div className="grid grid-cols-2 gap-4">
+                <label className="block">
+                  <span className="block text-xs text-ink-500 mb-1">
+                    {t("settings.chReceiveIdType")}
+                  </span>
+                  <Select
+                    value={form.receive_id_type}
+                    onChange={(e) =>
+                      setForm({ ...form, receive_id_type: e.target.value })
+                    }
+                    aria-label={t("settings.chReceiveIdType")}
+                  >
+                    {RECEIVE_ID_TYPES.map((v) => (
+                      <option key={v} value={v}>
+                        {t(`settings.chRid_${v}`)}
+                      </option>
+                    ))}
+                  </Select>
+                </label>
+                <Field
+                  label={t("settings.chReceiveId")}
+                  value={form.receive_id}
+                  onChange={(e) => setForm({ ...form, receive_id: e.target.value })}
+                  placeholder={t("settings.chReceiveIdPlaceholder")}
+                />
+              </div>
+              <p className="text-xs text-ink-400">{t("settings.chFeishuNote")}</p>
+            </>
+          ) : (
+            <>
+              <Field
+                label={
+                  isSlack ? t("settings.chSlackUrl") : t("settings.chWebhookUrl")
+                }
+                value={form.url}
+                onChange={(e) => setForm({ ...form, url: e.target.value })}
+                placeholder={
+                  isSlack
+                    ? t("settings.chSlackUrlPlaceholder")
+                    : t("settings.chWebhookUrlPlaceholder")
+                }
+              />
+              {isSlack ? null : (
+                <Field
+                  label={t("settings.chToken")}
+                  value={form.secret}
+                  onChange={(e) => setForm({ ...form, secret: e.target.value })}
+                  placeholder={t("settings.chTokenPlaceholder")}
+                  hint={t("settings.chTokenNote")}
+                />
+              )}
+              <p className="text-xs text-ink-400">
+                {isSlack ? t("settings.chSlackNote") : t("settings.chWebhookNote")}
+              </p>
+            </>
+          )}
         </div>
       </Dialog>
 

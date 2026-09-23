@@ -50,11 +50,33 @@ pub struct EvalState {
 pub struct NotifyChannel {
     pub id: i64,
     pub name: String,
+    /// `feishu` / `slack` / `webhook`
     pub kind: String,
+    /// Slack / 通用 webhook 的投递地址；飞书不用（地址由 receive_id 决定）
     pub url: String,
+    /// 按类型复用：飞书 = App Secret，通用 webhook = 投递 Token（Bearer）
     pub secret: String,
+    /// 飞书应用 App ID
+    pub app_id: String,
+    /// 飞书接收 ID（群 chat_id / 用户 open_id 等）
+    pub receive_id: String,
+    /// 飞书的 receive_id_type：chat_id / open_id / user_id / union_id / email
+    pub receive_id_type: String,
     pub enabled: bool,
     pub min_severity: String,
+}
+
+/// 新建渠道的入参。字段多、且大多只在某一种渠道类型下才有值，
+/// 聚成一个结构比一长串位置参数好读（调用点也不用数顺序）。
+pub struct NewChannel<'a> {
+    pub name: &'a str,
+    pub kind: &'a str,
+    pub url: &'a str,
+    pub secret: &'a str,
+    pub app_id: &'a str,
+    pub receive_id: &'a str,
+    pub receive_id_type: &'a str,
+    pub min_severity: &'a str,
 }
 
 /// alert_rules 行的裸形态（与 SELECT 列顺序一致）
@@ -568,25 +590,19 @@ impl AlertsRepo {
 
     // ---------- 通知渠道 ----------
 
-    #[allow(clippy::too_many_arguments)]
-    pub async fn create_channel(
-        &self,
-        name: &str,
-        kind: &str,
-        url: &str,
-        secret: &str,
-        min_severity: &str,
-        now: i64,
-    ) -> anyhow::Result<i64> {
+    pub async fn create_channel(&self, ch: &NewChannel<'_>, now: i64) -> anyhow::Result<i64> {
         let r = sqlx::query(
-            r#"INSERT INTO notify_channels (name, kind, url, secret, enabled, min_severity, created_at_unix_nano)
-               VALUES (?, ?, ?, ?, 1, ?, ?)"#,
+            r#"INSERT INTO notify_channels (name, kind, url, secret, app_id, receive_id, receive_id_type, enabled, min_severity, created_at_unix_nano)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)"#,
         )
-        .bind(name)
-        .bind(kind)
-        .bind(url)
-        .bind(secret)
-        .bind(min_severity)
+        .bind(ch.name)
+        .bind(ch.kind)
+        .bind(ch.url)
+        .bind(ch.secret)
+        .bind(ch.app_id)
+        .bind(ch.receive_id)
+        .bind(ch.receive_id_type)
+        .bind(ch.min_severity)
         .bind(now)
         .execute(&self.pool)
         .await?;
@@ -611,11 +627,13 @@ impl AlertsRepo {
     }
 
     pub async fn list_channels(&self) -> anyhow::Result<Vec<NotifyChannel>> {
-        let rows: Vec<(i64, String, String, String, String, i64, String)> = sqlx::query_as(
-            "SELECT id, name, kind, url, secret, enabled, min_severity FROM notify_channels ORDER BY id",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<(i64, String, String, String, String, String, String, String, i64, String)> =
+            sqlx::query_as(
+                "SELECT id, name, kind, url, secret, app_id, receive_id, receive_id_type, enabled, min_severity \
+                 FROM notify_channels ORDER BY id",
+            )
+            .fetch_all(&self.pool)
+            .await?;
         Ok(rows
             .into_iter()
             .map(|r| NotifyChannel {
@@ -624,8 +642,11 @@ impl AlertsRepo {
                 kind: r.2,
                 url: r.3,
                 secret: r.4,
-                enabled: r.5 != 0,
-                min_severity: r.6,
+                app_id: r.5,
+                receive_id: r.6,
+                receive_id_type: r.7,
+                enabled: r.8 != 0,
+                min_severity: r.9,
             })
             .collect())
     }

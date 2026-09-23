@@ -634,9 +634,18 @@ export interface AlertRule {
 export interface NotifyChannel {
   id: number;
   name: string;
+  /** `feishu` / `slack` / `webhook` */
   kind: string;
+  /** Slack / 通用 webhook 的地址；飞书不用（地址由 receive_id 决定） */
   url: string;
+  /** 按类型复用：飞书 = App Secret，通用 webhook = 投递 Token */
   secret: string;
+  /** 飞书应用 App ID */
+  app_id: string;
+  /** 飞书接收 ID（群 chat_id / 用户 open_id 等） */
+  receive_id: string;
+  /** 飞书接收 ID 类型：chat_id / open_id / user_id / union_id / email */
+  receive_id_type: string;
   enabled: boolean;
   min_severity: string;
 }
@@ -786,9 +795,16 @@ export const settingsApi = {
   createChannel: (body: {
     name: string;
     kind?: string;
-    url: string;
-    /** 凭据（可选）：非空时投递会带 `Authorization: Bearer <token>` */
+    /** Slack / 通用 webhook 的地址；飞书留空 */
+    url?: string;
+    /** 飞书 = App Secret，通用 webhook = 投递 Token（可选） */
     secret?: string;
+    /** 飞书应用 App ID */
+    app_id?: string;
+    /** 飞书接收 ID（群 chat_id / 用户 open_id 等） */
+    receive_id?: string;
+    /** 飞书接收 ID 类型，缺省 chat_id */
+    receive_id_type?: string;
     min_severity?: string;
   }) =>
     request<{ id: number }>("/v1/channels", {
@@ -805,7 +821,14 @@ export const settingsApi = {
   deleteChannel: (id: number) =>
     request<unknown>(`/v1/channels/${id}`, { method: "DELETE" }),
   /** 拿当前填的参数真发一条测试通知（保存之前就能点） */
-  testChannel: (body: { kind: string; url: string; secret?: string }) =>
+  testChannel: (body: {
+    kind: string;
+    url?: string;
+    secret?: string;
+    app_id?: string;
+    receive_id?: string;
+    receive_id_type?: string;
+  }) =>
     request<{ ok: boolean; detail: string }>("/v1/channels/test", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

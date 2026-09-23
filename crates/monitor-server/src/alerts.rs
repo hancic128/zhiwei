@@ -117,11 +117,14 @@ fn md_escape(raw: &str) -> String {
 /// 卡片底部来源行（正文与标题都给了信息，这里只标来源）
 const CARD_SOURCE: &str = "zhiwei 节点监控";
 
-/// 飞书消息卡片（`msg_type: interactive`）。
+/// 飞书消息卡片（`msg_type: interactive` 的 `content`）。
 ///
 /// 用卡片 1.0 而不是 2.0：2.0 经消息接口下发时会落到旧客户端的兜底文案
 /// （「请升级至最新版本客户端，以查看内容」），实测踩过。1.0 的 `header.template`
 /// 一样能上色，「折叠态也能一眼看出是告警还是恢复」这个诉求用 1.0 就能满足。
+///
+/// 这里只返回**裸卡片对象**：走 im/v1/messages 时它要被字符串化塞进 `content`，
+/// 外面那层 `{"msg_type":..,"card":..}` 是自定义机器人 webhook 的壳，加了会被拒。
 fn feishu_card(rule: &AlertRule, facts: &AlertFacts) -> serde_json::Value {
     let (level, emoji) = level_text(rule, facts.firing);
 
@@ -154,18 +157,15 @@ fn feishu_card(rule: &AlertRule, facts: &AlertFacts) -> serde_json::Value {
     }));
 
     serde_json::json!({
-        "msg_type": "interactive",
-        "card": {
-            "config": { "wide_screen_mode": true },
-            "header": {
-                "template": header_template(rule, facts.firing),
-                "title": {
-                    "tag": "plain_text",
-                    "content": format!("{emoji} {level} · {}", rule.name),
-                },
+        "config": { "wide_screen_mode": true },
+        "header": {
+            "template": header_template(rule, facts.firing),
+            "title": {
+                "tag": "plain_text",
+                "content": format!("{emoji} {level} · {}", rule.name),
             },
-            "elements": elements,
         },
+        "elements": elements,
     })
 }
 
@@ -308,29 +308,159 @@ async fn notify(state: &AppState, rule: &AlertRule, facts: &AlertFacts, now: i64
         .into_iter()
         .filter(|c| c.enabled && severity_rank(&c.min_severity) <= severity_rank(&rule.severity))
     {
-        let body = channel_body(&ch.kind, rule, facts, now);
-
-        if let Err(e) = post_webhook(&ch.url, &ch.secret, &body).await {
+        // 配置不完整的渠道（老库里可能存着缺字段的行）只记一条日志，不反复刷投递失败
+        if let Err(msg) = validate_channel(
+            &ch.kind,
+            &ch.url,
+            &ch.secret,
+            &ch.app_id,
+            &ch.receive_id,
+            &ch.receive_id_type,
+        ) {
+            warn!(channel = %ch.name, kind = %ch.kind, reason = %msg, "通知渠道配置不完整，跳过");
+            continue;
+        }
+        if let Err(e) = deliver(&ch, rule, facts, now).await {
             warn!(channel = %ch.name, kind = %ch.kind, error = %e, "通知投递失败");
         }
     }
 }
 
-/// 通知渠道支持的种类。前三个是各家 IM 的「自定义机器人」webhook，
-/// 只是 JSON 外壳不同——统一在这里组装，投递链路（HTTP POST）完全复用。
-pub const CHANNEL_KINDS: &[&str] = &["webhook", "feishu", "dingtalk", "slack"];
+/// 通知渠道支持的种类（字段设计对齐 bluebird 的分发渠道）。
+///
+/// 只有三种，且各自要填的东西不同：
+/// - `feishu`：走官方应用接口——App ID + App Secret 换 tenant_access_token，
+///   再按 receive_id（群 / 用户）发消息，不需要机器人地址；
+/// - `slack`：Incoming Webhook 地址，地址本身即凭据；
+/// - `webhook`：自己的接收端，可选一个 Token 做鉴权。
+pub const CHANNEL_KINDS: &[&str] = &["feishu", "slack", "webhook"];
 
-/// 组装通知体。`webhook` 给结构化 JSON（喂自己的接收端），其余三种按各自协议包一层。
+/// 飞书的 receive_id_type 白名单（与 open.feishu.cn 的 im/v1/messages 一致）。
+/// 填错时飞书回 99992402，不如在保存前就拦下来。
+pub const FEISHU_RECEIVE_ID_TYPES: &[&str] =
+    &["chat_id", "open_id", "user_id", "union_id", "email"];
+
+/// 飞书开放平台的地址（可用环境变量指到 Lark 国际版 / 自建代理 / 测试桩）
+fn feishu_base() -> String {
+    match std::env::var("ZHIWEI_FEISHU_BASE") {
+        Ok(v) if !v.trim().is_empty() => v.trim().trim_end_matches('/').to_string(),
+        _ => "https://open.feishu.cn".into(),
+    }
+}
+
+/// 保存 / 测试之前的参数校验，返回可直接展示给用户的错误信息。
+///
+/// 三种渠道要填的字段不同，前端也会按类型显示表单；这里是最后一道闸——
+/// 老控制台、手写 curl、迁移过来的老数据都会从这条路上过。
+pub fn validate_channel(
+    kind: &str,
+    url: &str,
+    secret: &str,
+    app_id: &str,
+    receive_id: &str,
+    receive_id_type: &str,
+) -> Result<(), String> {
+    if !CHANNEL_KINDS.contains(&kind) {
+        return Err(format!(
+            "不支持的通知类型 {}（可选：{}）",
+            kind,
+            CHANNEL_KINDS.join(" / ")
+        ));
+    }
+    match kind {
+        "feishu" => {
+            if app_id.trim().is_empty() {
+                return Err("飞书需要填写 App ID".into());
+            }
+            if secret.trim().is_empty() {
+                return Err("飞书需要填写 App Secret".into());
+            }
+            if receive_id.trim().is_empty() {
+                return Err("飞书需要填写接收 ID（群 chat_id / 用户 open_id 等）".into());
+            }
+            if !FEISHU_RECEIVE_ID_TYPES.contains(&receive_id_type) {
+                return Err(format!(
+                    "未知的飞书接收 ID 类型 {}（可选：{}）",
+                    receive_id_type,
+                    FEISHU_RECEIVE_ID_TYPES.join(" / ")
+                ));
+            }
+            Ok(())
+        }
+        "slack" => {
+            if url.trim().is_empty() {
+                return Err("Slack 需要填写 Webhook URL".into());
+            }
+            Ok(())
+        }
+        _ => {
+            if url.trim().is_empty() {
+                return Err("通用 webhook 需要填写 URL".into());
+            }
+            Ok(())
+        }
+    }
+}
+
+/// 「测试」按钮用的临时渠道：只装控制台当前填的那几项，不入库。
+/// `receive_id_type` 缺省成 `chat_id`，与飞书自己的默认一致。
+pub fn test_channel(
+    kind: &str,
+    url: &str,
+    secret: &str,
+    app_id: &str,
+    receive_id: &str,
+    receive_id_type: &str,
+) -> zhiwei_storage::alerts_repo::NotifyChannel {
+    let rid_type = receive_id_type.trim();
+    zhiwei_storage::alerts_repo::NotifyChannel {
+        id: 0,
+        name: "测试".into(),
+        kind: kind.trim().to_string(),
+        url: url.trim().to_string(),
+        secret: secret.trim().to_string(),
+        app_id: app_id.trim().to_string(),
+        receive_id: receive_id.trim().to_string(),
+        receive_id_type: if rid_type.is_empty() {
+            "chat_id".into()
+        } else {
+            rid_type.to_string()
+        },
+        enabled: true,
+        min_severity: "warning".into(),
+    }
+}
+
+/// 投递一条通知到指定渠道。真告警与控制台的「测试」按钮共用这一条路径——
+/// 否则「测试通过、真出事不发」这种偏差没人发现得了。
+pub async fn deliver(
+    ch: &zhiwei_storage::alerts_repo::NotifyChannel,
+    rule: &AlertRule,
+    facts: &AlertFacts,
+    now: i64,
+) -> anyhow::Result<()> {
+    let body = channel_body(&ch.kind, rule, facts, now);
+    match ch.kind.as_str() {
+        "feishu" => {
+            let token = feishu_token(ch.app_id.trim(), ch.secret.trim()).await?;
+            let url = feishu_messages_url(&feishu_base(), ch.receive_id_type.trim());
+            let payload = feishu_message_body(ch.receive_id.trim(), &body);
+            post_json(&url, &token, &payload).await.map(|_| ())
+        }
+        // Slack 的 Incoming Webhook 地址本身即凭据，不带认证头
+        "slack" => post_json(&ch.url, "", &body).await.map(|_| ()),
+        // 通用 webhook：`secret` 非空则带 Authorization: Bearer，接收端据此鉴权
+        _ => post_json(&ch.url, &ch.secret, &body).await.map(|_| ()),
+    }
+}
+
+/// 组装通知体。飞书给消息卡片（原本就是 `content` 要的裸卡片对象），
+/// 其余两种按各自协议包一层。
 pub fn channel_body(kind: &str, rule: &AlertRule, facts: &AlertFacts, now: i64) -> String {
     match kind {
         // 飞书走消息卡片：彩色标题栏 + 分栏。折叠态只剩标题栏时，颜色本身就是
         // 「严重 / 警告 / 已恢复」的信号，这是纯文本做不到的。
         "feishu" => feishu_card(rule, facts).to_string(),
-        "dingtalk" => serde_json::json!({
-            "msgtype": "text",
-            "text": { "content": plain_text(rule, facts) },
-        })
-        .to_string(),
         "slack" => serde_json::json!({
             "text": plain_text(rule, facts),
         })
@@ -353,6 +483,79 @@ pub fn channel_body(kind: &str, rule: &AlertRule, facts: &AlertFacts, now: i64) 
         })
         .to_string(),
     }
+}
+
+/// 飞书 im/v1/messages 的发消息地址。
+pub fn feishu_messages_url(base: &str, receive_id_type: &str) -> String {
+    format!("{base}/open-apis/im/v1/messages?receive_id_type={receive_id_type}")
+}
+
+/// 飞书 im/v1/messages 的请求体。
+///
+/// `content` 要的是「卡片对象字符串化后的 JSON」；再包一层 `card` 会被飞书拒掉
+/// （错误码 9499，现场踩过），所以这里只做转义、不加外壳。
+pub fn feishu_message_body(receive_id: &str, card: &str) -> String {
+    serde_json::json!({
+        "receive_id": receive_id,
+        "msg_type": "interactive",
+        "content": card,
+    })
+    .to_string()
+}
+
+/// tenant_access_token 缓存：有效期 2h，按 (app_id, app_secret) 存。
+/// 告警风暴里几十条通知只该换一次 token（换取的接口也有频率限制）。
+static FEISHU_TOKENS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<(String, String), (String, i64)>>,
+> = std::sync::OnceLock::new();
+
+fn feishu_tokens(
+) -> &'static std::sync::Mutex<std::collections::HashMap<(String, String), (String, i64)>> {
+    FEISHU_TOKENS.get_or_init(Default::default)
+}
+
+fn now_unix_secs() -> i64 {
+    Timestamp::now().unix_nano() / 1_000_000_000
+}
+
+/// 换取（或复用）飞书应用的 tenant_access_token。
+async fn feishu_token(app_id: &str, app_secret: &str) -> anyhow::Result<String> {
+    {
+        let cache = feishu_tokens().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((token, expire_at)) = cache.get(&(app_id.to_string(), app_secret.to_string())) {
+            // 提前 60s 当作过期，别卡在边界上让第一条通知撞 401
+            if expire_at - 60 > now_unix_secs() {
+                return Ok(token.clone());
+            }
+        }
+    }
+
+    let url = format!(
+        "{}/open-apis/auth/v3/tenant_access_token/internal",
+        feishu_base()
+    );
+    let body = serde_json::json!({ "app_id": app_id, "app_secret": app_secret }).to_string();
+    let raw = post_json(&url, "", &body).await?;
+    let v: serde_json::Value =
+        serde_json::from_slice(&raw).map_err(|e| anyhow::anyhow!("飞书返回的不是 JSON：{e}"))?;
+    let token = v
+        .get("tenant_access_token")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+    if token.is_empty() {
+        let why = body_error(&raw).unwrap_or_else(|| body_detail(&raw));
+        anyhow::bail!("换取飞书 tenant_access_token 失败{why}");
+    }
+    let expire = v.get("expire").and_then(|e| e.as_i64()).unwrap_or(7200);
+    feishu_tokens()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(
+            (app_id.to_string(), app_secret.to_string()),
+            (token.clone(), now_unix_secs() + expire),
+        );
+    Ok(token)
 }
 
 /// 「测试通知」用的一条假规则——只为把通知体组出来，不落库、不参与求值。
@@ -699,12 +902,12 @@ fn cert_alert_rule(name: &str, severity: &str) -> AlertRule {
     }
 }
 
-/// 投递一个通知体到指定地址。
+/// 投递一个 JSON 请求体，返回响应体。
 ///
-/// `token` 非空时带 `Authorization: Bearer <token>`——自建接收端可以用它做鉴权；
-/// 飞书 / 钉钉 / Slack 的机器人地址本来就是「地址即凭据」，留空即可。
-/// （`notify_channels.secret` 这一列从建表起就存在，但一直没被用上——这里补上。）
-pub async fn post_webhook(url: &str, token: &str, body: &str) -> anyhow::Result<()> {
+/// `token` 非空时带 `Authorization: Bearer <token>`——飞书应用接口用它带
+/// tenant_access_token，自建接收端可以用它做鉴权；Slack 的 Incoming Webhook
+/// 地址本身就是「地址即凭据」，留空即可。
+pub async fn post_json(url: &str, token: &str, body: &str) -> anyhow::Result<Vec<u8>> {
     let url = url.to_string();
     let authority = url
         .strip_prefix("http://")
@@ -728,7 +931,7 @@ pub async fn post_webhook(url: &str, token: &str, body: &str) -> anyhow::Result<
     .await
     .map_err(|_| anyhow::anyhow!("连接超时"))??;
 
-    // 飞书 / 钉钉 / Slack 的机器人地址都是 https；自建接收端多半是内网明文 http
+    // 飞书 / Slack 的地址都是 https；自建接收端多半是内网明文 http
     if tls {
         let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(tls_config()?));
         let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
@@ -746,7 +949,7 @@ pub async fn post_webhook(url: &str, token: &str, body: &str) -> anyhow::Result<
     }
 }
 
-/// 系统根证书（webhook 目标都是正经证书：飞书 / 钉钉 / Slack 或用户自己的域名）
+/// 系统根证书（webhook 目标都是正经证书：飞书 / Slack 或用户自己的域名）
 fn tls_config() -> anyhow::Result<rustls::ClientConfig> {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -755,14 +958,14 @@ fn tls_config() -> anyhow::Result<rustls::ClientConfig> {
         .with_no_client_auth())
 }
 
-/// POST 一个 JSON body 并读回响应状态。http 与 https 共用（TcpStream 与 TlsStream 都实现同一组 trait）。
+/// POST 一个 JSON body 并读回响应体。http 与 https 共用（TcpStream 与 TlsStream 都实现同一组 trait）。
 async fn send_post<S>(
     stream: S,
     host: &str,
     path: &str,
     token: &str,
     body: &str,
-) -> anyhow::Result<()>
+) -> anyhow::Result<Vec<u8>>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -793,23 +996,22 @@ where
         .map(|b| b.to_bytes())
         .unwrap_or_default();
     if !status.is_success() {
-        anyhow::bail!("webhook 返回 {status}{}", body_detail(&body));
+        anyhow::bail!("接口返回 {status}{}", body_detail(&body));
     }
     // 也有渠道失败仍返回 2xx：错误码在 body 里，不看就会把失败当成投递成功
     if let Some(e) = body_error(&body) {
-        anyhow::bail!("webhook 返回 {status}，{e}");
+        anyhow::bail!("接口返回 {status}，{e}");
     }
-    Ok(())
+    Ok(body.to_vec())
 }
 
 /// 从响应体里挖出「为什么失败」。
 ///
-/// 飞书把错误码放在 body（9499 卡片结构错、19024 关键词不匹配、19021 签名失败、
-/// 19022 IP 不在白名单），HTTP 状态常常就是 400——只看状态就只剩一句
-/// 「webhook 返回 400 Bad Request」，卡片 JSON 写错时完全没法定位。
+/// 飞书把错误码放在 body（10003/10014 凭据不对、230001 接收 ID 与类型不匹配、
+/// 99991672 权限没开），HTTP 状态往往还是 200——只看状态就把失败当成功。
 fn body_error(body: &[u8]) -> Option<String> {
     let v: serde_json::Value = serde_json::from_slice(body).ok()?;
-    // 飞书 code/msg、钉钉 errcode/errmsg；Slack 成功时 body 是纯文本 "ok"，解析不出 JSON
+    // 飞书 code/msg；Slack 成功时 body 是纯文本 "ok"，解析不出 JSON
     let code = v.get("code").or_else(|| v.get("errcode"))?.as_i64()?;
     if code == 0 {
         return None;
@@ -833,16 +1035,16 @@ fn body_detail(body: &[u8]) -> String {
     }
 }
 
-/// 已知错误码 → 排查方向。只覆盖飞书：自定义机器人的「JSON 写错」是日常故障，
-/// 而 Slack / 钉钉的 webhook 地址本身即凭据，出错多半是地址不对。
+/// 已知错误码 → 排查方向。只覆盖飞书：它的错误码光看数字没法动手，
+/// 而 Slack / 自建接收端出错多半就是地址不对，HTTP 状态已经说明问题。
 fn channel_hint(code: i64) -> &'static str {
     match code {
-        9499 => "：请求体结构不对，卡片 JSON 大概率有问题",
-        19001 => "：卡片内容非法",
-        19021 => "：机器人开了签名校验，zhiwei 还不支持加签，请先关掉或改用 IP 白名单 / 关键词",
-        19022 => "：来源 IP 不在机器人的白名单里",
-        19024 => "：消息没命中机器人的自定义关键词",
-        11232 => "：触发飞书限流（单机器人 5 次/秒、100 次/分）",
+        10003 => "：App ID / App Secret 不完整或不合法",
+        10014 => "：App ID 或 App Secret 不正确",
+        230001 => "：接收 ID 无效——核对接收 ID 与类型是否匹配（群是 oc_ 开头的 chat_id）",
+        99992402 => "：接收 ID 类型不合法，可选 chat_id / open_id / user_id / union_id / email",
+        99991672 => "：应用权限不足，请到开发者后台开通 im:message:send_as_bot 并发布版本",
+        11232 => "：触发飞书限流（同一应用 50 次/秒）",
         _ => "",
     }
 }
@@ -961,23 +1163,45 @@ mod tests {
         };
 
         let critical = card("critical", true);
-        assert_eq!(critical["msg_type"], "interactive");
-        assert_eq!(critical["card"]["header"]["template"], "red");
+        assert_eq!(critical["header"]["template"], "red");
         assert_eq!(
-            critical["card"]["header"]["title"]["content"],
+            critical["header"]["title"]["content"],
             "🔴 严重 · 磁盘使用率过高"
         );
 
-        assert_eq!(
-            card("warning", true)["card"]["header"]["template"],
-            "orange"
-        );
+        assert_eq!(card("warning", true)["header"]["template"], "orange");
 
         let recovered = card("critical", false);
-        assert_eq!(recovered["card"]["header"]["template"], "green");
+        assert_eq!(recovered["header"]["template"], "green");
         assert_eq!(
-            recovered["card"]["header"]["title"]["content"],
+            recovered["header"]["title"]["content"],
             "✅ 已恢复 · 磁盘使用率过高"
+        );
+    }
+
+    /// 走 im/v1/messages 时卡片要塞进 `content` 字符串，且**不能**再包一层 `card`
+    /// （自定义机器人的壳，加了飞书直接回 9499）
+    #[test]
+    fn feishu_message_wraps_bare_card_into_content() {
+        let card = channel_body("feishu", &rule("warning"), &facts(true), 0);
+        assert!(
+            card.starts_with('{') && !card.contains("\"msg_type\""),
+            "{card}"
+        );
+
+        let body: serde_json::Value =
+            serde_json::from_str(&feishu_message_body("oc_abc", &card)).unwrap();
+        assert_eq!(body["receive_id"], "oc_abc");
+        assert_eq!(body["msg_type"], "interactive");
+        // content 是字符串化的卡片对象（飞书要的就是这种双层转义）
+        let content: serde_json::Value =
+            serde_json::from_str(body["content"].as_str().unwrap()).unwrap();
+        assert_eq!(content["header"]["template"], "orange");
+        assert!(content.get("card").is_none(), "不该再包一层 card");
+
+        assert_eq!(
+            feishu_messages_url("https://open.feishu.cn", "chat_id"),
+            "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id"
         );
     }
 
@@ -987,7 +1211,7 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(&channel_body("feishu", &rule("critical"), &facts(true), 0))
                 .unwrap();
-        let elements = v["card"]["elements"].as_array().unwrap();
+        let elements = v["elements"].as_array().unwrap();
         let fields = elements[0]["fields"].as_array().unwrap();
         assert_eq!(fields.len(), 4);
         assert_eq!(fields[0]["text"]["content"], "**节点**\nshark-9");
@@ -1007,7 +1231,7 @@ mod tests {
         f.fields[0].1 = "<at id=all></at>".into();
         let v: serde_json::Value =
             serde_json::from_str(&channel_body("feishu", &rule("critical"), &f, 0)).unwrap();
-        let content = v["card"]["elements"][0]["fields"][0]["text"]["content"]
+        let content = v["elements"][0]["fields"][0]["text"]["content"]
             .as_str()
             .unwrap();
         assert!(
@@ -1019,20 +1243,63 @@ mod tests {
     }
 
     #[test]
-    fn im_channels_wrap_text_per_protocol() {
-        let dingtalk: serde_json::Value =
-            serde_json::from_str(&channel_body("dingtalk", &rule("warning"), &facts(true), 0))
-                .unwrap();
-        assert_eq!(dingtalk["msgtype"], "text");
-        assert!(dingtalk["text"]["content"]
-            .as_str()
-            .unwrap()
-            .contains("（shark-9）"));
-
+    fn slack_channel_wraps_text() {
         let slack: serde_json::Value =
             serde_json::from_str(&channel_body("slack", &rule("warning"), &facts(true), 0))
                 .unwrap();
         assert!(slack["text"].as_str().unwrap().starts_with("[警告]"));
+        assert!(slack["text"].as_str().unwrap().contains("（shark-9）"));
+    }
+
+    /// 三种渠道要填的字段不同，缺哪个都要在保存前就说清楚
+    #[test]
+    fn channel_params_are_validated_per_kind() {
+        // 飞书：App ID / App Secret / 接收 ID 缺一不可，类型要在白名单里
+        assert!(validate_channel("feishu", "", "s", "cli_x", "oc_1", "chat_id").is_ok());
+        assert!(validate_channel("feishu", "", "s", "", "oc_1", "chat_id")
+            .unwrap_err()
+            .contains("App ID"));
+        assert!(
+            validate_channel("feishu", "", "", "cli_x", "oc_1", "chat_id")
+                .unwrap_err()
+                .contains("App Secret")
+        );
+        assert!(validate_channel("feishu", "", "s", "cli_x", "", "chat_id")
+            .unwrap_err()
+            .contains("接收 ID"));
+        assert!(
+            validate_channel("feishu", "", "s", "cli_x", "oc_1", "chat-id")
+                .unwrap_err()
+                .contains("接收 ID 类型")
+        );
+        // 飞书不需要 url，缺了也放行（地址由 receive_id 决定）
+        assert!(validate_channel("feishu", "", "s", "cli_x", "oc_1", "chat_id").is_ok());
+
+        // Slack / 通用 webhook：必须要地址；webhook 的 Token 可选
+        assert!(validate_channel("slack", "", "", "", "", "").is_err());
+        assert!(validate_channel("slack", "https://hooks.slack.com/x", "", "", "", "").is_ok());
+        assert!(validate_channel("webhook", "", "", "", "", "").is_err());
+        assert!(validate_channel("webhook", "http://10.0.0.1/hook", "", "", "", "").is_ok());
+        assert!(validate_channel("webhook", "http://10.0.0.1/hook", "tok", "", "", "").is_ok());
+
+        // 下线的类型不能再进来（钉钉等）
+        for kind in ["dingtalk", "bark", "wecom", "wechat"] {
+            assert!(
+                validate_channel(kind, "https://x/y", "", "", "", "").is_err(),
+                "{kind} 不该被接受"
+            );
+        }
+    }
+
+    /// 测试按钮用的临时渠道：只填 url / kind 时也要能构出一条（receive_id_type 补默认值）
+    #[test]
+    fn test_channel_fills_defaults() {
+        let ch = test_channel("feishu", "", " secret ", " cli_x ", " oc_1 ", "");
+        assert_eq!(ch.kind, "feishu");
+        assert_eq!(ch.receive_id_type, "chat_id");
+        assert_eq!(ch.secret, "secret");
+        assert_eq!(ch.app_id, "cli_x");
+        assert_eq!(ch.receive_id, "oc_1");
     }
 
     /// 未知 kind 按 webhook 处理：老库里可能存着历史值，不能因此丢通知
@@ -1043,22 +1310,21 @@ mod tests {
         assert_eq!(v["rule"], "磁盘使用率过高");
     }
 
-    /// 投递失败的原因得从 body 里挖：飞书把错误码放这里，只看 HTTP 状态的话
-    /// 卡片 JSON 写错也只会看到一句「400 Bad Request」
+    /// 投递失败的原因得从 body 里挖：飞书把错误码放这里（HTTP 还是 200），
+    /// 只看状态就会把失败当成功
     #[test]
     fn delivery_errors_surface_channel_codes() {
-        // 成功形态都不算失败：飞书 code=0、钉钉 errcode=0、Slack 纯文本 "ok"
+        // 成功形态都不算失败：飞书 code=0、Slack 纯文本 "ok"
         assert_eq!(body_error(br#"{"code":0,"msg":"success"}"#), None);
         assert_eq!(body_error(br#"{"errcode":0,"errmsg":"ok"}"#), None);
         assert_eq!(body_error(b"ok"), None);
 
-        let feishu = body_error(br#"{"code":19021,"msg":"sign match fail"}"#).unwrap();
-        assert!(feishu.contains("19021"), "{feishu}");
-        assert!(feishu.contains("加签"), "{feishu}");
+        let bad_secret = body_error(br#"{"code":10014,"msg":"app secret invalid"}"#).unwrap();
+        assert!(bad_secret.contains("10014"), "{bad_secret}");
+        assert!(bad_secret.contains("App ID 或 App Secret"), "{bad_secret}");
 
-        let dingtalk =
-            body_error(br#"{"errcode":310000,"errmsg":"keywords not in content"}"#).unwrap();
-        assert!(dingtalk.contains("310000") && dingtalk.contains("keywords not in content"));
+        let bad_receive = body_error(br#"{"code":230001,"msg":"receive_id invalid"}"#).unwrap();
+        assert!(bad_receive.contains("chat_id"), "{bad_receive}");
 
         // 非 2xx 时把响应体带上，别让自建接收端摸黑
         assert!(body_detail(b"nope").contains("nope"));

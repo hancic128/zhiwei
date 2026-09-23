@@ -483,5 +483,38 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     }
 
+    // Migration 016: 通知渠道收敛为「飞书 / Slack / 通用 webhook」
+    //
+    // 飞书不再用「自定义机器人 webhook」，改走官方应用接口：App ID + App Secret 换
+    // tenant_access_token，再按 receive_id 发消息——所以要多存三个字段。
+    // `secret` 一列按类型复用：飞书 = App Secret，通用 webhook = 投递 Token（Bearer）；
+    // `url` 只给 Slack / 通用 webhook 用，飞书的地址由 receive_id 决定。
+    //
+    // 钉钉渠道下线：留着这些行只会变成改不了、也发不出去的僵尸配置（渠道列表里
+    // 还显示不出类型名），直接删掉。
+    //
+    // 老的飞书「自定义机器人」渠道只有 url、没有 App ID，走不通应用接口——把它们
+    // 置为停用，让控制台里一眼看出这条要重建，而不是留着一条悄悄不发告警的记录。
+    //
+    // 号段接着 015 往下取（同号的迁移会被 `has_0xx.is_none()` 静默跳过）。
+    let has_016: Option<i64> =
+        sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 16")
+            .fetch_optional(pool)
+            .await?;
+    if has_016.is_none() {
+        sqlx::query(
+            r#"
+            ALTER TABLE notify_channels ADD COLUMN app_id TEXT NOT NULL DEFAULT '';
+            ALTER TABLE notify_channels ADD COLUMN receive_id TEXT NOT NULL DEFAULT '';
+            ALTER TABLE notify_channels ADD COLUMN receive_id_type TEXT NOT NULL DEFAULT 'chat_id';
+            UPDATE notify_channels SET enabled = 0 WHERE kind = 'feishu' AND app_id = '';
+            DELETE FROM notify_channels WHERE kind = 'dingtalk';
+            INSERT INTO schema_version (version) VALUES (16);
+            "#,
+        )
+        .execute(pool)
+        .await?;
+    }
+
     Ok(())
 }
