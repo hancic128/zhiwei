@@ -7,7 +7,8 @@
 # 默认装 node-agent（`zhiwei-node`）到 /usr/local/bin。
 #
 # 环境变量 / 参数（参数优先）：
-#   ZHIWEI_BIN          node | monitor      默认 node。装哪个二进制。
+#   ZHIWEI_BIN          node | monitor | ops   默认 node。装哪个二进制；
+#                       monitor 会连带装 zhiwei-ops（命令通道的控制平面）。
 #   ZHIWEI_VERSION      latest | 0.1.0      默认 latest。
 #   ZHIWEI_INSTALL_DIR  /usr/local/bin      默认 /usr/local/bin；不可写时自动 sudo。
 #   ZHIWEI_LIBC         musl | gnu          Linux 专用，默认 musl（静态、不挑 glibc）。
@@ -79,10 +80,13 @@ case "$os" in
 esac
 
 # ---- 选二进制 ----
+# monitor 连带装 ops-server：命令通道（删容器 / 拉日志 / 重启主机）要 ops 签名
+# 才能下发，只装 monitor 会一直报「ops-server 不可用：Connection refused」。
 case "$BIN" in
-  node) binary="zhiwei-node" ;;
-  monitor) binary="zhiwei-monitor" ;;
-  *) die "--bin 只能是 node 或 monitor（收到 ${BIN}）" ;;
+  node) binary="zhiwei-node"; binaries="zhiwei-node" ;;
+  monitor) binary="zhiwei-monitor"; binaries="zhiwei-monitor zhiwei-ops" ;;
+  ops) binary="zhiwei-ops"; binaries="zhiwei-ops" ;;
+  *) die "--bin 只能是 node / monitor / ops（收到 ${BIN}）" ;;
 esac
 
 # ---- 下载工具 ----
@@ -160,27 +164,44 @@ fi
 # ---- 解包并安装 ----
 tar -xzf "${tmpdir}/${asset}" -C "$tmpdir"
 [ -f "${tmpdir}/${binary}" ] || die "包内没有 ${binary}，解包结果：$(ls "$tmpdir")"
-chmod +x "${tmpdir}/${binary}"
 
 mkdir -p "$INSTALL_DIR" 2>/dev/null || true
-if [ -w "$INSTALL_DIR" ]; then
-  install -m 0755 "${tmpdir}/${binary}" "${INSTALL_DIR}/${binary}" 2>/dev/null \
-    || mv "${tmpdir}/${binary}" "${INSTALL_DIR}/${binary}"
-else
-  note "sudo    ${INSTALL_DIR} 不可写，用 sudo 安装"
-  sudo install -m 0755 "${tmpdir}/${binary}" "${INSTALL_DIR}/${binary}"
-fi
-
 installed_version="$(cat "${tmpdir}/VERSION" 2>/dev/null || echo "$VERSION")"
-echo "" >&2
-echo "已安装 ${binary} ${installed_version} → ${INSTALL_DIR}/${binary}" >&2
-case "$binary" in
-  zhiwei-node)
+
+# 逐个装（monitor 会带上 zhiwei-ops）。旧 release 包里没有 ops 时给提示、不失败：
+# 那种包的命令通道本来就用不了，但要拦的是「装不上」而不是「少一个可选件」。
+for one in $binaries; do
+  if [ ! -f "${tmpdir}/${one}" ]; then
+    note "包内没有 ${one}（大概是旧版本 release），跳过；命令通道可能不可用"
+    continue
+  fi
+  chmod +x "${tmpdir}/${one}"
+  if [ -w "$INSTALL_DIR" ]; then
+    install -m 0755 "${tmpdir}/${one}" "${INSTALL_DIR}/${one}" 2>/dev/null \
+      || mv "${tmpdir}/${one}" "${INSTALL_DIR}/${one}"
+  else
+    note "sudo    ${INSTALL_DIR} 不可写，用 sudo 安装"
+    sudo install -m 0755 "${tmpdir}/${one}" "${INSTALL_DIR}/${one}"
+  fi
+  echo "" >&2
+  echo "已安装 ${one} ${installed_version} → ${INSTALL_DIR}/${one}" >&2
+done
+
+case "$BIN" in
+  node)
     echo "" >&2
     echo "下一步（首次入网）：" >&2
     echo "  ZHIWEI_MONITOR_URL=https://<你的-monitor> \\" >&2
     echo "  ZHIWEI_BOOTSTRAP_TOKEN=<入网令牌> \\" >&2
     echo "  ${INSTALL_DIR}/zhiwei-node --state-dir /var/lib/zhiwei-node" >&2
+    ;;
+  monitor)
+    echo "" >&2
+    echo "下一步（自建部署）：" >&2
+    echo "  ${INSTALL_DIR}/zhiwei-monitor --data-dir /var/lib/zhiwei --listen 0.0.0.0:8443" >&2
+    echo "  zhiwei-monitor 启动时会自动拉起同目录的 zhiwei-ops（控制平面）；" >&2
+    echo "  也可以自己先起：${INSTALL_DIR}/zhiwei-ops --data-dir /var/lib/zhiwei &" >&2
+    echo "  只想跑数据平面（不要写操作）就设 ZHIWEI_OPS_DISABLE=1。" >&2
     ;;
 esac
 

@@ -12,10 +12,11 @@
 //!
 //! hyper-util 的 auto builder 按连接协商 HTTP/1.1 或 HTTP/2。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use clap::Parser;
@@ -160,6 +161,117 @@ fn warn_tls_handshake_once(
     }
 }
 
+/// 从 ops endpoint（`http://127.0.0.1:8444/exec`）里取出 `(host, port)`。
+fn endpoint_host_port(endpoint: &str) -> Option<(String, u16)> {
+    let authority = endpoint.strip_prefix("http://")?;
+    let host_port = authority.split('/').next()?;
+    match host_port.rsplit_once(':') {
+        Some((h, p)) => Some((h.to_string(), p.parse().ok()?)),
+        None => Some((host_port.to_string(), 8444)),
+    }
+}
+
+/// 端口上有人监听就算「在跑」，重试 `attempts` 次（每次间隔 150ms）。
+async fn wait_for_port(host: &str, port: u16, attempts: u32) -> bool {
+    for _ in 0..attempts {
+        if tokio::net::TcpStream::connect((host, port)).await.is_ok() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    false
+}
+
+/// ops-server 二进制的候选路径：`ZHIWEI_OPS_BIN` 优先，其次与 monitor 同目录。
+fn ops_binary_candidates(exe: Option<&Path>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(p) = std::env::var("ZHIWEI_OPS_BIN") {
+        let p = p.trim();
+        if !p.is_empty() {
+            out.push(PathBuf::from(p));
+        }
+    }
+    if let Some(dir) = exe.and_then(Path::parent) {
+        out.push(dir.join("zhiwei-ops"));
+    }
+    out
+}
+
+fn locate_ops_binary() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok();
+    ops_binary_candidates(exe.as_deref())
+        .into_iter()
+        .find(|p| p.is_file())
+}
+
+/// 命令通道的兜底启动：等价于 `scripts/docker-entrypoint.sh` 里那段 `start_ops`，
+/// 但放进 monitor 进程内，好让「只装了一个二进制」的部署也能用写操作。
+///
+/// 边界没变：ops 仍是独立进程，签名私钥只在它手里，monitor 只读 `ops.pub`。
+///
+/// - `ZHIWEI_OPS_DISABLE=1` → 明确声明「只跑数据平面」，不动
+/// - 端口上已经在监听 → 外部已经起了（entrypoint / dev.sh / 自建 unit）
+/// - 找不到 `zhiwei-ops` → 给一句可操作的提示，不假装成功
+async fn ensure_ops_control_plane(data_dir: &Path, endpoint: &str) {
+    if std::env::var("ZHIWEI_OPS_DISABLE").ok().as_deref() == Some("1") {
+        tracing::info!("ZHIWEI_OPS_DISABLE=1：不拉起 ops-server，命令通道不可用（数据平面照常）");
+        return;
+    }
+    let Some((host, port)) = endpoint_host_port(endpoint) else {
+        tracing::warn!(%endpoint, "ops endpoint 不是 http://host:port 形态，跳过兜底启动");
+        return;
+    };
+    // 外部可能已经在跑（entrypoint / dev.sh / 自建 unit）。给它一点重试窗口，
+    // 别因为几毫秒的启动差把第二个 ops 也拉起来。
+    if wait_for_port(&host, port, 8).await {
+        tracing::debug!(%endpoint, "ops-server 已在运行（命令通道可用）");
+        return;
+    }
+
+    let Some(bin) = locate_ops_binary() else {
+        tracing::warn!(
+            %endpoint,
+            "命令通道不可用：该地址上没有进程在监听，也没找到 zhiwei-ops 二进制。\
+             把 zhiwei-ops 与 zhiwei-monitor 放在同一目录（或用 ZHIWEI_OPS_BIN 指定路径）后重启；\
+             只想跑数据平面的话显式设 ZHIWEI_OPS_DISABLE=1。"
+        );
+        return;
+    };
+
+    match tokio::process::Command::new(&bin)
+        .env("ZHIWEI_DATA_DIR", data_dir)
+        // 让被拉起的 ops 监听 monitor 真正要连的那个地址（ops 默认 8444，
+        // 配置里改过 ops_endpoint 时不能靠默认值撞运气）
+        .env("ZHIWEI_OPS_LISTEN", format!("{host}:{port}"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+    {
+        Ok(child) => {
+            tracing::info!(
+                bin = %bin.display(),
+                pid = child.id().unwrap_or(0),
+                "已拉起 ops-server（控制平面）；签名私钥只在它进程内"
+            );
+            // 等它「就绪」再往下走，判据是端口能被连上，而不是 ops.pub 存在：
+            // ops 是先开库跑迁移、后 bind，所以端口通了同时意味着
+            //   ① ops.pub 已落盘——monitor 启动时读一次并缓存，读早了新入网
+            //      节点会拿到空公钥、命令通道静默失效；
+            //   ② 迁移已跑完——两个进程同时对同一个 SQLite 跑 `CREATE TABLE`
+            //      会撞车（实测 monitor 直接起不来：`table nodes already exists`）。
+            if wait_for_port(&host, port, 60).await {
+                tracing::info!(%endpoint, "ops-server 已就绪（命令通道可用）");
+            } else {
+                tracing::warn!(%endpoint, "ops-server 9 秒内没起来，命令通道可能不可用");
+            }
+            // 交给 tokio 的 SIGCHLD 收尸，这里不 wait（monitor 会一直跑）
+            drop(child);
+        }
+        Err(e) => tracing::warn!(bin = %bin.display(), error = %e, "拉起 ops-server 失败"),
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -177,6 +289,12 @@ async fn main() -> anyhow::Result<()> {
     tokio::fs::create_dir_all(&data_dir)
         .await
         .with_context(|| format!("creating data dir {}", data_dir.display()))?;
+
+    // 命令通道（控制台里的删容器 / 拉日志 / 重启主机…）由 ops-server 签发。
+    // 镜像的 entrypoint 与 dev.sh 都会先起它；只有「直接跑二进制」的部署没有
+    // 第二个进程的位置，控制台里所有写操作都会报「ops-server 不可用」。
+    // 这里做兜底：连不上且旁边就有 zhiwei-ops 时自己把它拉起来。
+    ensure_ops_control_plane(&data_dir, &cfg.ops_endpoint).await;
 
     // 没有显式传 --plain-http / ZHIWEI_PLAIN_HTTP 时，按 PaaS 环境自动判断。
     // 显式 false 永远覆盖自动判断——自建部署保持 TLS 本地终结。
@@ -476,7 +594,35 @@ fn load_help_markdown() -> crate::state::HelpContent {
 
 #[cfg(test)]
 mod listen_tests {
-    use super::listen_is_loopback;
+    use super::{endpoint_host_port, listen_is_loopback, ops_binary_candidates};
+    use std::path::Path;
+
+    #[test]
+    fn parses_ops_endpoint() {
+        assert_eq!(
+            endpoint_host_port("http://127.0.0.1:8444/exec"),
+            Some(("127.0.0.1".to_string(), 8444))
+        );
+        // 没有端口时按 ops 的默认 8444
+        assert_eq!(
+            endpoint_host_port("http://127.0.0.1/exec"),
+            Some(("127.0.0.1".to_string(), 8444))
+        );
+        // 只支持本机明文 http（ops 的监听形态）
+        assert_eq!(endpoint_host_port("https://127.0.0.1:8444/exec"), None);
+        assert_eq!(endpoint_host_port("127.0.0.1:8444"), None);
+    }
+
+    #[test]
+    fn ops_binary_candidates_include_sibling() {
+        // 不设 ZHIWEI_OPS_BIN 时，候选里必须有「与自己同目录的 zhiwei-ops」，
+        // 否则单独装二进制（release 包把两个二进制放一起）的部署永远拉不起命令通道
+        let list = ops_binary_candidates(Some(Path::new("/usr/local/bin/zhiwei-monitor")));
+        assert!(
+            list.contains(&std::path::PathBuf::from("/usr/local/bin/zhiwei-ops")),
+            "候选路径里应有与 monitor 同目录的 zhiwei-ops：{list:?}"
+        );
+    }
 
     #[test]
     fn flags_loopback_addresses() {

@@ -70,12 +70,16 @@ curl -sSL https://zhiwei.example.com/install-node.sh | \
 monitor 连不上 ops：
 
 - **自建 / 裸机**：`zhiwei-ops` 没起。它是独立进程，默认只监听
-  `127.0.0.1:8444`，monitor 通过 `ZHIWEI_OPS_URL` 找它；把它按 systemd
-  unit 或 `ZHIWEI_OPS_URL=... zhiwei-ops` 拉起来即可。
+  `127.0.0.1:8444`，monitor 通过 `ZHIWEI_OPS_URL` 找它。**装的如果是发行包**
+  （`install.sh --bin monitor` 会把 `zhiwei-ops` 装在 `zhiwei-monitor` 旁边），
+  monitor 启动时会发现该端口没人监听、并自动把同目录的 `zhiwei-ops` 拉起来；
+  手工只留了 `zhiwei-monitor` 一个二进制、或路径不在一起时，用
+  `ZHIWEI_OPS_BIN=/path/to/zhiwei-ops` 指一下，或自己按 systemd unit 起
+  `zhiwei-ops`。
 - **容器 / 托管平台**：本该由镜像的 entrypoint 在同一个容器里一并拉起
-  `zhiwei-ops`。如果你用面板的 Command 字段覆盖了 entrypoint，或者拿
-  `zhiwei-monitor` 二进制自己拼启动命令，就只剩数据平面在跑——去掉覆盖，
-  或自己把 `zhiwei-ops &` 加进启动命令。
+  `zhiwei-ops`。如果你用面板的 Command 字段覆盖了 entrypoint，且没让
+  `zhiwei-ops` 与 `zhiwei-monitor` 待在同一目录，就只剩数据平面在跑——
+  去掉覆盖，或自己把 `zhiwei-ops &` 加进启动命令。
 - 只想要 telemetry + 探活 + 证书扫描（不需要远程命令）：报错可以无视，
   也可以显式 `ZHIWEI_OPS_DISABLE=1`，控制台会改报「命令通道未启用」。
 

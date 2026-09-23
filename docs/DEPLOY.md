@@ -12,9 +12,16 @@
 ### 直接跑二进制
 
 ```sh
-cargo build --release --bin zhiwei-monitor
+cargo build --release --bin zhiwei-monitor --bin zhiwei-ops
 ./target/release/zhiwei-monitor --data-dir /var/lib/zhiwei --listen 127.0.0.1:8443
 ```
+
+`zhiwei-monitor` 启动时会看一眼 `ops_endpoint`（默认 `http://127.0.0.1:8444/exec`）：
+该端口上没有进程、而**与它同目录**有 `zhiwei-ops` 时，会自动把控制平面拉起来
+（预编译包把两个二进制放在一起；路径可用 `ZHIWEI_OPS_BIN` 覆盖）。所以上面这条命令
+控制台里的写操作（删容器 / 拉日志 / 重启主机）直接可用——只想知道为什么以前不能，
+见[「命令通道」](#命令通道ops-server-与-monitor-同容器运行)。只想跑数据平面就设
+`ZHIWEI_OPS_DISABLE=1`。
 
 首次启动会：
 
@@ -409,7 +416,7 @@ curl -fsSL https://raw.githubusercontent.com/hancic128/zhiwei/main/scripts/insta
 Linux 默认装 musl 静态版（不挑 glibc 版本，老发行版也能跑）。常用开关：
 
 ```sh
-# 装 monitor 而不是 node-agent
+# 装 monitor 而不是 node-agent（会连带装 zhiwei-ops，命令通道的控制平面）
 ... | sh -s -- --bin monitor
 
 # 指定版本 / 目录 / 用动态链接版

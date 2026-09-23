@@ -58,11 +58,11 @@ jobs:
 
       - name: Build (Linux, via cross)
         if: runner.os == 'Linux'
-        run: cross build --release --target ${{ matrix.target }} --bin zhiwei-node --bin zhiwei-monitor
+        run: cross build --release --target ${{ matrix.target }} --bin zhiwei-node --bin zhiwei-monitor --bin zhiwei-ops
 
       - name: Build (macOS, native)
         if: runner.os == 'macOS'
-        run: cargo build --release --target ${{ matrix.target }} --bin zhiwei-node --bin zhiwei-monitor
+        run: cargo build --release --target ${{ matrix.target }} --bin zhiwei-node --bin zhiwei-monitor --bin zhiwei-ops
 
       - name: Package
         shell: bash
@@ -78,6 +78,10 @@ jobs:
           staging="$(mktemp -d)"
           cp "$dir/zhiwei-node" "$staging/"
           cp "$dir/zhiwei-monitor" "$staging/"
+          # ops-server（控制平面）必须一起打包：命令通道（删容器 / 拉日志 /
+          # 重启主机）要它签名才能下发，只发 monitor 的部署会一直报
+          # 「ops-server 不可用：Connection refused」。
+          cp "$dir/zhiwei-ops" "$staging/"
           # 分开 copy 并逐个判存在：`cp README.md LICENSE dest/` 在 LICENSE
           # 缺失时会整条失败，可能连 README 都拷不进去（各平台 cp 行为不一致）。
           # 本仓库当前没有 LICENSE 文件，所以这条路径是常态而非异常。
