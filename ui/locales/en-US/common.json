@@ -381,7 +381,7 @@
     "refresh": "Refresh",
     "untranslatedHint": "Translation not yet available. Showing Chinese.",
     "empty": "Help content not loaded yet",
-    "emptyHint": "The server tries to load help.md on boot; ask an admin if missing.",
+    "emptyHint": "Help content is compiled into the monitor binary (assets/help.md); a missing page means the build is incomplete.",
     "toc": "On this page"
   },
   "containers": {

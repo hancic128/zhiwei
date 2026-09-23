@@ -381,7 +381,7 @@
     "refresh": "刷新",
     "untranslatedHint": "翻译暂未提供。当前显示中文版本。",
     "empty": "帮助内容还没准备好",
-    "emptyHint": "后端启动时尝试加载 help.md；缺失请联系管理员。",
+    "emptyHint": "帮助内容随监控服务一起编译进二进制（assets/help.md）；缺失说明这次构建不完整。",
     "toc": "本页目录"
   },
   "containers": {
