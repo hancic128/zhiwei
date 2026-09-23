@@ -614,6 +614,17 @@ async fn enroll_handler(
         .collect();
     let labels_json = serde_json::to_string(&labels_map).unwrap_or_else(|_| "{}".into());
 
+    // 节点侧可选的别名 / 标签（`zhiwei-node --alias/--tags`，install-node.sh 也支持）。
+    // 规则与控制台 PATCH 完全一致：越界值直接 400，而不是截断后静默入库。
+    let alias = match normalize_alias(&req.alias) {
+        Ok(a) => a,
+        Err(msg) => return err(StatusCode::BAD_REQUEST, msg),
+    };
+    let tags = match normalize_tags(&req.tags) {
+        Ok(t) => t,
+        Err(msg) => return err(StatusCode::BAD_REQUEST, msg),
+    };
+
     let now = zhiwei_common::Timestamp::now().unix_nano();
     let record = zhiwei_storage::node_repo::NodeRecord {
         id: node_id.to_string(),
@@ -625,9 +636,9 @@ async fn enroll_handler(
         // 主机信息在第一次 telemetry 上报时才填充
         host_info_json: "{}".to_string(),
         public_key: public_key_b64.clone(),
-        // 别名与标签由管理员在控制台维护，入网时为空
-        alias: String::new(),
-        tags_json: "[]".to_string(),
+        // 别名与标签：节点侧可以自带（可选），之后由管理员在控制台维护
+        alias,
+        tags_json: serde_json::to_string(&tags).unwrap_or_else(|_| "[]".to_string()),
     };
     if let Err(e) = state.storage.nodes().insert(&record).await {
         return err(
@@ -888,6 +899,40 @@ const MAX_TAGS: usize = 10;
 /// 单个标签长度上限
 const MAX_TAG_CHARS: usize = 24;
 
+/// 归一化别名：去首尾空白并按字符数校验。
+fn normalize_alias(raw: &str) -> Result<String, String> {
+    let alias = raw.trim().to_string();
+    if alias.chars().count() > MAX_ALIAS_CHARS {
+        return Err(format!("别名最多 {MAX_ALIAS_CHARS} 个字符"));
+    }
+    Ok(alias)
+}
+
+/// 归一化标签：去空白 / 去空串 / 去重（保持顺序），再校验个数与长度。
+///
+/// 控制台改元数据（`PATCH /v1/nodes/:id`）与节点入网自报（`EnrollRequest`）共用，
+/// 两条路径的规则必须一致——否则节点侧能塞进控制台拒绝的值。
+fn normalize_tags(raw: &[String]) -> Result<Vec<String>, String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut cleaned = Vec::new();
+    for tag in raw {
+        let tag = tag.trim();
+        if tag.is_empty() {
+            continue;
+        }
+        if tag.chars().count() > MAX_TAG_CHARS {
+            return Err(format!("单个标签最多 {MAX_TAG_CHARS} 个字符"));
+        }
+        if seen.insert(tag.to_string()) {
+            cleaned.push(tag.to_string());
+        }
+    }
+    if cleaned.len() > MAX_TAGS {
+        return Err(format!("标签最多 {MAX_TAGS} 个"));
+    }
+    Ok(cleaned)
+}
+
 #[derive(Deserialize)]
 struct NodeMetaPatch {
     /// 缺省 = 不改（区别于传空串 = 清空别名）
@@ -930,45 +975,18 @@ async fn patch_node_handler(
     };
 
     let alias = match patch.alias {
-        Some(a) => {
-            let a = a.trim();
-            let chars = a.chars().count();
-            if chars > MAX_ALIAS_CHARS {
-                return err(
-                    StatusCode::BAD_REQUEST,
-                    format!("别名最多 {MAX_ALIAS_CHARS} 个字符"),
-                );
-            }
-            a.to_string()
-        }
+        Some(a) => match normalize_alias(&a) {
+            Ok(a) => a,
+            Err(msg) => return err(StatusCode::BAD_REQUEST, msg),
+        },
         None => current.alias.clone(),
     };
 
     let tags = match patch.tags {
-        Some(raw) => {
-            // 去空白 / 去空串 / 去重，保持用户给的顺序
-            let mut seen = std::collections::HashSet::new();
-            let mut cleaned = Vec::new();
-            for tag in raw {
-                let tag = tag.trim();
-                if tag.is_empty() {
-                    continue;
-                }
-                if tag.chars().count() > MAX_TAG_CHARS {
-                    return err(
-                        StatusCode::BAD_REQUEST,
-                        format!("单个标签最多 {MAX_TAG_CHARS} 个字符"),
-                    );
-                }
-                if seen.insert(tag.to_string()) {
-                    cleaned.push(tag.to_string());
-                }
-            }
-            if cleaned.len() > MAX_TAGS {
-                return err(StatusCode::BAD_REQUEST, format!("标签最多 {MAX_TAGS} 个"));
-            }
-            cleaned
-        }
+        Some(raw) => match normalize_tags(&raw) {
+            Ok(t) => t,
+            Err(msg) => return err(StatusCode::BAD_REQUEST, msg),
+        },
         None => parse_tags(&current.tags_json),
     };
 
@@ -3320,6 +3338,38 @@ mod ai_token_auth_tests {
         // 0x00 与 UTF-8 NUL 字符串同字节序列，哈希应一致
         let bytes = [0u8, 159, 146, 150];
         assert_eq!(sha256_hex(&bytes), sha256_hex(&bytes[..]));
+    }
+}
+
+#[cfg(test)]
+mod node_meta_tests {
+    use super::*;
+
+    #[test]
+    fn alias_limited_by_chars_not_bytes() {
+        // 10 个汉字（30 字节）合法，11 个不合法
+        assert!(normalize_alias("一二三四五六七八九十").is_ok());
+        assert!(normalize_alias("一二三四五六七八九十一").is_err());
+        // 首尾空白先裁掉再算长度
+        assert_eq!(normalize_alias("  bj-1  ").unwrap(), "bj-1");
+    }
+
+    #[test]
+    fn tags_trim_dedupe_and_limit() {
+        let got = normalize_tags(&[
+            " prod ".to_string(),
+            "prod".to_string(),
+            "".to_string(),
+            "bj".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(got, vec!["prod", "bj"]);
+        // 单个标签按字符计
+        assert!(normalize_tags(&["字".repeat(24)]).is_ok());
+        assert!(normalize_tags(&["字".repeat(25)]).is_err());
+        // 个数上限
+        let many: Vec<String> = (0..11).map(|i| format!("t{i}")).collect();
+        assert!(normalize_tags(&many).is_err());
     }
 }
 

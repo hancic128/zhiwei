@@ -194,6 +194,10 @@ export function EnrollTokenDialog({
           <p className="text-xs text-ink-400">
             {t("dialog.enrollTokenSecretWarn")}
           </p>
+          {/* 节点侧也能自带别名 / 标签，这里点一句，免得用户装完再一台台补 */}
+          <p className="text-xs text-ink-400">
+            {t("dialog.enrollOptionalMeta")}
+          </p>
         </div>
       ) : autoCreate ? (
         <div className="py-8 text-center text-sm text-ink-500">

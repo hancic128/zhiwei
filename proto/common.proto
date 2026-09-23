@@ -45,6 +45,10 @@ message EnrollRequest {
   repeated Label labels = 3;
   // 节点 Ed25519 公钥（32 字节）。此后所有请求都用对应私钥签名。
   bytes public_key = 4;
+  // 可选：入网时由节点侧（zhiwei-node --alias / install-node.sh --alias）带上，
+  // 省得机器多了还要在控制台一台台补。管理员随后可以在控制台改。
+  string alias = 5;
+  repeated string tags = 6;
 }
 
 // enroll 响应：monitor 登记公钥并返回标识

@@ -785,6 +785,7 @@
     "commandCopied": "Command copied",
     "copyCommand": "Copy command",
     "enrollTokenSecretWarn": "The command embeds a plaintext token. Generate a new one before sharing or posting publicly.",
+    "enrollOptionalMeta": "To name the node at enrollment, append `-- --alias beijing-edge --tags \"prod bj\"` (or set ZHIWEI_NODE_ALIAS / ZHIWEI_NODE_TAGS).",
     "createAiToken": "New AI token",
     "createAiTokenDesc": "Long-lived credential for external agents to read cluster data; the plaintext is only returned once.",
     "aiTokenCreatedTitle": "AI token created",

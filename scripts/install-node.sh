@@ -24,12 +24,16 @@
 #       必须 root 运行（请用 sudo）。
 #
 # 参数：
-#   --uninstall    停服务 + 删 binary / env / unit（保留 state-dir 数据）
+#   --alias <名字>  可选：入网时一并设置别名（≤10 字符）
+#   --tags <列表>   可选：入网时一并设置标签，空格 / 逗号 / 顿号分隔（最多 10 个）
+#   --uninstall     停服务 + 删 binary / env / unit（保留 state-dir 数据）
 #   -h | --help
 #
 # 环境变量：
 #   ZHIWEI_MONITOR_URL       monitor URL（必填，安装时）
 #   ZHIWEI_BOOTSTRAP_TOKEN   入网令牌（必填，安装时）
+#   ZHIWEI_NODE_ALIAS        同 --alias
+#   ZHIWEI_NODE_TAGS         同 --tags
 #   ZHIWEI_VERSION           可选，仅用于日志/兜底；真实版本从包内 VERSION 读。
 #                            不设也能装（资产名不含版本号）。
 #   ZHIWEI_REPO              仓库 owner/name（默认 hancic128/zhiwei）
@@ -42,6 +46,9 @@
 #                            已知可用值：
 #                              - https://artifacts.hancic.site/releases/hancic128/zhiwei
 #                                （hancic-artifacts 国内直连，由 CI 每次 tag 同步）
+#
+# 别名 / 标签只在本机**第一次入网**时上报：已经有 node.id 的机器不会再 enroll，
+# 重复执行本脚本改不了它们——请在控制台改，或 rm -rf <state-dir> 后重跑。
 
 set -euo pipefail
 umask 077
@@ -76,9 +83,23 @@ usage() {
 
 # ---- 参数解析 ----
 ACTION="install"
+# 可选元数据：入网时一并上报（也可以走 ZHIWEI_NODE_ALIAS / ZHIWEI_NODE_TAGS）
+NODE_ALIAS="${ZHIWEI_NODE_ALIAS:-}"
+NODE_TAGS="${ZHIWEI_NODE_TAGS:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
+    --alias)
+      [ $# -ge 2 ] || die "--alias 后面要跟一个值"
+      NODE_ALIAS="$2"; shift 2 ;;
+    --alias=*) NODE_ALIAS="${1#*=}"; shift ;;
+    --tags)
+      [ $# -ge 2 ] || die "--tags 后面要跟一个值"
+      NODE_TAGS="$2"; shift 2 ;;
+    --tags=*) NODE_TAGS="${1#*=}"; shift ;;
     --uninstall) ACTION="uninstall"; shift ;;
+    # `bash -s -- --alias x` 时 bash 自己吃掉一个 `--`，但直连 `sh install-node.sh -- --alias x`
+    # 会把它留给我们，跳过即可
+    --) shift ;;
     -h|--help)   usage; exit 0 ;;
     *) die "未知参数: $1（用 --help 看用法）" ;;
   esac
@@ -263,12 +284,23 @@ if [ -n "${LOG_FILE}" ]; then
   mkdir -p "$(dirname "${LOG_FILE}")"
 fi
 log "写 ${ENV_FILE}（mode 0600）"
+# env 文件既被 systemd 的 EnvironmentFile 读，也被 macOS 的 `set -a; . file` 读；
+# 先去会破坏这两种解析的字符，再整体加双引号，两边都能原样取回。
+env_quote() { printf '"%s"' "$(printf '%s' "$1" | sed 's/["\\]//g')"; }
 {
   echo "# ZhiWei 节点配置（由 install-node.sh 生成，请勿手工编辑；重跑脚本会覆盖）"
   echo "# ZHIWEI_MONITOR_URL:    monitor 服务器地址（节点要上报到的目标）"
   echo "# ZHIWEI_BOOTSTRAP_TOKEN: 入网令牌（首次启动后可在 monitor 撤销；节点本地有 signing.key，不再需要它）"
   echo "ZHIWEI_MONITOR_URL=${ZHIWEI_MONITOR_URL}"
   echo "ZHIWEI_BOOTSTRAP_TOKEN=${ZHIWEI_BOOTSTRAP_TOKEN}"
+  if [ -n "${NODE_ALIAS}" ]; then
+    echo "# ZHIWEI_NODE_ALIAS:     入网时上报的别名（只影响本机第一次 enroll）"
+    echo "ZHIWEI_NODE_ALIAS=$(env_quote "${NODE_ALIAS}")"
+  fi
+  if [ -n "${NODE_TAGS}" ]; then
+    echo "# ZHIWEI_NODE_TAGS:      入网时上报的标签（只影响本机第一次 enroll）"
+    echo "ZHIWEI_NODE_TAGS=$(env_quote "${NODE_TAGS}")"
+  fi
 } > "${tmpdir}/node.env"
 install_file 0600 "${tmpdir}/node.env" "${ENV_FILE}"
 
@@ -377,6 +409,10 @@ if [ -f "${STATE_DIR}/node.id" ]; then
     log "本机已有节点身份（保留 ${STATE_DIR}/node.id）"
     log "  若控制台里看不到它，多半是这个身份不属于 ${ZHIWEI_MONITOR_URL}："
     log "  rm -rf ${STATE_DIR} 后重跑本脚本即可重新入网"
+    if [ -n "${NODE_ALIAS}${NODE_TAGS}" ]; then
+      log "! --alias / --tags 只在第一次入网时上报；这台已经有身份，本次不会推送这些改动"
+      log "  想改它们请在控制台里改（节点页面 → 编辑），或先清掉身份重新入网"
+    fi
     identity_state="kept"
   fi
 fi

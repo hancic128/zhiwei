@@ -65,6 +65,18 @@ struct Args {
     #[arg(long, env = "ZHIWEI_NODE_NAME", default_value = "")]
     node_name: String,
 
+    /// 入网时一并设置的别名（≤10 字符）。
+    ///
+    /// 只在**首次 enroll** 生效：节点一旦有 node.id 就不再 enroll，重复设置无效。
+    /// 已经入网的机器请在控制台改（或删掉 state 目录重新入网）。
+    #[arg(long, env = "ZHIWEI_NODE_ALIAS", default_value = "")]
+    alias: String,
+
+    /// 入网时一并设置的标签，空格 / 逗号 / 顿号分隔（最多 10 个，每个 ≤24 字符）。
+    /// 同样只在首次 enroll 生效。
+    #[arg(long, env = "ZHIWEI_NODE_TAGS", default_value = "")]
+    tags: String,
+
     /// 覆盖 pin 用的 monitor CA，传文件路径。
     ///
     /// 默认（留空）用 enroll 下发的那个 CA——自建 TLS 部署该这样用。
@@ -118,7 +130,14 @@ async fn main() -> anyhow::Result<()> {
             .clone()
             .context("--bootstrap-token (or ZHIWEI_BOOTSTRAP_TOKEN) required for first run")?;
         tracing::info!("first run: enrolling with monitor");
-        let resp = enroll(&args.monitor, &token, &mut state).await?;
+        let resp = enroll(
+            &args.monitor,
+            &token,
+            &mut state,
+            args.alias.as_str(),
+            args.tags.as_str(),
+        )
+        .await?;
         tracing::info!(node_id = %resp.node_id, "enrollment complete");
     } else {
         tracing::info!(node_id = %state.node_id.clone().unwrap_or_default(), "already enrolled");
@@ -306,11 +325,19 @@ async fn enroll(
     monitor: &str,
     token: &str,
     state: &mut NodeState,
+    alias: &str,
+    tags: &str,
 ) -> anyhow::Result<EnrollResponse> {
     let hostname = state.node_name.clone();
 
     // 身份就是这个 Ed25519 公钥：enroll 时登记，此后每次请求用它对应的私钥签名
     let public_key = state.signing_key.public_key().as_bytes().to_vec();
+
+    let alias = alias.trim().to_string();
+    let tags = split_tags(tags);
+    if !alias.is_empty() || !tags.is_empty() {
+        tracing::info!(alias = %alias, tags = ?tags, "入网时一并设置别名 / 标签");
+    }
 
     let req = EnrollRequest {
         hostname: hostname.clone(),
@@ -319,6 +346,8 @@ async fn enroll(
             key: "role".into(),
             value: "node".into(),
         }],
+        alias,
+        tags,
     };
     let mut buf = Vec::new();
     prost::Message::encode(&req, &mut buf)?;
@@ -430,6 +459,18 @@ fn snapshot_processes(sys: &sysinfo::System) -> ProcessSnapshot {
     procs.sort_by(by_cpu);
 
     ProcessSnapshot { processes: procs }
+}
+
+/// 解析 `--tags` / `ZHIWEI_NODE_TAGS`：空白、英文逗号、中文逗号、顿号都算分隔符；
+/// 去空串、去重（保持顺序）。分隔符与控制台（node-meta-dialog）保持一致，
+/// 免得「这里能分开、那里分不开」。
+fn split_tags(raw: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    raw.split(|c: char| c.is_whitespace() || matches!(c, ',' | '，' | '、'))
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && seen.insert(s.to_string()))
+        .map(str::to_string)
+        .collect()
 }
 
 /// 系统主机名可能是占位值（macOS 在反查 PTR 拿到 bogon 时会把主机名设成
@@ -814,5 +855,29 @@ mod tests {
             .unwrap();
         assert_eq!(a.interval, 5, "命令行 --interval 5 应覆盖 env");
         std::env::remove_var("ZHIWEI_INTERVAL");
+    }
+
+    /// 入网时带的标签：空格也要能分开（以前只认逗号，粘贴「prod bj」会变成一个标签）。
+    #[test]
+    fn splits_tags_on_space_and_comma() {
+        assert_eq!(split_tags("prod,bj"), vec!["prod", "bj"]);
+        assert_eq!(split_tags("prod bj"), vec!["prod", "bj"]);
+        assert_eq!(split_tags("prod，bj、入口"), vec!["prod", "bj", "入口"]);
+        // 去空串与重复，保持顺序
+        assert_eq!(split_tags("  a ,, a,b  "), vec!["a", "b"]);
+        assert!(split_tags("   ").is_empty());
+    }
+
+    /// 别名 / 标签走 env（install-node.sh 写进 0600 的 env 文件，systemd / launchd 再注入）。
+    #[test]
+    fn alias_and_tags_read_from_env() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("ZHIWEI_NODE_ALIAS", "北京入口");
+        std::env::set_var("ZHIWEI_NODE_TAGS", "prod bj");
+        let a = Args::try_parse_from(["zhiwei-node", "--monitor", "http://x"]).unwrap();
+        assert_eq!(a.alias, "北京入口");
+        assert_eq!(split_tags(&a.tags), vec!["prod", "bj"]);
+        std::env::remove_var("ZHIWEI_NODE_ALIAS");
+        std::env::remove_var("ZHIWEI_NODE_TAGS");
     }
 }

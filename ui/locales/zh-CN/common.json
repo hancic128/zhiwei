@@ -785,6 +785,7 @@
     "commandCopied": "命令已复制",
     "copyCommand": "复制命令",
     "enrollTokenSecretWarn": "命令里包含明文 token。转给他人或贴到公开 issue 前请重新生成。",
+    "enrollOptionalMeta": "想让这台机器第一次入网就带上名字：命令末尾加 `-- --alias 北京入口 --tags \"prod bj 入口\"`（也可用环境变量 ZHIWEI_NODE_ALIAS / ZHIWEI_NODE_TAGS）。",
     "createAiToken": "新建 AI token",
     "createAiTokenDesc": "给 agent 用的长期凭据，可以读集群里的数据；明文只在创建时返回一次。",
     "aiTokenCreatedTitle": "AI token 已生成",

@@ -35,6 +35,20 @@ curl -sSL https://zhiwei.example.com/install-node.sh | \
 - 注册 systemd 服务 `zhiwei-node.service` 并启动
 - 节点 30 秒内出现在「节点」列表里
 
+想在这台机器**第一次入网时就带上名字**，给脚本加两个参数（也可用环境变量
+`ZHIWEI_NODE_ALIAS` / `ZHIWEI_NODE_TAGS`）：
+
+```
+curl -sSL https://zhiwei.example.com/install-node.sh | \
+  ZHIWEI_MONITOR_URL=https://zhiwei.example.com \
+  ZHIWEI_BOOTSTRAP_TOKEN=zhi-bt-xxxxxxxx \
+  bash -s -- --alias 北京入口 --tags "prod bj 入口"
+```
+
+标签用空格 / 逗号 / 顿号分隔都行（同控制台的输入框）。它们**只在第一次入网
+时上报**：机器已经有 `node.id` 就不会再 enroll，改它们要去控制台，或删掉
+`/var/lib/zhiwei-node` 重新入网。
+
 ### 3. （可选）反转入网
 
 如果节点先于控制台运行（例如在 CI 里临时拉起一台机器），让它从环境
@@ -44,7 +58,8 @@ curl -sSL https://zhiwei.example.com/install-node.sh | \
 ### 4. 起个名字：别名与标签
 
 入网只看主机名（一长串 `VM-16-12-opencloudos` 那种）不好认，控制台里可以
-给每台节点补两层元数据——列表里「主机」列右侧的编辑按钮打开即可：
+给每台节点补两层元数据——列表里「主机」列右侧的编辑按钮打开即可；也可以在
+**第一次入网时**就让节点自己带上（`install-node.sh --alias/--tags`，见第 2 节）：
 
 | | 别名 | 标签 |
 |--|------|------|
