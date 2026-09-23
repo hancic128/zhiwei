@@ -257,10 +257,11 @@ mkdir -p "$INSTALL_DIR"
 if [ -x "${INSTALL_DIR}/${BIN_NAME}" ]; then
   # 已装：读版本（假设 binary --version 最后一行最后字段是版本号；不识别则当作 ? 强制覆盖）
   #
-  # `|| true` 是必需的：--version 不是合法参数时 clap 以 2 退出，而 `set -o pipefail`
-  # 让这个管道整体失败，赋值语句一失败 `set -e` 就把整个脚本终止在这里——偏偏
-  # `2>/dev/null` 把唯一的报错也吞了，于是只有最前面几行日志、后面 env 文件 /
-  # unit / 服务全都没写，看起来却像装成功了（2026-09-22 就是这么踩的）。
+  # `|| true` 必须留着：v0.1.1 之前的二进制没开 clap 的 version，`--version`
+  # 会以 2 退出，而 `set -o pipefail` 让这个管道整体失败，赋值语句一失败
+  # `set -e` 就把整个脚本终止在这里——偏偏 `2>/dev/null` 把唯一的报错也吞了，
+  # 于是只有最前面几行日志、后面 env 文件 / unit / 服务全都没写，看起来却像
+  # 装成功了（2026-09-22 就是这么踩的）。
   installed_ver="$("${INSTALL_DIR}/${BIN_NAME}" --version 2>/dev/null \
     | tail -n1 | awk '{print $NF}' || true)"
   if [ -n "$installed_ver" ] && [ "$installed_ver" = "$pkg_version" ]; then

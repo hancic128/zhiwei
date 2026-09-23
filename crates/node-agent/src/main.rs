@@ -30,7 +30,7 @@ mod http;
 mod probes;
 
 #[derive(Parser, Debug)]
-#[command(name = "zhiwei-node", about = "ZhiWei node-agent")]
+#[command(name = "zhiwei-node", about = "ZhiWei node-agent", version)]
 struct Args {
     /// Monitor URL (e.g. https://127.0.0.1:8443)
     #[arg(long, env = "ZHIWEI_MONITOR_URL")]

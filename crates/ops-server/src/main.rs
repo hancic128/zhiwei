@@ -26,7 +26,11 @@ use zhiwei_common::{KeyPair, Timestamp};
 use zhiwei_proto::control::{Action, Command};
 
 #[derive(Parser, Debug)]
-#[command(name = "zhiwei-ops", about = "ZhiWei ops-server (control plane)")]
+#[command(
+    name = "zhiwei-ops",
+    about = "ZhiWei ops-server (control plane)",
+    version
+)]
 struct Args {
     /// 数据目录（与 monitor 共用，命令写进同一个库）
     #[arg(long, default_value = "data", env = "ZHIWEI_DATA_DIR")]

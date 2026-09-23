@@ -42,7 +42,11 @@ mod todo_api;
 use state::AppState;
 
 #[derive(Parser, Debug)]
-#[command(name = "zhiwei-monitor", about = "ZhiWei monitor-server (data plane)")]
+#[command(
+    name = "zhiwei-monitor",
+    about = "ZhiWei monitor-server (data plane)",
+    version
+)]
 struct Args {
     /// Path to config TOML
     #[arg(long, default_value = "config/monitor.toml")]
