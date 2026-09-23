@@ -62,6 +62,113 @@ fn metric_label(metric: &str) -> (&str, &str) {
     }
 }
 
+/// 一条告警的「事实」——渠道渲染的唯一输入。
+///
+/// 四类告警源（指标 / 节点上下线 / 服务探针 / 证书到期）能拿出来的东西并不一样：
+/// 指标有当前值与阈值，探针有服务名，证书有剩余天数。所以这里不放各自的业务字段，
+/// 只放「渲染需要什么」：谁、是触发还是恢复、卡片分几栏、正文那句话。各调用点把
+/// 自己知道的填进来，渠道侧不必理解四套语义。
+pub struct AlertFacts {
+    /// 节点显示名（别名优先）
+    pub node: String,
+    /// true = 告警中，false = 已恢复。标题文案与配色都由它决定
+    pub firing: bool,
+    /// 卡片分栏，顺序即展示顺序（飞书每行两栏）
+    pub fields: Vec<(&'static str, String)>,
+    /// 正文那句话：说清「什么事、多严重」
+    pub detail: String,
+}
+
+/// 严重度 + 触发/恢复 →（文案，标题 emoji）。
+///
+/// 恢复单独成一档是有意的：以前恢复通知复用 warning 模板，手机上只显示
+/// 「[警告] 服务 X · Y」，看着像又告警了一次。
+fn level_text(rule: &AlertRule, firing: bool) -> (&'static str, &'static str) {
+    if !firing {
+        ("已恢复", "✅")
+    } else if rule.severity == "critical" {
+        ("严重", "🔴")
+    } else {
+        ("警告", "🟠")
+    }
+}
+
+/// 卡片标题栏配色：绿=已恢复，红=严重，橙=其余。
+fn header_template(rule: &AlertRule, firing: bool) -> &'static str {
+    if !firing {
+        "green"
+    } else if rule.severity == "critical" {
+        "red"
+    } else {
+        "orange"
+    }
+}
+
+/// 动态值进 `lark_md` 前的中和。
+///
+/// 只有 `<` 能开启 lark_md 标签，而节点别名是**没有字符校验**的用户输入
+/// （见 `routes::normalize_alias`，只 trim + 限长），别名填 `<at id=all></at>`
+/// 就会真的 @所有人。这里换成全角 `＜` 而不是删掉：既挡掉标签解析，又不会像删字符
+/// 那样把「阈值 `> 90%`」这类正常内容弄坏（`>` 在 lark_md 里不是标记，原样留着）。
+fn md_escape(raw: &str) -> String {
+    raw.replace('<', "＜").replace('\n', " ").replace('\r', " ")
+}
+
+/// 卡片底部来源行（正文与标题都给了信息，这里只标来源）
+const CARD_SOURCE: &str = "zhiwei 节点监控";
+
+/// 飞书消息卡片（`msg_type: interactive`）。
+///
+/// 用卡片 1.0 而不是 2.0：2.0 经消息接口下发时会落到旧客户端的兜底文案
+/// （「请升级至最新版本客户端，以查看内容」），实测踩过。1.0 的 `header.template`
+/// 一样能上色，「折叠态也能一眼看出是告警还是恢复」这个诉求用 1.0 就能满足。
+fn feishu_card(rule: &AlertRule, facts: &AlertFacts) -> serde_json::Value {
+    let (level, emoji) = level_text(rule, facts.firing);
+
+    let mut elements: Vec<serde_json::Value> = Vec::new();
+    if !facts.fields.is_empty() {
+        let fields: Vec<serde_json::Value> = facts
+            .fields
+            .iter()
+            .map(|(label, value)| {
+                serde_json::json!({
+                    "is_short": true,
+                    "text": {
+                        "tag": "lark_md",
+                        "content": format!("**{label}**\n{}", md_escape(value)),
+                    },
+                })
+            })
+            .collect();
+        elements.push(serde_json::json!({ "tag": "div", "fields": fields }));
+        elements.push(serde_json::json!({ "tag": "hr" }));
+    }
+    // 正文用 plain_text：探针失败原因这类内容不可控，不能被当成 lark_md 标签解析
+    elements.push(serde_json::json!({
+        "tag": "div",
+        "text": { "tag": "plain_text", "content": facts.detail },
+    }));
+    elements.push(serde_json::json!({
+        "tag": "note",
+        "elements": [{ "tag": "plain_text", "content": CARD_SOURCE }],
+    }));
+
+    serde_json::json!({
+        "msg_type": "interactive",
+        "card": {
+            "config": { "wide_screen_mode": true },
+            "header": {
+                "template": header_template(rule, facts.firing),
+                "title": {
+                    "tag": "plain_text",
+                    "content": format!("{emoji} {level} · {}", rule.name),
+                },
+            },
+            "elements": elements,
+        },
+    })
+}
+
 /// 对一批 telemetry 跑一遍全部启用规则。
 pub async fn evaluate(state: &AppState, node_id: &NodeId, hostname: &str, batch: &TelemetryBatch) {
     let rules = match state.storage.alerts().enabled_rules().await {
@@ -130,7 +237,18 @@ pub async fn evaluate(state: &AppState, node_id: &NodeId, hostname: &str, batch:
                                 Some(value),
                             )
                             .await;
-                        notify(state, &rule, hostname, &message, now).await;
+                        let facts = AlertFacts {
+                            node: hostname.to_string(),
+                            firing: true,
+                            fields: vec![
+                                ("节点", hostname.to_string()),
+                                ("指标", label.to_string()),
+                                ("当前值", format!("{value:.1}{unit}")),
+                                ("阈值", format!("{sym}{threshold}{unit}")),
+                            ],
+                            detail: message.clone(),
+                        };
+                        notify(state, &rule, &facts, now).await;
                     }
                     Err(e) => warn!(error = %e, "开告警失败"),
                 }
@@ -176,8 +294,8 @@ pub async fn evaluate(state: &AppState, node_id: &NodeId, hostname: &str, batch:
     }
 }
 
-/// 按严重度投递到启用的通知渠道（当前仅 webhook）。
-async fn notify(state: &AppState, rule: &AlertRule, hostname: &str, message: &str, now: i64) {
+/// 按严重度投递到启用的通知渠道。
+async fn notify(state: &AppState, rule: &AlertRule, facts: &AlertFacts, now: i64) {
     let channels = match state.storage.alerts().list_channels().await {
         Ok(c) => c,
         Err(e) => {
@@ -190,7 +308,7 @@ async fn notify(state: &AppState, rule: &AlertRule, hostname: &str, message: &st
         .into_iter()
         .filter(|c| c.enabled && severity_rank(&c.min_severity) <= severity_rank(&rule.severity))
     {
-        let body = channel_body(&ch.kind, rule, hostname, message, now);
+        let body = channel_body(&ch.kind, rule, facts, now);
 
         if let Err(e) = post_webhook(&ch.url, &ch.secret, &body).await {
             warn!(channel = %ch.name, kind = %ch.kind, error = %e, "通知投递失败");
@@ -203,26 +321,18 @@ async fn notify(state: &AppState, rule: &AlertRule, hostname: &str, message: &st
 pub const CHANNEL_KINDS: &[&str] = &["webhook", "feishu", "dingtalk", "slack"];
 
 /// 组装通知体。`webhook` 给结构化 JSON（喂自己的接收端），其余三种按各自协议包一层。
-pub fn channel_body(
-    kind: &str,
-    rule: &AlertRule,
-    hostname: &str,
-    message: &str,
-    now: i64,
-) -> String {
+pub fn channel_body(kind: &str, rule: &AlertRule, facts: &AlertFacts, now: i64) -> String {
     match kind {
-        "feishu" => serde_json::json!({
-            "msg_type": "text",
-            "content": { "text": plain_text(rule, hostname, message) },
-        })
-        .to_string(),
+        // 飞书走消息卡片：彩色标题栏 + 分栏。折叠态只剩标题栏时，颜色本身就是
+        // 「严重 / 警告 / 已恢复」的信号，这是纯文本做不到的。
+        "feishu" => feishu_card(rule, facts).to_string(),
         "dingtalk" => serde_json::json!({
             "msgtype": "text",
-            "text": { "content": plain_text(rule, hostname, message) },
+            "text": { "content": plain_text(rule, facts) },
         })
         .to_string(),
         "slack" => serde_json::json!({
-            "text": plain_text(rule, hostname, message),
+            "text": plain_text(rule, facts),
         })
         .to_string(),
         // webhook（含未知 kind，按 webhook 处理）：结构化 JSON
@@ -232,13 +342,13 @@ pub fn channel_body(
         // 缺这两个字段的 webhook 会被通用接收端 `ignored` 掉（蓝鸟实测验证）。
         // 同时保留 `rule`/`severity`/... 让自建接收端也能消费。
         _ => serde_json::json!({
-            "title": plain_text(rule, hostname, message).lines().next().unwrap_or("").to_string(),
-            "text": plain_text(rule, hostname, message),
+            "title": plain_text(rule, facts).lines().next().unwrap_or("").to_string(),
+            "text": plain_text(rule, facts),
             "rule": rule.name,
             "severity": rule.severity,
-            "hostname": hostname,
+            "hostname": facts.node,
             "metric": rule.metric,
-            "value": message,
+            "value": facts.detail,
             "at_unix_nano": now,
         })
         .to_string(),
@@ -261,17 +371,35 @@ pub fn test_rule() -> AlertRule {
     }
 }
 
+/// 「测试通知」用的假事实。
+///
+/// 控制台的「测试」按钮要能**预演真实告警的样子**（含分栏），否则用户没法在群里
+/// 判断样式、只能等真出事才看见。所以这里刻意填成一条指标告警。
+pub fn test_facts() -> AlertFacts {
+    AlertFacts {
+        node: "zhiwei-test".into(),
+        firing: true,
+        fields: vec![
+            ("节点", "zhiwei-test".into()),
+            ("指标", "CPU 使用率".into()),
+            ("当前值", "92.3%".into()),
+            ("阈值", "> 90%".into()),
+        ],
+        detail: "这是一条测试通知，收到说明该渠道可用。".into(),
+    }
+}
+
 /// IM 文本通知：一眼能看出「哪台机器、多严重、什么事」。
 ///
 /// 第一行同时充当通用 webhook 的 `title`（见 [`channel_body`]）：手机 / 桌面
 /// 推送只展示标题行时，也必须能看出是哪台节点，所以节点名放在这里而不是正文。
-fn plain_text(rule: &AlertRule, hostname: &str, message: &str) -> String {
-    let level = if rule.severity == "critical" {
-        "严重"
-    } else {
-        "警告"
-    };
-    format!("[{level}] {}（{hostname}）\n{message}", rule.name)
+/// 恢复单独用「已恢复」而不是复用「警告」——否则手机上看着像又告警了一次。
+fn plain_text(rule: &AlertRule, facts: &AlertFacts) -> String {
+    let (level, _) = level_text(rule, facts.firing);
+    format!(
+        "[{level}] {}（{}）\n{}",
+        rule.name, facts.node, facts.detail
+    )
 }
 
 /// 服务探针状态翻转 → 开/关告警（`source = probe`），并按严重度投递通知。
@@ -303,7 +431,17 @@ pub async fn on_probe_transition(
                     "服务 {} 的探针 {} 已恢复（此前 {:?}）",
                     probe.service_name, probe.name, transition.previous_state
                 );
-                notify(state, &rule, hostname, &message, now).await;
+                let facts = AlertFacts {
+                    node: hostname.to_string(),
+                    firing: false,
+                    fields: vec![
+                        ("节点", hostname.to_string()),
+                        ("服务", probe.service_name.clone()),
+                        ("探针", probe.name.clone()),
+                    ],
+                    detail: message,
+                };
+                notify(state, &rule, &facts, now).await;
             }
             Ok(_) => {}
             Err(e) => warn!(error = %e, "关闭服务探针告警失败"),
@@ -342,7 +480,21 @@ pub async fn on_probe_transition(
         Ok(alert_id) => {
             info!(probe = %probe.name, alert_id, "服务探针告警触发");
             let rule = probe_alert_rule(&rule_name, severity);
-            notify(state, &rule, hostname, &message, now).await;
+            let facts = AlertFacts {
+                node: hostname.to_string(),
+                firing: true,
+                fields: vec![
+                    ("节点", hostname.to_string()),
+                    ("服务", probe.service_name.clone()),
+                    ("探针", probe.name.clone()),
+                    (
+                        "连续失败",
+                        format!("{} 次", transition.consecutive_failures),
+                    ),
+                ],
+                detail: message,
+            };
+            notify(state, &rule, &facts, now).await;
         }
         Err(e) => warn!(error = %e, "开服务探针告警失败"),
     }
@@ -487,7 +639,23 @@ pub async fn evaluate_cert_expiry(
                         Ok(id) => {
                             info!(cert = %name, %severity, id, "证书到期告警触发");
                             let rule = cert_alert_rule(&rule_name, severity);
-                            notify(state, &rule, hostname, &message, now).await;
+                            let days_field = if expired {
+                                format!("已过期 {} 天", (-days_left).floor().max(0.0) as i64)
+                            } else {
+                                format!("{} 天", days_left.floor().max(0.0) as i64)
+                            };
+                            let facts = AlertFacts {
+                                node: hostname.to_string(),
+                                firing: true,
+                                fields: vec![
+                                    ("节点", hostname.to_string()),
+                                    ("证书", name.clone()),
+                                    ("剩余", days_field),
+                                    ("提醒阈值", format!("{} 天", source.notify_days_before)),
+                                ],
+                                detail: message,
+                            };
+                            notify(state, &rule, &facts, now).await;
                         }
                         Err(e) => warn!(error = %e, "开证书告警失败"),
                     }
@@ -622,11 +790,65 @@ where
         .await
         .map_err(|_| anyhow::anyhow!("请求超时"))??;
     let status = res.status();
-    let _ = res.into_body().collect().await;
+    let body = res
+        .into_body()
+        .collect()
+        .await
+        .map(|b| b.to_bytes())
+        .unwrap_or_default();
     if !status.is_success() {
-        anyhow::bail!("webhook 返回 {status}");
+        anyhow::bail!("webhook 返回 {status}{}", body_detail(&body));
+    }
+    // 也有渠道失败仍返回 2xx：错误码在 body 里，不看就会把失败当成投递成功
+    if let Some(e) = body_error(&body) {
+        anyhow::bail!("webhook 返回 {status}，{e}");
     }
     Ok(())
+}
+
+/// 从响应体里挖出「为什么失败」。
+///
+/// 飞书把错误码放在 body（9499 卡片结构错、19024 关键词不匹配、19021 签名失败、
+/// 19022 IP 不在白名单），HTTP 状态常常就是 400——只看状态就只剩一句
+/// 「webhook 返回 400 Bad Request」，卡片 JSON 写错时完全没法定位。
+fn body_error(body: &[u8]) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    // 飞书 code/msg、钉钉 errcode/errmsg；Slack 成功时 body 是纯文本 "ok"，解析不出 JSON
+    let code = v.get("code").or_else(|| v.get("errcode"))?.as_i64()?;
+    if code == 0 {
+        return None;
+    }
+    let msg = v
+        .get("msg")
+        .or_else(|| v.get("errmsg"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("");
+    Some(format!("错误码 {code}（{msg}）{}", channel_hint(code)))
+}
+
+/// 失败时把响应体带上（截断到 200 字符），便于自建接收端排查
+fn body_detail(body: &[u8]) -> String {
+    let text = String::from_utf8_lossy(body);
+    let text = text.trim();
+    if text.is_empty() {
+        String::new()
+    } else {
+        format!("：{}", text.chars().take(200).collect::<String>())
+    }
+}
+
+/// 已知错误码 → 排查方向。只覆盖飞书：自定义机器人的「JSON 写错」是日常故障，
+/// 而 Slack / 钉钉的 webhook 地址本身即凭据，出错多半是地址不对。
+fn channel_hint(code: i64) -> &'static str {
+    match code {
+        9499 => "：请求体结构不对，卡片 JSON 大概率有问题",
+        19001 => "：卡片内容非法",
+        19021 => "：机器人开了签名校验，zhiwei 还不支持加签，请先关掉或改用 IP 白名单 / 关键词",
+        19022 => "：来源 IP 不在机器人的白名单里",
+        19024 => "：消息没命中机器人的自定义关键词",
+        11232 => "：触发飞书限流（单机器人 5 次/秒、100 次/分）",
+        _ => "",
+    }
 }
 
 /// 首次启动时写入几条默认规则，避免告警页空着。
@@ -697,9 +919,24 @@ mod tests {
         }
     }
 
+    /// 一条指标告警的事实（形状与 `evaluate` 里的调用点一致）
+    fn facts(firing: bool) -> AlertFacts {
+        AlertFacts {
+            node: "shark-9".into(),
+            firing,
+            fields: vec![
+                ("节点", "shark-9".into()),
+                ("指标", "磁盘使用率".into()),
+                ("当前值", "91.0%".into()),
+                ("阈值", "> 85%".into()),
+            ],
+            detail: "磁盘使用率 >85%（当前 91.0%）".into(),
+        }
+    }
+
     #[test]
     fn webhook_channel_keeps_structured_body() {
-        let body = channel_body("webhook", &rule("warning"), "shark-9", "磁盘 91%", 42);
+        let body = channel_body("webhook", &rule("warning"), &facts(true), 42);
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["severity"], "warning");
         assert_eq!(v["hostname"], "shark-9");
@@ -707,49 +944,138 @@ mod tests {
         // 通用 webhook 接收端约定（Bluebird 等）
         assert_eq!(v["title"], "[警告] 磁盘使用率过高（shark-9）");
         assert!(v["text"].as_str().unwrap().contains("（shark-9）"));
-        assert!(v["text"].as_str().unwrap().contains("磁盘 91%"));
+        assert!(v["text"].as_str().unwrap().contains("磁盘使用率"));
+    }
+
+    /// 恢复通知不能长成「又告警一次」：文案换「已恢复」，通用 webhook 的 title 跟着变
+    /// （蓝鸟那侧直接拿 title 当推送标题）
+    #[test]
+    fn recovery_notifications_say_recovered() {
+        let body = channel_body("webhook", &rule("warning"), &facts(false), 0);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["title"], "[已恢复] 磁盘使用率过高（shark-9）");
+    }
+
+    /// 飞书换成消息卡片，标题栏按「严重 / 警告 / 已恢复」三档上色
+    #[test]
+    fn feishu_channel_sends_colored_card() {
+        let card = |severity: &str, firing: bool| -> serde_json::Value {
+            serde_json::from_str(&channel_body("feishu", &rule(severity), &facts(firing), 0))
+                .unwrap()
+        };
+
+        let critical = card("critical", true);
+        assert_eq!(critical["msg_type"], "interactive");
+        assert_eq!(critical["card"]["header"]["template"], "red");
+        assert_eq!(
+            critical["card"]["header"]["title"]["content"],
+            "🔴 严重 · 磁盘使用率过高"
+        );
+
+        assert_eq!(
+            card("warning", true)["card"]["header"]["template"],
+            "orange"
+        );
+
+        let recovered = card("critical", false);
+        assert_eq!(recovered["card"]["header"]["template"], "green");
+        assert_eq!(
+            recovered["card"]["header"]["title"]["content"],
+            "✅ 已恢复 · 磁盘使用率过高"
+        );
+    }
+
+    /// 卡片把事实摊成分栏，而不是塞回一行文字
+    #[test]
+    fn feishu_card_lays_facts_into_fields() {
+        let v: serde_json::Value =
+            serde_json::from_str(&channel_body("feishu", &rule("critical"), &facts(true), 0))
+                .unwrap();
+        let elements = v["card"]["elements"].as_array().unwrap();
+        let fields = elements[0]["fields"].as_array().unwrap();
+        assert_eq!(fields.len(), 4);
+        assert_eq!(fields[0]["text"]["content"], "**节点**\nshark-9");
+        assert_eq!(fields[2]["text"]["content"], "**当前值**\n91.0%");
+        // 阈值里的 `>` 是正常内容，不能被转义吃掉（曾经把「> 85%」变成「 85%」）
+        assert_eq!(fields[3]["text"]["content"], "**阈值**\n> 85%");
+        // 正文走 plain_text：探针失败原因这类内容不可控，不能当 lark_md 解析
+        assert_eq!(elements[2]["text"]["tag"], "plain_text");
+    }
+
+    /// 别名没有字符校验（routes::normalize_alias 只 trim + 限长），塞进 lark_md
+    /// 会真的 @所有人——动态值里能开启标签的 `<` 必须中和
+    #[test]
+    fn feishu_card_neutralizes_markup_in_alias() {
+        let mut f = facts(true);
+        f.node = "<at id=all></at>".into();
+        f.fields[0].1 = "<at id=all></at>".into();
+        let v: serde_json::Value =
+            serde_json::from_str(&channel_body("feishu", &rule("critical"), &f, 0)).unwrap();
+        let content = v["card"]["elements"][0]["fields"][0]["text"]["content"]
+            .as_str()
+            .unwrap();
+        assert!(
+            !content.contains('<'),
+            "别名里的标签起始符没被中和：{content}"
+        );
+        // 原文本还得能认出来（是中和，不是删掉）
+        assert!(content.contains("＜at id=all"));
     }
 
     #[test]
     fn im_channels_wrap_text_per_protocol() {
-        let feishu: serde_json::Value = serde_json::from_str(&channel_body(
-            "feishu",
-            &rule("critical"),
-            "bj",
-            "站点不可用",
-            0,
-        ))
-        .unwrap();
-        assert_eq!(feishu["msg_type"], "text");
-        assert!(feishu["content"]["text"]
-            .as_str()
-            .unwrap()
-            .contains("[严重] 磁盘使用率过高（bj）"));
-        assert!(feishu["content"]["text"]
-            .as_str()
-            .unwrap()
-            .contains("（bj）"));
-
         let dingtalk: serde_json::Value =
-            serde_json::from_str(&channel_body("dingtalk", &rule("warning"), "bj", "x", 0))
+            serde_json::from_str(&channel_body("dingtalk", &rule("warning"), &facts(true), 0))
                 .unwrap();
         assert_eq!(dingtalk["msgtype"], "text");
         assert!(dingtalk["text"]["content"]
             .as_str()
             .unwrap()
-            .contains("（bj）"));
+            .contains("（shark-9）"));
 
         let slack: serde_json::Value =
-            serde_json::from_str(&channel_body("slack", &rule("warning"), "bj", "x", 0)).unwrap();
+            serde_json::from_str(&channel_body("slack", &rule("warning"), &facts(true), 0))
+                .unwrap();
         assert!(slack["text"].as_str().unwrap().starts_with("[警告]"));
     }
 
     /// 未知 kind 按 webhook 处理：老库里可能存着历史值，不能因此丢通知
     #[test]
     fn unknown_kind_falls_back_to_webhook() {
-        let body = channel_body("something-new", &rule("warning"), "bj", "x", 7);
+        let body = channel_body("something-new", &rule("warning"), &facts(true), 7);
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["rule"], "磁盘使用率过高");
+    }
+
+    /// 投递失败的原因得从 body 里挖：飞书把错误码放这里，只看 HTTP 状态的话
+    /// 卡片 JSON 写错也只会看到一句「400 Bad Request」
+    #[test]
+    fn delivery_errors_surface_channel_codes() {
+        // 成功形态都不算失败：飞书 code=0、钉钉 errcode=0、Slack 纯文本 "ok"
+        assert_eq!(body_error(br#"{"code":0,"msg":"success"}"#), None);
+        assert_eq!(body_error(br#"{"errcode":0,"errmsg":"ok"}"#), None);
+        assert_eq!(body_error(b"ok"), None);
+
+        let feishu = body_error(br#"{"code":19021,"msg":"sign match fail"}"#).unwrap();
+        assert!(feishu.contains("19021"), "{feishu}");
+        assert!(feishu.contains("加签"), "{feishu}");
+
+        let dingtalk =
+            body_error(br#"{"errcode":310000,"errmsg":"keywords not in content"}"#).unwrap();
+        assert!(dingtalk.contains("310000") && dingtalk.contains("keywords not in content"));
+
+        // 非 2xx 时把响应体带上，别让自建接收端摸黑
+        assert!(body_detail(b"nope").contains("nope"));
+        assert_eq!(body_detail(b"   "), "");
+    }
+
+    /// 卡片的颜色与文案是纯函数，但「谁算严重」这条得跟 severity_rank 对齐
+    #[test]
+    fn header_template_follows_severity() {
+        assert_eq!(header_template(&rule("critical"), true), "red");
+        assert_eq!(header_template(&rule("warning"), true), "orange");
+        assert_eq!(header_template(&rule("info"), true), "orange");
+        assert_eq!(header_template(&rule("critical"), false), "green");
     }
 
     /// 告警文案里的人话指标名：认识的要带中文名与单位，不认识的保留原名不崩

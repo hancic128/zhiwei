@@ -2324,8 +2324,7 @@ async fn test_channel_handler(
     let payload = crate::alerts::channel_body(
         &b.kind,
         &crate::alerts::test_rule(),
-        "zhiwei-test",
-        "这是一条测试通知，收到说明该渠道可用。",
+        &crate::alerts::test_facts(),
         now,
     );
     match crate::alerts::post_webhook(&b.url, &b.secret, &payload).await {
