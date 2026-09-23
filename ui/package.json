@@ -1,7 +1,7 @@
 {
   "name": "zhiwei-ui",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "description": "知微（ZhiWei）控制台",
   "scripts": {
