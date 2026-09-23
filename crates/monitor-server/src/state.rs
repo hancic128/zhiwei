@@ -48,6 +48,20 @@ pub struct AppState {
     /// 在自己的 monitor 上设一次，之后所有入网命令天然走自建源，
     /// 不需要让每个执行者记住多带一个变量。
     pub node_base_url: Option<String>,
+    /// 命令落库信号：watch 里存一个自增的「代数」。节点长轮询订阅它，
+    /// 签发成功即唤醒——把「点删除 → 节点执行」从最长 10s 压到 1s 内。
+    ///
+    /// 命令一律由本进程转发给 ops 签发，所以落库时机在进程内可观测；
+    /// 长轮询里仍留了周期性查库兜住多实例等边角（见 routes::collect_pending）。
+    pub command_signal: tokio::sync::watch::Sender<u64>,
+}
+
+impl AppState {
+    /// 签发出一条命令后唤醒所有等待中的节点长轮询。
+    /// 值本身无意义，只要「变了」就代表有新命令。
+    pub fn notify_command(&self) {
+        self.command_signal.send_modify(|v| *v = v.wrapping_add(1));
+    }
 }
 
 /// Help markdown content (loaded from `assets/help.md` at startup).

@@ -47,6 +47,21 @@ fn severity_rank(s: &str) -> u8 {
     }
 }
 
+/// 指标名 →（人话名称，单位）。规则可以填任意指标名，认不出的原样展示——
+/// 好过把 `host.disk.usage` 这种内部键和没头没尾的 `92.3` 丢给用户。
+fn metric_label(metric: &str) -> (&str, &str) {
+    match metric {
+        "host.cpu.usage" => ("CPU 使用率", "%"),
+        "host.mem.usage" => ("内存使用率", "%"),
+        "host.disk.usage" => ("磁盘使用率", "%"),
+        "host.disk.used_bytes" => ("磁盘占用", " B"),
+        "host.mem.used_bytes" => ("内存占用", " B"),
+        "host.net.rx_bytes" => ("网络接收", " B"),
+        "host.net.tx_bytes" => ("网络发送", " B"),
+        other => (other, ""),
+    }
+}
+
 /// 对一批 telemetry 跑一遍全部启用规则。
 pub async fn evaluate(state: &AppState, node_id: &NodeId, hostname: &str, batch: &TelemetryBatch) {
     let rules = match state.storage.alerts().enabled_rules().await {
@@ -87,18 +102,18 @@ pub async fn evaluate(state: &AppState, node_id: &NodeId, hostname: &str, batch:
             let need_ns = rule.duration_seconds.saturating_mul(1_000_000_000);
 
             if held_ns >= need_ns {
-                let message = format!(
-                    "{} 在 {hostname} 上 {} {}{} （当前 {:.1}）",
-                    rule.metric,
-                    op_symbol(&rule.op),
-                    rule.threshold,
-                    if rule.duration_seconds > 0 {
-                        format!("，已持续 {}s", rule.duration_seconds)
-                    } else {
-                        String::new()
-                    },
-                    value
-                );
+                // 文案要能一眼回答「哪台机器、什么指标、现在多少」——
+                // 节点名在通知标题行（见 plain_text），这里给出指标与量值。
+                let (label, unit) = metric_label(&rule.metric);
+                let sym = op_symbol(&rule.op);
+                let threshold = rule.threshold;
+                let duration = if rule.duration_seconds > 0 {
+                    format!("，已持续 {}s", rule.duration_seconds)
+                } else {
+                    String::new()
+                };
+                let message =
+                    format!("{label} {sym}{threshold}{unit}（当前 {value:.1}{unit}{duration}）");
                 match repo
                     .open_alert(&rule, node_id.as_str(), hostname, value, &message, now)
                     .await
@@ -247,13 +262,16 @@ pub fn test_rule() -> AlertRule {
 }
 
 /// IM 文本通知：一眼能看出「哪台机器、多严重、什么事」。
+///
+/// 第一行同时充当通用 webhook 的 `title`（见 [`channel_body`]）：手机 / 桌面
+/// 推送只展示标题行时，也必须能看出是哪台节点，所以节点名放在这里而不是正文。
 fn plain_text(rule: &AlertRule, hostname: &str, message: &str) -> String {
     let level = if rule.severity == "critical" {
         "严重"
     } else {
         "警告"
     };
-    format!("[{level}] {}\n主机：{hostname}\n{message}", rule.name)
+    format!("[{level}] {}（{hostname}）\n{message}", rule.name)
 }
 
 /// 服务探针状态翻转 → 开/关告警（`source = probe`），并按严重度投递通知。
@@ -687,8 +705,8 @@ mod tests {
         assert_eq!(v["hostname"], "shark-9");
         assert_eq!(v["at_unix_nano"], 42);
         // 通用 webhook 接收端约定（Bluebird 等）
-        assert_eq!(v["title"], "[警告] 磁盘使用率过高");
-        assert!(v["text"].as_str().unwrap().contains("主机：shark-9"));
+        assert_eq!(v["title"], "[警告] 磁盘使用率过高（shark-9）");
+        assert!(v["text"].as_str().unwrap().contains("（shark-9）"));
         assert!(v["text"].as_str().unwrap().contains("磁盘 91%"));
     }
 
@@ -706,11 +724,11 @@ mod tests {
         assert!(feishu["content"]["text"]
             .as_str()
             .unwrap()
-            .contains("[严重] 磁盘使用率过高"));
+            .contains("[严重] 磁盘使用率过高（bj）"));
         assert!(feishu["content"]["text"]
             .as_str()
             .unwrap()
-            .contains("主机：bj"));
+            .contains("（bj）"));
 
         let dingtalk: serde_json::Value =
             serde_json::from_str(&channel_body("dingtalk", &rule("warning"), "bj", "x", 0))
@@ -719,7 +737,7 @@ mod tests {
         assert!(dingtalk["text"]["content"]
             .as_str()
             .unwrap()
-            .contains("主机：bj"));
+            .contains("（bj）"));
 
         let slack: serde_json::Value =
             serde_json::from_str(&channel_body("slack", &rule("warning"), "bj", "x", 0)).unwrap();
@@ -732,5 +750,14 @@ mod tests {
         let body = channel_body("something-new", &rule("warning"), "bj", "x", 7);
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["rule"], "磁盘使用率过高");
+    }
+
+    /// 告警文案里的人话指标名：认识的要带中文名与单位，不认识的保留原名不崩
+    #[test]
+    fn metric_label_humanizes_known_metrics() {
+        assert_eq!(metric_label("host.disk.usage"), ("磁盘使用率", "%"));
+        assert_eq!(metric_label("host.mem.usage"), ("内存使用率", "%"));
+        assert_eq!(metric_label("host.cpu.usage"), ("CPU 使用率", "%"));
+        assert_eq!(metric_label("some.new.metric"), ("some.new.metric", ""));
     }
 }

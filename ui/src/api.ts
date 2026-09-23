@@ -713,6 +713,9 @@ export const commandsApi = {
       body: JSON.stringify({ node_id: nodeId, action, params }),
     }),
   history: () => request<CommandHistoryRow[]>("/v1/commands/history"),
+  /** 单条命令的当前状态（等回执时用，比拉整段 history 轻得多） */
+  get: (id: string) =>
+    request<CommandHistoryRow>(`/v1/commands/${encodeURIComponent(id)}`),
 };
 
 /**
@@ -722,27 +725,30 @@ export const commandsApi = {
  * 慢动作（docker stop 要等 10s 信号超时）会长时间停在这一步，早退会把
  * 「还在跑」误判成「执行失败」。
  *
- * 节点每 10s 拉一次命令，加上执行与回执，慢的情况下要 20–40s 才落地，
- * 所以默认等 60s（命令 TTL 也是 60s）。TTL 过了节点不会再执行，直接按
- * 「已下发，未见回执」返回 null，不谎报成功，也不让用户干等。
+ * 节点改成挂起式长轮询后命令几乎是秒到，所以前几轮用 400ms 快速试探，
+ * 之后逐步退避到 1.5s，最长等 60s（命令 TTL 也是 60s）。TTL 一过节点不会
+ * 再执行，直接按「已下发，未见回执」返回 null，不谎报成功。
  */
 export async function waitForCommand(
   commandId: string,
-  tries = 24,
-  intervalMs = 2500,
+  timeoutMs = 60_000,
 ): Promise<CommandHistoryRow | null> {
-  for (let i = 0; i < tries; i++) {
-    const rows = await commandsApi.history().catch(() => []);
-    const row = rows.find((r) => r.id === commandId);
+  const deadline = Date.now() + timeoutMs;
+  let interval = 400;
+  for (;;) {
+    const row = await commandsApi
+      .get(commandId)
+      .catch(() => null as CommandHistoryRow | null);
     if (row) {
       if (row.state === "done" || row.state === "failed") return row;
       const expired =
         Date.now() > row.issued_at_unix_nano / 1e6 + row.ttl_seconds * 1000;
       if (expired) return null;
     }
-    await new Promise((r) => setTimeout(r, intervalMs));
+    if (Date.now() >= deadline) return null;
+    await new Promise((r) => setTimeout(r, interval));
+    interval = Math.min(Math.round(interval * 1.5), 1500);
   }
-  return null;
 }
 
 // ---------- CA / 设置 ----------

@@ -467,6 +467,7 @@ async fn main() -> anyhow::Result<()> {
         ),
         install_script,
         node_base_url,
+        command_signal: tokio::sync::watch::channel(0u64).0,
     };
 
     if let Err(e) = alerts::seed_default_rules(&state).await {

@@ -143,6 +143,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/commands/:id/result", post(command_result_handler))
         .route("/v1/exec", post(exec_handler))
         .route("/v1/commands/history", get(command_history_handler))
+        .route("/v1/commands/:id", get(command_detail_handler))
         .route("/healthz", get(healthz))
         // 节点入网脚本。**故意不鉴权**：目标机器此刻还没有任何凭据，
         // 真正的秘密是 enroll 命令里带过去的 ZHIWEI_BOOTSTRAP_TOKEN。
@@ -731,7 +732,9 @@ async fn telemetry_handler(
 
     debug!(%node_id_str, %ts, interval, "telemetry batch stored");
 
-    // 落库后跑一遍告警规则（有规则才查库，无规则时开销可忽略）
+    // 落库后跑一遍告警规则（有规则才查库，无规则时开销可忽略）。
+    // 告警文案用的是**显示名**（有别名用别名），主机名 VM-16-12-opencloudos
+    // 这种认不出是哪台机器。
     let hostname = state
         .storage
         .nodes()
@@ -739,7 +742,7 @@ async fn telemetry_handler(
         .await
         .ok()
         .flatten()
-        .map(|n| n.hostname)
+        .map(|n| node_display_name(&n.alias, &n.hostname))
         .unwrap_or_default();
     crate::alerts::evaluate(&state, &node_id, &hostname, &batch).await;
 
@@ -1675,8 +1678,18 @@ async fn inventory_handler(
         "inventory stored"
     );
 
-    // 证书到期评估：跟快照同拍，配置改了/证书续签了都能立刻反映到告警
-    crate::alerts::evaluate_cert_expiry(&state, node_id.as_str(), &hostname, &certificates_json)
+    // 证书到期评估：跟快照同拍，配置改了/证书续签了都能立刻反映到告警。
+    // 文案用显示名（有别名用别名），与指标告警一致。
+    let display = state
+        .storage
+        .nodes()
+        .find_by_id(&node_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|n| node_display_name(&n.alias, &hostname))
+        .unwrap_or_else(|| hostname.clone());
+    crate::alerts::evaluate_cert_expiry(&state, node_id.as_str(), &display, &certificates_json)
         .await;
     (StatusCode::NO_CONTENT).into_response()
 }
@@ -2434,7 +2447,45 @@ struct NodeCommandsView {
     commands: Vec<String>,
 }
 
+/// 节点长轮询可挂起的最长时间（秒）。没有命令时把它挂在这里，
+/// 一旦有新命令（本机 ops 签发成功）立刻返回——比 10s 定时轮询快一个数量级。
+const MAX_COMMAND_WAIT_SECS: u64 = 25;
+/// 即便没人唤醒也每这么久查一次库：兜住「命令不是本进程签发」的边角
+/// （多实例、运维手工插库），保证最长 2s 也能拿到。
+const COMMAND_RECHECK: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// 拉取某节点的待执行命令。`wait_secs > 0` 时为长轮询：
+/// 挂起直到有命令或超时（返回空列表）。
+///
+/// 关键顺序是「先订阅、再查库」：这样查库与 await 之间落库的命令不会漏掉信号，
+/// 否则会出现「命令已入库、节点却睡满一个超时」的间隙。
+async fn collect_pending(
+    state: &AppState,
+    node_id: &str,
+    wait_secs: u64,
+) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
+    let mut rx = state.command_signal.subscribe();
+    loop {
+        let rows = state.storage.commands().pending_for(node_id, 10).await?;
+        if !rows.is_empty() || wait_secs == 0 {
+            return Ok(rows);
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok(Vec::new());
+        }
+        tokio::select! {
+            _ = rx.changed() => {}
+            _ = tokio::time::sleep(remaining.min(COMMAND_RECHECK)) => {}
+        }
+    }
+}
+
 /// 节点拉取待执行命令（请求签名）。返回 base64 的 Command protobuf，命令签名由节点校验。
+///
+/// `wait=<秒>`（可选，上限 [`MAX_COMMAND_WAIT_SECS`]）开启长轮询；不带则立即返回，
+/// 老版本节点行为不变。
 async fn node_commands_handler(
     State(state): State<AppState>,
     method: axum::http::Method,
@@ -2453,13 +2504,13 @@ async fn node_commands_handler(
     if query_node_id != node_id.as_str() {
         return err(StatusCode::BAD_REQUEST, "node_id 与签名主体不一致");
     }
+    let wait_secs = q
+        .get("wait")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0)
+        .min(MAX_COMMAND_WAIT_SECS);
 
-    match state
-        .storage
-        .commands()
-        .pending_for(node_id.as_str(), 10)
-        .await
-    {
+    match collect_pending(&state, node_id.as_str(), wait_secs).await {
         Ok(rows) => {
             use base64::Engine;
             let commands = rows
@@ -2610,7 +2661,7 @@ async fn exec_handler(State(state): State<AppState>, headers: HeaderMap, body: B
         "params": b.params,
         "actor": "console",
     });
-    match ops_sign(&state.ops_endpoint, &payload).await {
+    match sign_command(&state, &payload).await {
         Ok(id) => (
             StatusCode::CREATED,
             Json(serde_json::json!({ "command_id": id })),
@@ -2646,6 +2697,30 @@ struct CommandHistoryView {
     result_received_at_unix_nano: Option<i64>,
 }
 
+/// 命令行 → 控制台视图。history 与单条查询共用，字段口径只有这一处。
+fn command_view(
+    c: zhiwei_storage::commands_repo::CommandRow,
+    node_hostname: String,
+) -> CommandHistoryView {
+    CommandHistoryView {
+        node_hostname,
+        result_text: c
+            .result_payload
+            .as_ref()
+            .and_then(|p| String::from_utf8(p.clone()).ok()),
+        id: c.id,
+        node_id: c.node_id,
+        action: c.action,
+        params_json: c.params_json,
+        state: c.state,
+        issued_at_unix_nano: c.issued_at_unix_nano,
+        ttl_seconds: c.ttl_seconds,
+        result_ok: c.result_ok,
+        result_error: c.result_error,
+        result_received_at_unix_nano: c.result_received_at_unix_nano,
+    }
+}
+
 async fn command_history_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if !read_auth_ok(&state, &headers).await {
         return err(
@@ -2668,25 +2743,45 @@ async fn command_history_handler(State(state): State<AppState>, headers: HeaderM
 
     let out: Vec<CommandHistoryView> = rows
         .into_iter()
-        .map(|c| CommandHistoryView {
-            node_hostname: name_of(&c.node_id),
-            result_text: c
-                .result_payload
-                .as_ref()
-                .and_then(|p| String::from_utf8(p.clone()).ok()),
-            id: c.id,
-            node_id: c.node_id,
-            action: c.action,
-            params_json: c.params_json,
-            state: c.state,
-            issued_at_unix_nano: c.issued_at_unix_nano,
-            ttl_seconds: c.ttl_seconds,
-            result_ok: c.result_ok,
-            result_error: c.result_error,
-            result_received_at_unix_nano: c.result_received_at_unix_nano,
+        .map(|c| {
+            let host = name_of(&c.node_id);
+            command_view(c, host)
         })
         .collect();
     Json(out).into_response()
+}
+
+/// `GET /v1/commands/:id` —— 单条命令的当前状态。
+///
+/// 控制台等一条命令的回执时只关心这一条：拉整段 history（100 条）既重又容易被
+/// 别的动作干扰，单条查询让轮询间隔可以压到几百毫秒，点完动作几秒内就能看到结果。
+async fn command_detail_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    if !read_auth_ok(&state, &headers).await {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "authentication required (Bearer admin token)",
+        );
+    }
+    let row = match state.storage.commands().find(&id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "命令不存在"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("lookup: {e}")),
+    };
+    let hostname = state
+        .storage
+        .nodes()
+        .list_all()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|n| n.id == row.node_id)
+        .map(|n| n.hostname)
+        .unwrap_or_default();
+    Json(command_view(row, hostname)).into_response()
 }
 
 /// 把签名请求转给 ops-server（localhost）
@@ -2705,6 +2800,18 @@ impl OpsSignError {
             OpsSignError::Unavailable(detail) => detail.clone(),
         }
     }
+}
+
+/// 发起一条命令：转给 ops-server 签名，成功后唤醒等待中的节点长轮询。
+///
+/// 所有写操作的必须入口——少走这一处，节点就得等下一次兜底查库才拿到命令。
+pub(crate) async fn sign_command(
+    state: &AppState,
+    payload: &serde_json::Value,
+) -> Result<String, OpsSignError> {
+    let id = ops_sign(&state.ops_endpoint, payload).await?;
+    state.notify_command();
+    Ok(id)
 }
 
 pub(crate) async fn ops_sign(
@@ -2969,6 +3076,9 @@ mod bootstrap_token_tests {
 ///
 /// 鉴权：admin token 或 AI token 都可读（AI 客户端如果要做 onboarding 也用得到）。
 /// 没找到 help 文件时返回空 body，UI 端展示占位文案。
+///
+/// 正文里的 `{{BASE_URL}}` 会换成**控制台当前的访问地址**（scheme + host，
+/// 与 enroll 命令同源），用户照帮助页复制命令就能直接跑，不必手改示例域名。
 async fn help_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if !read_auth_ok(&state, &headers).await {
         return err(
@@ -2976,8 +3086,14 @@ async fn help_handler(State(state): State<AppState>, headers: HeaderMap) -> Resp
             "authentication required (Bearer admin or AI token)",
         );
     }
-    Json(state.help.snapshot()).into_response()
+    let mut snap = state.help.snapshot();
+    let base = public_base_url(&headers, state.tls_terminated_locally);
+    snap.body = snap.body.replace(BASE_URL_PLACEHOLDER, &base);
+    Json(snap).into_response()
 }
+
+/// 帮助页里代表「控制台地址」的占位符（见 `assets/help.md`）。
+const BASE_URL_PLACEHOLDER: &str = "{{BASE_URL}}";
 
 // ---------- AI Tokens ----------
 
@@ -3138,6 +3254,33 @@ fn is_connection_refused(e: &std::io::Error) -> bool {
         || e.to_string().contains("Connection refused")
 }
 
+/// 节点在「给人看」的语境里用的名字：设了别名就用别名，否则退回主机名。
+///
+/// 告警文案、通知、待办都用它——主机名常常是 `VM-16-12-opencloudos` 这种，
+/// 用户看不出是哪台机器；别名是用户自己起的「北京入口」。
+pub(crate) fn node_display_name(alias: &str, hostname: &str) -> String {
+    let alias = alias.trim();
+    if alias.is_empty() {
+        hostname.to_string()
+    } else {
+        alias.to_string()
+    }
+}
+
+/// 控制台的对外访问地址（scheme + host），从请求头推断。
+///
+/// enroll 命令与帮助页共用这一处：两处给出的地址必须一致，否则用户照帮助页
+/// 粘命令会因为地址不对而连错。挂在 nginx / 托管平台后面时优先
+/// `X-Forwarded-Proto`，其余回退见 [`enroll_url_scheme`]。
+fn public_base_url(headers: &HeaderMap, tls_terminated_locally: bool) -> String {
+    let scheme = enroll_url_scheme(headers, tls_terminated_locally);
+    let host = headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("localhost:8443");
+    format!("{scheme}://{host}")
+}
+
 /// 生成入网命令时该用 http 还是 https。
 ///
 /// 1) `X-Forwarded-Proto` 最权威——只有边缘知道对外那一段是明文还是 TLS；
@@ -3236,12 +3379,7 @@ async fn create_enroll_token_handler(
     // 从请求头推断 monitor 公开 URL：
     //   1) 优先 `X-Forwarded-Proto` + `Host`（托管平台 / nginx 会注入）
     //   2) 回退见 enroll_url_scheme
-    let scheme = enroll_url_scheme(&headers, state.tls_terminated_locally);
-    let host = headers
-        .get("host")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("localhost:8443");
-    let monitor_url = format!("{scheme}://{host}");
+    let monitor_url = public_base_url(&headers, state.tls_terminated_locally);
 
     // 设了 ZHIWEI_NODE_BASE_URL（国内 / 隔离网络的自建分发源）时，命令里自动
     // 多带一行，执行者不必自己记得加。没设就保持原样（走 GitHub Releases）。

@@ -20,7 +20,7 @@ use axum::{
 use serde::Serialize;
 use tracing::warn;
 
-use crate::routes::{err, ops_sign, read_auth_ok, verify_node, OpsSignError};
+use crate::routes::{err, read_auth_ok, sign_command, verify_node, OpsSignError};
 use crate::state::AppState;
 use zhiwei_storage::cert_sources_repo::{CertSource, CertSourcePatch};
 
@@ -454,7 +454,7 @@ pub async fn test_cert_source_handler(
         "params": { "path": path },
         "actor": "console",
     });
-    match ops_sign(&state.ops_endpoint, &payload).await {
+    match sign_command(&state, &payload).await {
         Ok(id) => (
             StatusCode::CREATED,
             Json(serde_json::json!({ "command_id": id })),
@@ -483,7 +483,7 @@ async fn refresh_node_inventory(state: &AppState, node_id: &str) {
         "params": {},
         "actor": "console",
     });
-    if let Err(e) = ops_sign(&state.ops_endpoint, &payload).await {
+    if let Err(e) = sign_command(state, &payload).await {
         warn!(%node_id, error = %e.message(), "触发快照重采失败（配置已保存，等下一轮周期采集）");
     }
 }

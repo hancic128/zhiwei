@@ -140,6 +140,17 @@ pub async fn todo_handler(State(state): State<AppState>, headers: HeaderMap) -> 
         }
     };
 
+    // 待办里的节点名一律用「显示名」（有别名用别名）——主机名往往是
+    // VM-16-12-opencloudos 这种，看不出是哪台；别名是用户自己起的名字。
+    // 节点已删除时退回告警落库时记下的主机名。
+    let display_of = |id: &str, fallback: &str| -> String {
+        nodes
+            .iter()
+            .find(|n| n.id == id)
+            .map(|n| crate::routes::node_display_name(&n.alias, &n.hostname))
+            .unwrap_or_else(|| fallback.to_string())
+    };
+
     let (services_healthy, services_total) = state
         .storage
         .probes()
@@ -210,7 +221,7 @@ pub async fn todo_handler(State(state): State<AppState>, headers: HeaderMap) -> 
             detail: a.message.clone(),
             hint_key: hint_key(&a.source, &a.metric),
             node_id: a.node_id.clone(),
-            hostname: a.hostname.clone(),
+            hostname: display_of(&a.node_id, &a.hostname),
             since_unix_nano: a.started_at_unix_nano,
             resolved_at_unix_nano: None,
             link: format!("/nodes/{}", a.node_id),
@@ -234,12 +245,12 @@ pub async fn todo_handler(State(state): State<AppState>, headers: HeaderMap) -> 
             id: format!("node-offline-{}", n.id),
             source: "node_offline".into(),
             severity: "critical".into(),
-            title: n.hostname.clone(),
+            title: display_of(&n.id, &n.hostname),
             // 文案由前端按 hint_key + 时间拼，保证中英双语
             detail: String::new(),
             hint_key: "nodeOffline",
             node_id: n.id.clone(),
-            hostname: n.hostname.clone(),
+            hostname: display_of(&n.id, &n.hostname),
             since_unix_nano: last_seen,
             resolved_at_unix_nano: None,
             link: format!("/nodes/{}", n.id),
@@ -268,7 +279,7 @@ pub async fn todo_handler(State(state): State<AppState>, headers: HeaderMap) -> 
             detail: a.message.clone(),
             hint_key: hint_key(&a.source, &a.metric),
             node_id: a.node_id.clone(),
-            hostname: a.hostname.clone(),
+            hostname: display_of(&a.node_id, &a.hostname),
             since_unix_nano: a.started_at_unix_nano,
             resolved_at_unix_nano: a.resolved_at_unix_nano,
             link: format!("/nodes/{}", a.node_id),

@@ -11,8 +11,8 @@
 弹窗里给出整段命令并**自动复制到剪贴板**，粘到目标机器的 shell 里跑一次即可。
 
 ```
-curl -sSL https://zhiwei.example.com/install-node.sh | \
-  ZHIWEI_MONITOR_URL=https://zhiwei.example.com \
+curl -sSL {{BASE_URL}}/install-node.sh | \
+  ZHIWEI_MONITOR_URL={{BASE_URL}} \
   ZHIWEI_BOOTSTRAP_TOKEN=zhi-bt-xxxxxxxx \
   bash -s
 ```
@@ -39,8 +39,8 @@ curl -sSL https://zhiwei.example.com/install-node.sh | \
 `ZHIWEI_NODE_ALIAS` / `ZHIWEI_NODE_TAGS`）：
 
 ```
-curl -sSL https://zhiwei.example.com/install-node.sh | \
-  ZHIWEI_MONITOR_URL=https://zhiwei.example.com \
+curl -sSL {{BASE_URL}}/install-node.sh | \
+  ZHIWEI_MONITOR_URL={{BASE_URL}} \
   ZHIWEI_BOOTSTRAP_TOKEN=zhi-bt-xxxxxxxx \
   bash -s -- --alias 北京入口 --tags "prod bj 入口"
 ```
@@ -145,7 +145,7 @@ monitor 连不上 ops：
 
 ## AI 怎么用
 
-知微暴露 MCP SSE 端点（`https://<host>/mcp/sse`），让 Claude Desktop、
+知微暴露 MCP SSE 端点（`{{BASE_URL}}/mcp/sse`），让 Claude Desktop、
 Cursor、Cline 等能直接读集群数据。
 
 ### 1. 创建 AI Token
@@ -161,7 +161,7 @@ Cursor、Cline 等能直接读集群数据。
 {
   "mcpServers": {
     "zhiwei": {
-      "url": "https://zhiwei.example.com/mcp/sse",
+      "url": "{{BASE_URL}}/mcp/sse",
       "headers": {
         "Authorization": "Bearer ait_xxxxxxxxxxxxxxxx"
       }

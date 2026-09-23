@@ -58,7 +58,13 @@ struct ScanCertsArgs {
     path: String,
 }
 
-/// 命令轮询间隔（秒）
+/// 命令长轮询的挂起秒数（monitor 端上限 25s，这里取相同值）。
+///
+/// 之前是「每 10 秒拉一次」：点一次删除容器 / 测试证书路径，最多要等 10 秒
+/// 命令才被取走。改成挂起式长轮询后，命令一签发（monitor 立刻唤醒）就到手。
+const POLL_WAIT_SECS: u64 = 25;
+/// 兜底轮询间隔（秒）：对端是旧版 monitor（不认识 `wait`、立刻返回空）或请求
+/// 出错时，退回定时轮询——否则会忙轮询把对端打满。
 const POLL_INTERVAL: u64 = 10;
 
 /// 允许执行的动作白名单。节点能力集（P2-3 后续）会在此基础上再收敛。
@@ -86,19 +92,32 @@ pub async fn run_poll_loop(monitor: String, state: Arc<NodeState>, node_id: Stri
     }
 
     loop {
-        if let Err(e) = poll_once(&monitor, &state, &node_id).await {
-            tracing::debug!(error = %e, "命令轮询失败");
+        let started = std::time::Instant::now();
+        match poll_once(&monitor, &state, &node_id).await {
+            // 拿到了命令：立刻再拉一次，命令成串时不必等下一轮
+            Ok(true) => {}
+            Ok(false) => {
+                // 长轮询被「拒收」（旧版 monitor 不认 wait、立刻空手返回）时，
+                // 退回 POLL_INTERVAL 定时轮询；否则这里会变成忙轮询。
+                if started.elapsed() < Duration::from_secs(POLL_WAIT_SECS / 2) {
+                    tokio::time::sleep(Duration::from_secs(POLL_INTERVAL)).await;
+                }
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "命令轮询失败");
+                tokio::time::sleep(Duration::from_secs(POLL_INTERVAL)).await;
+            }
         }
-        tokio::time::sleep(Duration::from_secs(POLL_INTERVAL)).await;
     }
 }
 
-async fn poll_once(monitor: &str, state: &NodeState, node_id: &str) -> anyhow::Result<()> {
+/// 拉一次命令，返回「本轮是否取到命令」。
+async fn poll_once(monitor: &str, state: &NodeState, node_id: &str) -> anyhow::Result<bool> {
     let t = crate::transport(monitor, state)?;
     let (status, raw) = t
         .request(
             "GET",
-            &format!("/v1/commands?node_id={node_id}"),
+            &format!("/v1/commands?node_id={node_id}&wait={POLL_WAIT_SECS}"),
             &[],
             node_id,
             &state.signing_key,
@@ -108,14 +127,15 @@ async fn poll_once(monitor: &str, state: &NodeState, node_id: &str) -> anyhow::R
         anyhow::bail!("拉取命令返回 {status}");
     }
     if raw.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
 
     let v: serde_json::Value = serde_json::from_slice(&raw)?;
     let Some(list) = v.get("commands").and_then(|c| c.as_array()) else {
-        return Ok(());
+        return Ok(false);
     };
 
+    let mut got = false;
     for b64 in list.iter().filter_map(|x| x.as_str()) {
         let bytes = base64::engine::general_purpose::STANDARD.decode(b64)?;
         let cmd = match Command::decode(&bytes[..]) {
@@ -125,6 +145,7 @@ async fn poll_once(monitor: &str, state: &NodeState, node_id: &str) -> anyhow::R
                 continue;
             }
         };
+        got = true;
 
         match verify(&cmd, state) {
             Ok(()) => {
@@ -148,7 +169,7 @@ async fn poll_once(monitor: &str, state: &NodeState, node_id: &str) -> anyhow::R
             }
         }
     }
-    Ok(())
+    Ok(got)
 }
 
 /// 校验 ops 签名 + TTL。nonce 去重由 TTL 覆盖（TTL ≤ 60s）。
