@@ -13,7 +13,7 @@ import { cn, friendlyError, relativeTime } from "@/lib/utils";
  *
  * 服务页是按服务组织的（正向视图），这里是按节点组织（反向视图）——
  * 排一台机器的问题时，需要知道「它到底在替谁探什么」。
- * 只显示归属本节点的探针；`node_id` 为空的探针会在任意节点上执行，
+ * 只显示绑定了本节点的探针；`node_ids` 为空的探针会在任意节点上执行，
  * 放在某一台节点的详情里会误导，因此不列。
  */
 export function NodeProbes({ nodeId, refreshMs }: { nodeId: string; refreshMs: number }) {
@@ -28,7 +28,7 @@ export function NodeProbes({ nodeId, refreshMs }: { nodeId: string; refreshMs: n
     () =>
       (q.data ?? [])
         .flatMap((s) => s.probes)
-        .filter((p) => p.node_id === nodeId)
+        .filter((p) => p.node_ids.includes(nodeId))
         .sort((a, b) => a.service_name.localeCompare(b.service_name)),
     [q.data, nodeId],
   );

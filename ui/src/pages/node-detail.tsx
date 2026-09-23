@@ -363,81 +363,73 @@ export function NodeDetail() {
   return (
     <>
       {/* 操作区：日期范围、刷新频率、基本信息 / 重启 / 关机 收在右侧。
-          标题、状态、入网时间已搬到 header 的面包屑里；节点 ID 进「Host info」。 */}
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="min-w-0">
-          {node && node.tags.length > 0 && (
-            <TagList tags={node.tags} className="flex flex-wrap gap-1" />
-          )}
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <TimeRangePicker value={range} onChange={setRange} />
-          <Tooltip content={t("detail.refresh")}>
-            <div className="relative inline-flex items-center">
-              <Clock
-                className="absolute left-3 w-4 h-4 text-ink-400 pointer-events-none"
-                aria-hidden="true"
-              />
-              <Select
-                wrapperClassName="w-24"
-                className="h-8 pl-8 text-xs tabular-nums"
-                value={refreshMs}
-                onChange={(e) => setRefreshMs(Number(e.target.value))}
-                aria-label={t("detail.refresh")}
-              >
-                {REFRESH_OPTIONS.map((o) => (
-                  <option key={o.ms} value={o.ms}>
-                    {o.label}
-                  </option>
-                ))}
-              </Select>
-            </div>
-          </Tooltip>
-          <Tooltip content={t("detail.basicTitle")}>
-            <Button
-              variant={showBasic ? "primary" : "ghost"}
-              size="icon"
-              aria-label={t("detail.basicTitle")}
-              aria-pressed={showBasic}
-              onClick={() => setShowBasic(true)}
+          标题、状态、标签、入网时间已搬到 header 的面包屑里；节点 ID 进「Host info」。 */}
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        <TimeRangePicker value={range} onChange={setRange} />
+        <Tooltip content={t("detail.refresh")}>
+          <div className="relative inline-flex items-center">
+            <Clock
+              className="absolute left-3 w-4 h-4 text-ink-400 pointer-events-none"
+              aria-hidden="true"
+            />
+            <Select
+              wrapperClassName="w-24"
+              className="h-8 pl-8 text-xs tabular-nums"
+              value={refreshMs}
+              onChange={(e) => setRefreshMs(Number(e.target.value))}
+              aria-label={t("detail.refresh")}
             >
-              <Info className="w-4 h-4" aria-hidden="true" />
-            </Button>
-          </Tooltip>
-          <Tooltip content={t("nodeMeta.edit")}>
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label={t("nodeMeta.edit")}
-              disabled={!node}
-              onClick={() => setMetaOpen(true)}
-            >
-              <Pencil className="w-4 h-4" aria-hidden="true" />
-            </Button>
-          </Tooltip>
-          <Tooltip content={t("detail.restart")}>
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label={t("detail.restart")}
-              onClick={() => setPending({ kind: "restart" })}
-            >
-              <RotateCw className="w-4 h-4" aria-hidden="true" />
-            </Button>
-          </Tooltip>
-          <Tooltip content={t("detail.shutdown")}>
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label={t("detail.shutdown")}
-              onClick={() => setPending({ kind: "shutdown" })}
-              className="text-rose-600 dark:text-rose-400"
-            >
-              <Power className="w-4 h-4" aria-hidden="true" />
-            </Button>
-          </Tooltip>
-        </div>
+              {REFRESH_OPTIONS.map((o) => (
+                <option key={o.ms} value={o.ms}>
+                  {o.label}
+                </option>
+              ))}
+            </Select>
+          </div>
+        </Tooltip>
+        <Tooltip content={t("detail.basicTitle")}>
+          <Button
+            variant={showBasic ? "primary" : "ghost"}
+            size="icon"
+            aria-label={t("detail.basicTitle")}
+            aria-pressed={showBasic}
+            onClick={() => setShowBasic(true)}
+          >
+            <Info className="w-4 h-4" aria-hidden="true" />
+          </Button>
+        </Tooltip>
+        <Tooltip content={t("nodeMeta.edit")}>
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label={t("nodeMeta.edit")}
+            disabled={!node}
+            onClick={() => setMetaOpen(true)}
+          >
+            <Pencil className="w-4 h-4" aria-hidden="true" />
+          </Button>
+        </Tooltip>
+        <Tooltip content={t("detail.restart")}>
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label={t("detail.restart")}
+            onClick={() => setPending({ kind: "restart" })}
+          >
+            <RotateCw className="w-4 h-4" aria-hidden="true" />
+          </Button>
+        </Tooltip>
+        <Tooltip content={t("detail.shutdown")}>
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label={t("detail.shutdown")}
+            onClick={() => setPending({ kind: "shutdown" })}
+            className="text-rose-600 dark:text-rose-400"
+          >
+            <Power className="w-4 h-4" aria-hidden="true" />
+          </Button>
+        </Tooltip>
       </div>
 
       {nodesQ.isLoading ? (

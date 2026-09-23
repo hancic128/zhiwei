@@ -31,6 +31,7 @@ import { StatCards } from "@/components/stat-cards";
 import { DotBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
+import { Segmented } from "@/components/ui/segmented";
 import {
   TimeRangePicker,
   presetRange,
@@ -128,22 +129,27 @@ function targetSummary(probe: ProbeView): string {
 }
 
 /**
- * 服务健康时间线：**一条线一个服务**，画的是每个时间桶里「有多少比例的探测是
- * ok 的」（0–100%）。
+ * 服务健康时间线：一条线一个服务（默认）或一个探针，画的是每个时间桶里
+ * 「有多少比例的探测是 ok 的」（0–100%）。
  *
  * 为什么用比例而不是单次结果：不同服务的探针间隔不同，单次结果画在一起会因为
  * 采样密度不同而忽高忽低；比例能在同一尺度上比较。
+ *
+ * 为什么要有探针粒度：一个服务挂多个探针时，服务级曲线会把「哪个探针在抖」
+ * 抹平——排障时要能直接看到坏的那条线。探针级用「服务名 / 探针名」命名，
+ * 服务名就是这一组线的分组。
  */
 function ServicesTimeline() {
   const { t } = useTranslation();
   const [range, setRange] = React.useState<TimeRange>(() => presetRange("1d"));
+  const [level, setLevel] = React.useState<"service" | "probe">("service");
   const q = useQuery({
-    queryKey: ["services-timeline", range.from, range.to],
-    queryFn: () => trendApi.servicesTimeline(range.from, range.to, 60),
+    queryKey: ["services-timeline", range.from, range.to, level],
+    queryFn: () => trendApi.servicesTimeline(range.from, range.to, 60, level),
     refetchInterval: 60000,
   });
 
-  const series = (q.data?.services ?? []).map((s) => ({
+  const series = (q.data?.series ?? []).map((s) => ({
     name: s.name,
     data: s.points.map((p) => [p.t, p.v] as [number, number]),
   }));
@@ -152,8 +158,24 @@ function ServicesTimeline() {
     <Card>
       <CardHeader
         title={t("services.timelineTitle")}
-        description={t("services.timelineSubtitle")}
-        action={<TimeRangePicker value={range} onChange={setRange} />}
+        description={t(
+          level === "probe"
+            ? "services.timelineSubtitleProbe"
+            : "services.timelineSubtitle",
+        )}
+        action={
+          <>
+            <Segmented
+              value={level}
+              onChange={(v) => setLevel(v as "service" | "probe")}
+              options={[
+                { value: "service", label: t("services.timelineLevelService") },
+                { value: "probe", label: t("services.timelineLevelProbe") },
+              ]}
+            />
+            <TimeRangePicker value={range} onChange={setRange} />
+          </>
+        }
       />
       <CardBody compact>
         {q.isPending ? (
@@ -192,7 +214,6 @@ export function Services() {
   const toast = useToast();
 
   const [q, setQ] = React.useState("");
-  const [groupFilter, setGroupFilter] = React.useState("all");
   const [tierFilter, setTierFilter] = React.useState("all");
   const [serviceDialog, setServiceDialog] = React.useState<{
     open: boolean;
@@ -255,14 +276,6 @@ export function Services() {
 
   const needle = q.trim().toLowerCase();
 
-  /** 分组下拉的可选项：真实分组 + 「未分组」这一档（group_name 为空） */
-  const groups = React.useMemo(
-    () =>
-      Array.from(
-        new Set(services.map((s) => s.group_name.trim()).filter((g) => g !== "")),
-      ).sort((a, b) => a.localeCompare(b)),
-    [services],
-  );
   const tiers = React.useMemo(
     () =>
       Array.from(new Set(services.map((s) => s.tier))).sort((a, b) => a - b),
@@ -271,18 +284,10 @@ export function Services() {
 
   const filtered = React.useMemo(() => {
     return services.filter((s) => {
-      if (groupFilter === "__none__" && s.group_name.trim() !== "") return false;
-      if (
-        groupFilter !== "all" &&
-        groupFilter !== "__none__" &&
-        s.group_name !== groupFilter
-      )
-        return false;
       if (tierFilter !== "all" && String(s.tier) !== tierFilter) return false;
       if (!needle) return true;
       return (
         s.name.toLowerCase().includes(needle) ||
-        s.group_name.toLowerCase().includes(needle) ||
         s.probes.some(
           (p) =>
             p.name.toLowerCase().includes(needle) ||
@@ -290,7 +295,7 @@ export function Services() {
         )
       );
     });
-  }, [services, needle, groupFilter, tierFilter]);
+  }, [services, needle, tierFilter]);
 
   const healthy = services.filter((s) => s.health === "ok").length;
   const degradedCount = services.filter((s) => s.health === "degraded").length;
@@ -350,22 +355,6 @@ export function Services() {
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          <Select
-            wrapperClassName="w-40"
-            value={groupFilter}
-            onChange={(e) => setGroupFilter(e.target.value)}
-            aria-label={t("services.filterGroup")}
-          >
-            <option value="all">{t("services.groupAll")}</option>
-            {groups.map((g) => (
-              <option key={g} value={g}>
-                {g}
-              </option>
-            ))}
-            {services.some((s) => s.group_name.trim() === "") && (
-              <option value="__none__">{t("services.groupUngrouped")}</option>
-            )}
-          </Select>
           <Select
             wrapperClassName="w-36"
             value={tierFilter}
@@ -560,7 +549,6 @@ function ServiceCard({
         }
         title={service.name}
         description={[
-          service.group_name,
           t("services.probeCount", { n: service.probes.length }),
           service.enabled ? "" : t("services.disabled"),
           service.description,
@@ -633,8 +621,18 @@ function ServiceCard({
                     <div className="text-sm font-medium text-ink-900 dark:text-surface-0 truncate max-w-[220px]">
                       {p.name}
                     </div>
-                    <div className="text-xs text-ink-400 truncate max-w-[220px]">
-                      {p.node_hostname ?? t("services.anyNode")}
+                    {/* 绑定节点优先显示别名（后端已按 别名→主机名 回落排好） */}
+                    <div
+                      className="text-xs text-ink-400 truncate max-w-[220px]"
+                      title={
+                        p.node_labels.length
+                          ? p.node_labels.join(", ")
+                          : t("services.anyNode")
+                      }
+                    >
+                      {p.node_labels.length
+                        ? p.node_labels.join(", ")
+                        : t("services.anyNode")}
                       {p.enabled ? "" : ` · ${t("services.disabled")}`}
                     </div>
                   </Td>
@@ -764,7 +762,6 @@ function ServiceDialog({
   const qc = useQueryClient();
   const toast = useToast();
   const [name, setName] = React.useState(service?.name ?? "");
-  const [group, setGroup] = React.useState(service?.group_name ?? "");
   const [description, setDescription] = React.useState(
     service?.description ?? "",
   );
@@ -775,13 +772,11 @@ function ServiceDialog({
       service
         ? servicesApi.update(service.id, {
             name,
-            group_name: group,
             description,
             tier: Number(tier),
           })
         : servicesApi.create({
             name,
-            group_name: group,
             description,
             tier: Number(tier),
           }),
@@ -824,25 +819,16 @@ function ServiceDialog({
           onChange={(e) => setName(e.target.value)}
         />
       </Field>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <Field label={t("services.group")}>
-          <Input
-            value={group}
-            placeholder={t("services.formGroupPlaceholder")}
-            onChange={(e) => setGroup(e.target.value)}
-          />
-        </Field>
-        <Field label={t("services.tier")}>
-          <Select
-            value={tier}
-            onChange={(e) => setTier(e.target.value)}
-          >
-            <option value="1">{t("services.tier1")}</option>
-            <option value="2">{t("services.tier2")}</option>
-            <option value="3">{t("services.tier3")}</option>
-          </Select>
-        </Field>
-      </div>
+      <Field label={t("services.tier")}>
+        <Select
+          value={tier}
+          onChange={(e) => setTier(e.target.value)}
+        >
+          <option value="1">{t("services.tier1")}</option>
+          <option value="2">{t("services.tier2")}</option>
+          <option value="3">{t("services.tier3")}</option>
+        </Select>
+      </Field>
       <Field label={t("services.description")}>
         <Input
           value={description}
@@ -910,11 +896,23 @@ function ProbeDialog({
   const [threshold, setThreshold] = React.useState(
     String(probe?.failure_threshold ?? 3),
   );
-  const [nodeId, setNodeId] = React.useState(probe?.node_id ?? "");
+  const [nodeIds, setNodeIds] = React.useState<string[]>(probe?.node_ids ?? []);
   /** 一次性测试结果；改任何会影响目标的字段就作废（避免显示过期结论） */
   const [testResult, setTestResult] = React.useState<ProbeTestResult | null>(null);
 
   const nodesQ = useQuery({ queryKey: ["nodes"], queryFn: api.nodes });
+  /** 按别名（没有则主机名）排序：勾选列表的顺序也要和「别名优先」一致 */
+  const nodeOptions = React.useMemo(
+    () =>
+      [...(nodesQ.data ?? [])].sort((a, b) =>
+        nodeLabel(a).localeCompare(nodeLabel(b)),
+      ),
+    [nodesQ.data],
+  );
+  const toggleNode = (id: string) =>
+    setNodeIds((cur) =>
+      cur.includes(id) ? cur.filter((v) => v !== id) : [...cur, id],
+    );
 
   const buildPayload = () => {
     const splitList = (raw: string) =>
@@ -960,7 +958,7 @@ function ProbeDialog({
       interval_seconds: Number(interval),
       timeout_ms: Number(timeoutMs),
       failure_threshold: Number(threshold),
-      node_id: nodeId || null,
+      node_ids: nodeIds,
       enabled: probe?.enabled ?? true,
     };
   };
@@ -977,7 +975,7 @@ function ProbeDialog({
             interval_seconds: payload.interval_seconds,
             timeout_ms: payload.timeout_ms,
             failure_threshold: payload.failure_threshold,
-            node_id: payload.node_id,
+            node_ids: payload.node_ids,
           })
         : servicesApi.createProbe(payload);
     },
@@ -1213,35 +1211,75 @@ function ProbeDialog({
         />
       </Field>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <Field label={t("services.formNode")}>
-          <Select
-            value={nodeId}
-            onChange={(e) => setNodeId(e.target.value)}
-          >
-            <option value="">{t("services.anyNode")}</option>
-            {(nodesQ.data ?? []).map((n) => (
-              <option key={n.id} value={n.id}>
-                {nodeLabel(n)}
-              </option>
-            ))}
-          </Select>
-        </Field>
-        {/* 不用 Field 包裹：避免外层 label 与内层 checkbox 的 label 重复朗读 */}
-        <div className="block">
-          <span className="text-sm font-medium text-ink-700 dark:text-surface-4">
-            {t("services.formTlsVerify")}
-          </span>
-          <label className="mt-1 flex items-center gap-2 h-9 text-sm text-ink-700 dark:text-surface-4">
-            <input
-              type="checkbox"
-              checked={tlsVerify}
-              onChange={(e) => setTlsVerify(e.target.checked)}
-              className="w-4 h-4 rounded border-surface-3"
-            />
-            {t("services.formTlsVerify")}
-          </label>
+      {/*
+        执行节点：可多选、也可一个都不选。
+        不选 = 任意节点（每台在线节点上都会跑）——这是探针的默认形态；
+        选了就只在这些节点上跑，用来做多机对比或只在内网某台机器上探。
+
+        不用 Field 包裹：它渲染成 <label>，把复选框列表套进去后「点标题文字」会
+        误选第一个节点（内层 label 也会被重复朗读）。
+      */}
+      <div className="block">
+        <span className="text-sm font-medium text-ink-700 dark:text-surface-4">
+          {t("services.formNode")}
+        </span>
+        <div className="mt-1 rounded-lg border border-surface-3 dark:border-ink-700 max-h-44 overflow-y-auto scrollbar-thin divide-y divide-surface-2 dark:divide-ink-700">
+          {nodesQ.isLoading ? (
+            <p className="px-3 py-2 text-sm text-ink-400">
+              {t("services.formNodeLoading")}
+            </p>
+          ) : nodeOptions.length === 0 ? (
+            <p className="px-3 py-2 text-sm text-ink-400">
+              {t("services.formNodeNone")}
+            </p>
+          ) : (
+            nodeOptions.map((n) => {
+              const label = nodeLabel(n);
+              return (
+                <label
+                  key={n.id}
+                  className="flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-surface-1 dark:hover:bg-ink-800"
+                >
+                  <input
+                    type="checkbox"
+                    checked={nodeIds.includes(n.id)}
+                    onChange={() => toggleNode(n.id)}
+                    className="w-4 h-4 rounded border-surface-3"
+                  />
+                  <span className="truncate text-ink-700 dark:text-surface-4">
+                    {label}
+                  </span>
+                  {label !== n.hostname && (
+                    <span className="truncate text-xs text-ink-400">
+                      {n.hostname}
+                    </span>
+                  )}
+                </label>
+              );
+            })
+          )}
         </div>
+        <p className="mt-1 text-xs text-ink-400">
+          {nodeIds.length === 0
+            ? t("services.formNodeAny")
+            : t("services.formNodeBound", { n: nodeIds.length })}
+        </p>
+      </div>
+
+      {/* 不用 Field 包裹：避免外层 label 与内层 checkbox 的 label 重复朗读 */}
+      <div className="block">
+        <span className="text-sm font-medium text-ink-700 dark:text-surface-4">
+          {t("services.formTlsVerify")}
+        </span>
+        <label className="mt-1 flex items-center gap-2 h-9 text-sm text-ink-700 dark:text-surface-4">
+          <input
+            type="checkbox"
+            checked={tlsVerify}
+            onChange={(e) => setTlsVerify(e.target.checked)}
+            className="w-4 h-4 rounded border-surface-3"
+          />
+          {t("services.formTlsVerify")}
+        </label>
       </div>
 
       {/* 测试结论：reason 由后端给，文案在这里选，保证中英都通 */}

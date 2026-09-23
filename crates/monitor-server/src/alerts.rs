@@ -466,14 +466,10 @@ pub async fn on_probe_transition(
 
     match repo
         .open_probe_alert(
-            &probe.id,
-            &rule_name,
-            // 探针可能未绑定节点，此时记上报结果的这台节点
-            probe.node_id.as_deref().unwrap_or(node_id),
-            hostname,
-            severity,
-            &message,
-            now,
+            &probe.id, &rule_name,
+            // 告警记在「上报这台结果」的节点上：探针可能绑了多台（或任意节点），
+            // 记上报节点才能一眼看出是哪台机器探到的
+            node_id, hostname, severity, &message, now,
         )
         .await
     {

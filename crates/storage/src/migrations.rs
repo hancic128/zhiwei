@@ -455,5 +455,33 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     }
 
+    // Migration 015: 探针绑定**多个**节点
+    //
+    // 原 probes.node_id 只能绑一个节点（NULL = 任意节点）。控制台改成多选后，
+    // 用 node_ids_json 存节点 id 数组：空数组 = 任意节点（沿用 NULL 的语义，
+    // 老数据不用改行为），非空则只在这些节点上执行。
+    //
+    // 老数据先按单节点展开成数组，再把旧列连同它的索引删掉——留着两份真相迟早
+    // 会有人写错一份。`json_array` 依赖 SQLite 的 JSON1（3.38 起内置，sqlx 自带
+    // 的 bundled sqlite 是 3.46）。
+    let has_015: Option<i64> =
+        sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 15")
+            .fetch_optional(pool)
+            .await?;
+    if has_015.is_none() {
+        sqlx::query(
+            r#"
+            ALTER TABLE probes ADD COLUMN node_ids_json TEXT NOT NULL DEFAULT '[]';
+            UPDATE probes SET node_ids_json = json_array(node_id)
+                WHERE node_id IS NOT NULL AND trim(node_id) <> '';
+            DROP INDEX IF EXISTS idx_probes_node;
+            ALTER TABLE probes DROP COLUMN node_id;
+            INSERT INTO schema_version (version) VALUES (15);
+            "#,
+        )
+        .execute(pool)
+        .await?;
+    }
+
     Ok(())
 }

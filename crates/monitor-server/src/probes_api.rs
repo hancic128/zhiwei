@@ -152,10 +152,8 @@ pub async fn probe_results_ingest_handler(
         };
 
         // 归属校验：探针绑定了别的节点时，不接受这台节点的结果
-        if let Some(bound) = &probe.node_id {
-            if bound != node_id.as_str() {
-                continue;
-            }
+        if !probe.node_ids.is_empty() && !probe.node_ids.iter().any(|n| n == node_id.as_str()) {
+            continue;
         }
 
         let ts = if item.ts_unix_nano > 0 {
@@ -202,11 +200,32 @@ pub async fn probe_results_ingest_handler(
 
 // ---------- 控制台侧 ----------
 
-/// `GET /v1/services/timeline?from=<ms>&to=<ms>&buckets=N`
+/// 把「每桶 ok 数 / 总数」折成每个对象一条曲线（`t` 毫秒、`v` 百分比）。
+/// 一条结果都没有的桶直接跳过，让曲线断开而不是掉到 0。
+fn ratio_series(rows: Vec<(String, i64, i64, i64)>) -> HashMap<String, Vec<serde_json::Value>> {
+    let mut series: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+    for (key, bucket, ok, total) in rows {
+        if total <= 0 {
+            continue;
+        }
+        let ratio = ok as f64 * 100.0 / total as f64;
+        series.entry(key).or_default().push(serde_json::json!({
+            "t": bucket / 1_000_000,
+            "v": ratio,
+        }));
+    }
+    series
+}
+
+/// `GET /v1/services/timeline?from=<ms>&to=<ms>&buckets=N&level=service|probe`
 ///
-/// 服务健康时间线：每个时间桶里「有多少比例的探测是 ok 的」，一条线一个服务。
+/// 健康时间线：每个时间桶里「有多少比例的探测是 ok 的」，一条线一个对象。
 /// 用比例而不是单次探测结果——单次结果受采样密度影响，曲线会毛刺化；
 /// 比例能在同一个尺度上比较不同频率的探针。
+///
+/// `level=service`（默认）一条线一个服务；`level=probe` 一条线一个探针，
+/// 服务级曲线会把「同一个服务里哪个探针在抖」抹平，排查时要看得到。
+/// 探针级用服务名做分组前缀（`服务名 / 探针名`），图例里同服务的线挨在一起。
 pub async fn services_timeline_handler(
     State(state): State<AppState>,
     Query(q): Query<HashMap<String, String>>,
@@ -237,6 +256,54 @@ pub async fn services_timeline_handler(
         .unwrap_or(60)
         .clamp(10, 240);
     let bucket_ns = (to_ms - from_ms) * 1_000_000 / buckets;
+    let by_probe = q.get("level").map(String::as_str) == Some("probe");
+
+    if by_probe {
+        let rows = match state
+            .storage
+            .probes()
+            .health_buckets_by_probe(from_ms * 1_000_000, to_ms * 1_000_000, bucket_ns)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("query probe results: {e}"),
+                )
+            }
+        };
+        let probes = state
+            .storage
+            .probes()
+            .list_probes()
+            .await
+            .unwrap_or_default();
+
+        let mut series = ratio_series(rows);
+
+        let out: Vec<serde_json::Value> = probes
+            .iter()
+            .filter_map(|p| {
+                let points = series.remove(&p.id)?;
+                Some(serde_json::json!({
+                    "id": p.id,
+                    "name": format!("{} / {}", p.service_name, p.name),
+                    "group": p.service_name,
+                    "points": points,
+                }))
+            })
+            .collect();
+
+        return Json(serde_json::json!({
+            "from_ms": from_ms,
+            "to_ms": to_ms,
+            "bucket_ms": bucket_ns / 1_000_000,
+            "level": "probe",
+            "series": out,
+        }))
+        .into_response();
+    }
 
     let rows = match state
         .storage
@@ -260,28 +327,16 @@ pub async fn services_timeline_handler(
         .unwrap_or_default();
 
     // service_id -> 点集（按桶顺序）
-    let mut series: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
-    for (service_id, bucket, ok, total) in rows {
-        if total <= 0 {
-            continue;
-        }
-        let ratio = ok as f64 * 100.0 / total as f64;
-        series
-            .entry(service_id)
-            .or_default()
-            .push(serde_json::json!({
-                "t": bucket / 1_000_000,
-                "v": ratio,
-            }));
-    }
+    let mut series = ratio_series(rows);
 
     let out: Vec<serde_json::Value> = services
         .iter()
         .filter_map(|s| {
             let points = series.remove(&s.id)?;
             Some(serde_json::json!({
-                "service_id": s.id,
+                "id": s.id,
                 "name": s.name,
+                "group": serde_json::Value::Null,
                 "points": points,
             }))
         })
@@ -291,7 +346,8 @@ pub async fn services_timeline_handler(
         "from_ms": from_ms,
         "to_ms": to_ms,
         "bucket_ms": bucket_ns / 1_000_000,
-        "services": out,
+        "level": "service",
+        "series": out,
     }))
     .into_response()
 }
@@ -475,6 +531,18 @@ pub async fn list_probes_handler(State(state): State<AppState>, headers: HeaderM
     }
 }
 
+/// 绑定节点列表去空、去重（顺序即界面勾选顺序，保持稳定）
+fn normalize_node_ids(ids: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in ids {
+        let id = raw.trim();
+        if !id.is_empty() && !out.iter().any(|v| v == id) {
+            out.push(id.to_string());
+        }
+    }
+    out
+}
+
 /// 校验并规范化探针的 kind / target / expect
 fn normalize_probe_parts(
     kind: &str,
@@ -542,8 +610,9 @@ pub async fn create_probe_handler(
         timeout_ms: i64,
         #[serde(default = "default_threshold")]
         failure_threshold: i64,
+        /// 绑定的执行节点；缺省或空数组 = 任意节点
         #[serde(default)]
-        node_id: Option<String>,
+        node_ids: Vec<String>,
         #[serde(default = "default_enabled")]
         enabled: bool,
     }
@@ -593,7 +662,7 @@ pub async fn create_probe_handler(
         interval_seconds: b.interval_seconds.clamp(10, 86_400),
         timeout_ms: b.timeout_ms.clamp(100, 60_000),
         failure_threshold: b.failure_threshold.clamp(1, 100),
-        node_id: b.node_id.filter(|s| !s.trim().is_empty()),
+        node_ids: normalize_node_ids(&b.node_ids),
         location: "node".into(),
         enabled: b.enabled,
     };
@@ -688,8 +757,9 @@ pub async fn patch_probe_handler(
         timeout_ms: Option<i64>,
         #[serde(default)]
         failure_threshold: Option<i64>,
+        /// 给数组即整体替换绑定节点（`[]` = 改回「任意节点」）
         #[serde(default)]
-        node_id: Option<String>,
+        node_ids: Option<Vec<String>>,
         #[serde(default)]
         enabled: Option<bool>,
     }
@@ -719,9 +789,7 @@ pub async fn patch_probe_handler(
         interval_seconds: b.interval_seconds.map(|v| v.clamp(10, 86_400)),
         timeout_ms: b.timeout_ms.map(|v| v.clamp(100, 60_000)),
         failure_threshold: b.failure_threshold.map(|v| v.clamp(1, 100)),
-        node_id: b
-            .node_id
-            .map(|s| if s.trim().is_empty() { None } else { Some(s) }),
+        node_ids: b.node_ids.as_deref().map(normalize_node_ids),
         enabled: b.enabled,
     };
     let now = zhiwei_common::Timestamp::now().unix_nano();

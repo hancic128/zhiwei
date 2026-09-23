@@ -37,8 +37,10 @@ pub struct Probe {
     pub interval_seconds: i64,
     pub timeout_ms: i64,
     pub failure_threshold: i64,
-    pub node_id: Option<String>,
-    pub node_hostname: Option<String>,
+    /// 绑定的执行节点；空 = 任意节点（每个节点都跑这个探针）
+    pub node_ids: Vec<String>,
+    /// 绑定节点的展示名，与 `node_ids` 同序（别名优先，回落主机名）
+    pub node_labels: Vec<String>,
     pub location: String,
     pub enabled: bool,
     pub created_at_unix_nano: i64,
@@ -123,7 +125,8 @@ pub struct ProbeInput {
     pub interval_seconds: i64,
     pub timeout_ms: i64,
     pub failure_threshold: i64,
-    pub node_id: Option<String>,
+    /// 空 = 任意节点
+    pub node_ids: Vec<String>,
     pub location: String,
     pub enabled: bool,
 }
@@ -138,7 +141,8 @@ pub struct ProbePatch {
     pub interval_seconds: Option<i64>,
     pub timeout_ms: Option<i64>,
     pub failure_threshold: Option<i64>,
-    pub node_id: Option<Option<String>>,
+    /// Some = 整体替换绑定节点（空数组即改回「任意节点」）
+    pub node_ids: Option<Vec<String>>,
     pub enabled: Option<bool>,
 }
 
@@ -156,22 +160,21 @@ type ServiceRow = (String, String, String, String, i64, i64, i64, i64);
 
 #[allow(clippy::type_complexity)]
 type ProbeRow = (
-    String,         // p.id
-    String,         // p.service_id
-    String,         // s.name
-    String,         // p.name
-    String,         // p.kind
-    String,         // p.target_json
-    String,         // p.expect_json
-    i64,            // p.interval_seconds
-    i64,            // p.timeout_ms
-    i64,            // p.failure_threshold
-    Option<String>, // p.node_id
-    String,         // p.location
-    i64,            // p.enabled
-    i64,            // p.created_at_unix_nano
-    i64,            // p.updated_at_unix_nano
-    Option<String>, // n.hostname
+    String, // p.id
+    String, // p.service_id
+    String, // s.name
+    String, // p.name
+    String, // p.kind
+    String, // p.target_json
+    String, // p.expect_json
+    i64,    // p.interval_seconds
+    i64,    // p.timeout_ms
+    i64,    // p.failure_threshold
+    String, // p.node_ids_json（JSON 数组，空数组 = 任意节点）
+    String, // p.location
+    i64,    // p.enabled
+    i64,    // p.created_at_unix_nano
+    i64,    // p.updated_at_unix_nano
 );
 
 type StateRow = (String, String, i64, i64, i64, Option<f64>, String);
@@ -215,13 +218,23 @@ fn probe_from_row(r: ProbeRow) -> Probe {
         interval_seconds: r.7,
         timeout_ms: r.8,
         failure_threshold: r.9,
-        node_id: r.10,
+        node_ids: parse_node_ids(&r.10),
+        node_labels: Vec::new(),
         location: r.11,
         enabled: r.12 != 0,
         created_at_unix_nano: r.13,
         updated_at_unix_nano: r.14,
-        node_hostname: r.15,
     }
+}
+
+/// 解析 probes.node_ids_json；坏值按「任意节点」处理，不让一条脏数据卡死整页
+fn parse_node_ids(raw: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<String>>(raw).unwrap_or_default()
+}
+
+/// 序列化绑定节点（空 = 任意节点，存成 `[]` 而不是 NULL，查询只需比较字符串）
+fn node_ids_json(ids: &[String]) -> String {
+    serde_json::to_string(ids).unwrap_or_else(|_| "[]".into())
 }
 
 const SERVICE_COLS: &str =
@@ -232,8 +245,8 @@ const STATE_COLS: &str = "probe_id, state, consecutive_failures, last_change_at_
 
 const PROBE_COLS: &str =
     "p.id, p.service_id, s.name, p.name, p.kind, p.target_json, p.expect_json, \
-     p.interval_seconds, p.timeout_ms, p.failure_threshold, p.node_id, p.location, p.enabled, \
-     p.created_at_unix_nano, p.updated_at_unix_nano, n.hostname";
+     p.interval_seconds, p.timeout_ms, p.failure_threshold, p.node_ids_json, p.location, p.enabled, \
+     p.created_at_unix_nano, p.updated_at_unix_nano";
 
 /// 最差状态聚合（服务健康 = 最差探针状态）
 pub fn worst_state(states: &[String]) -> String {
@@ -372,12 +385,13 @@ impl ProbesRepo {
         let rows: Vec<ProbeRow> = sqlx::query_as(&format!(
             "SELECT {PROBE_COLS} FROM probes p
              JOIN services s ON s.id = p.service_id
-             LEFT JOIN nodes n ON n.id = p.node_id
              ORDER BY s.name, p.name"
         ))
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(probe_from_row).collect())
+        let mut probes: Vec<Probe> = rows.into_iter().map(probe_from_row).collect();
+        self.fill_node_labels(&mut probes).await?;
+        Ok(probes)
     }
 
     /// 某节点要执行的探针：启用 + 归属该节点（或未指定节点）
@@ -385,9 +399,9 @@ impl ProbesRepo {
         let rows: Vec<ProbeRow> = sqlx::query_as(&format!(
             "SELECT {PROBE_COLS} FROM probes p
              JOIN services s ON s.id = p.service_id
-             LEFT JOIN nodes n ON n.id = p.node_id
              WHERE p.enabled = 1 AND s.enabled = 1 AND p.location = 'node'
-               AND (p.node_id IS NULL OR p.node_id = ?)
+               AND (p.node_ids_json = '[]'
+                    OR EXISTS (SELECT 1 FROM json_each(p.node_ids_json) WHERE json_each.value = ?))
              ORDER BY p.name"
         ))
         .bind(node_id)
@@ -400,20 +414,58 @@ impl ProbesRepo {
         let row: Option<ProbeRow> = sqlx::query_as(&format!(
             "SELECT {PROBE_COLS} FROM probes p
              JOIN services s ON s.id = p.service_id
-             LEFT JOIN nodes n ON n.id = p.node_id
              WHERE p.id = ?"
         ))
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(probe_from_row))
+        match row {
+            Some(r) => {
+                let mut probe = probe_from_row(r);
+                self.fill_node_labels(std::slice::from_mut(&mut probe))
+                    .await?;
+                Ok(Some(probe))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// 给探针补上绑定节点的展示名：别名优先、回落主机名（与节点列表一致）
+    async fn fill_node_labels(&self, probes: &mut [Probe]) -> anyhow::Result<()> {
+        if probes.iter().all(|p| p.node_ids.is_empty()) {
+            return Ok(());
+        }
+        let rows: Vec<(String, String, String)> =
+            sqlx::query_as("SELECT id, alias, hostname FROM nodes")
+                .fetch_all(&self.pool)
+                .await?;
+        let names: std::collections::HashMap<String, String> = rows
+            .into_iter()
+            .map(|(id, alias, hostname)| {
+                let alias = alias.trim();
+                let label = if alias.is_empty() {
+                    hostname
+                } else {
+                    alias.to_string()
+                };
+                (id, label)
+            })
+            .collect();
+        for p in probes.iter_mut() {
+            p.node_labels = p
+                .node_ids
+                .iter()
+                .map(|id| names.get(id).cloned().unwrap_or_else(|| id.clone()))
+                .collect();
+        }
+        Ok(())
     }
 
     pub async fn create_probe(&self, input: &ProbeInput, now: i64) -> anyhow::Result<Probe> {
         let id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
             "INSERT INTO probes (id, service_id, name, kind, target_json, expect_json,
-                                 interval_seconds, timeout_ms, failure_threshold, node_id, location,
+                                 interval_seconds, timeout_ms, failure_threshold, node_ids_json, location,
                                  enabled, created_at_unix_nano, updated_at_unix_nano)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
@@ -426,7 +478,7 @@ impl ProbesRepo {
         .bind(input.interval_seconds)
         .bind(input.timeout_ms)
         .bind(input.failure_threshold)
-        .bind(input.node_id.as_deref())
+        .bind(node_ids_json(&input.node_ids))
         .bind(&input.location)
         .bind(i64::from(input.enabled))
         .bind(now)
@@ -463,15 +515,20 @@ impl ProbesRepo {
         if let Some(v) = patch.failure_threshold {
             p.failure_threshold = v;
         }
-        if let Some(v) = &patch.node_id {
-            p.node_id = v.clone();
+        if let Some(v) = &patch.node_ids {
+            let mut seen = std::collections::HashSet::new();
+            p.node_ids = v
+                .iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty() && seen.insert(s.clone()))
+                .collect();
         }
         if let Some(v) = patch.enabled {
             p.enabled = v;
         }
         sqlx::query(
             "UPDATE probes SET name = ?, kind = ?, target_json = ?, expect_json = ?,
-                    interval_seconds = ?, timeout_ms = ?, failure_threshold = ?, node_id = ?,
+                    interval_seconds = ?, timeout_ms = ?, failure_threshold = ?, node_ids_json = ?,
                     enabled = ?, updated_at_unix_nano = ? WHERE id = ?",
         )
         .bind(&p.name)
@@ -481,7 +538,7 @@ impl ProbesRepo {
         .bind(p.interval_seconds)
         .bind(p.timeout_ms)
         .bind(p.failure_threshold)
-        .bind(p.node_id.as_deref())
+        .bind(node_ids_json(&p.node_ids))
         .bind(i64::from(p.enabled))
         .bind(now)
         .bind(id)
@@ -695,26 +752,51 @@ impl ProbesRepo {
         to_ns: i64,
         bucket_ns: i64,
     ) -> anyhow::Result<Vec<(String, i64, i64, i64)>> {
+        self.health_buckets_grouped("p.service_id", from_ns, to_ns, bucket_ns)
+            .await
+    }
+
+    /// 同上，但按**探针**聚合，返回 `(probe_id, bucket_start_unix_nano, ok, total)`。
+    /// 一个服务挂多个探针时，服务级曲线会把「哪个探针在抖」抹平。
+    pub async fn health_buckets_by_probe(
+        &self,
+        from_ns: i64,
+        to_ns: i64,
+        bucket_ns: i64,
+    ) -> anyhow::Result<Vec<(String, i64, i64, i64)>> {
+        self.health_buckets_grouped("r.probe_id", from_ns, to_ns, bucket_ns)
+            .await
+    }
+
+    async fn health_buckets_grouped(
+        &self,
+        group_col: &str,
+        from_ns: i64,
+        to_ns: i64,
+        bucket_ns: i64,
+    ) -> anyhow::Result<Vec<(String, i64, i64, i64)>> {
         let bucket_ns = bucket_ns.max(1);
-        let rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(
+        // group_col 只来自本文件的两个常量，不接受外部输入
+        let sql = format!(
             r#"
-            SELECT p.service_id,
+            SELECT {group_col} AS grp,
                    (r.ts_unix_nano / ?) * ? AS bucket_start,
                    SUM(CASE WHEN r.state = 'ok' THEN 1 ELSE 0 END) AS ok_count,
                    COUNT(*) AS total_count
             FROM probe_results r
             JOIN probes p ON p.id = r.probe_id
             WHERE r.ts_unix_nano >= ? AND r.ts_unix_nano <= ?
-            GROUP BY p.service_id, bucket_start
-            ORDER BY p.service_id, bucket_start
-            "#,
-        )
-        .bind(bucket_ns)
-        .bind(bucket_ns)
-        .bind(from_ns)
-        .bind(to_ns)
-        .fetch_all(&self.pool)
-        .await?;
+            GROUP BY grp, bucket_start
+            ORDER BY grp, bucket_start
+            "#
+        );
+        let rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(&sql)
+            .bind(bucket_ns)
+            .bind(bucket_ns)
+            .bind(from_ns)
+            .bind(to_ns)
+            .fetch_all(&self.pool)
+            .await?;
         Ok(rows)
     }
 
@@ -731,6 +813,17 @@ impl ProbesRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_ids_round_trip() {
+        assert_eq!(node_ids_json(&[]), "[]");
+        let ids = vec!["n-1".to_string(), "n-2".to_string()];
+        assert_eq!(node_ids_json(&ids), r#"["n-1","n-2"]"#);
+        assert_eq!(parse_node_ids(r#"["n-1","n-2"]"#), ids);
+        // 脏数据按「任意节点」处理，页面不该因为一行 JSON 坏掉
+        assert_eq!(parse_node_ids("oops"), Vec::<String>::new());
+        assert_eq!(parse_node_ids(""), Vec::<String>::new());
+    }
 
     #[test]
     fn worst_state_picks_the_most_severe() {

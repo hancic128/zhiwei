@@ -246,9 +246,12 @@ export interface ServicesTimelineView {
   from_ms: number;
   to_ms: number;
   bucket_ms: number;
-  services: Array<{
-    service_id: string;
+  level: "service" | "probe";
+  /** service 粒度时一条线一个服务；probe 粒度时一条线一个探针（name 带服务名前缀） */
+  series: Array<{
+    id: string;
     name: string;
+    group: string | null;
     points: Array<{ t: number; v: number }>;
   }>;
 }
@@ -264,9 +267,14 @@ export const trendApi = {
     if (opts.to) params.set("to", String(Math.round(opts.to)));
     return request<AllNodesSeriesView>(`/v1/series/nodes?${params.toString()}`);
   },
-  servicesTimeline: (from: number, to: number, buckets = 60) =>
+  servicesTimeline: (
+    from: number,
+    to: number,
+    buckets = 60,
+    level: "service" | "probe" = "service",
+  ) =>
     request<ServicesTimelineView>(
-      `/v1/services/timeline?from=${Math.round(from)}&to=${Math.round(to)}&buckets=${buckets}`,
+      `/v1/services/timeline?from=${Math.round(from)}&to=${Math.round(to)}&buckets=${buckets}&level=${level}`,
     ),
 };
 
@@ -910,8 +918,10 @@ export interface ProbeView {
   interval_seconds: number;
   timeout_ms: number;
   failure_threshold: number;
-  node_id: string | null;
-  node_hostname: string | null;
+  /** 绑定的执行节点；空数组 = 任意节点 */
+  node_ids: string[];
+  /** 绑定节点的展示名（别名优先，回落主机名），与 node_ids 同序 */
+  node_labels: string[];
   location: string;
   enabled: boolean;
   created_at_unix_nano: number;
@@ -949,7 +959,8 @@ export interface ProbeInputBody {
   interval_seconds?: number;
   timeout_ms?: number;
   failure_threshold?: number;
-  node_id?: string | null;
+  /** 空数组 = 任意节点 */
+  node_ids?: string[];
   enabled?: boolean;
 }
 
