@@ -13,6 +13,7 @@ import {
   Info,
   MemoryStick,
   Network,
+  Pencil,
   Power,
   RefreshCw,
   RotateCw,
@@ -31,6 +32,7 @@ import {
 } from "@/api";
 import { LineChart, type Series } from "@/components/chart";
 import { NodeContainers } from "@/components/node-containers";
+import { NodeMetaDialog, TagList } from "@/components/node-meta-dialog";
 import { NodeProbes } from "@/components/node-probes";
 import { DotBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -50,6 +52,7 @@ import { useToast } from "@/components/ui/toast";
 import { usePrefs } from "@/components/prefs-provider";
 import {
   cn,
+  copyText,
   formatBytes,
   formatPercent,
   formatRate,
@@ -58,6 +61,7 @@ import {
   friendlyError,
   livenessOf,
   maskSecret,
+  nodeLabel,
   relativeTime,
 } from "@/lib/utils";
 
@@ -92,6 +96,8 @@ export function NodeDetail() {
   const [procSort, setProcSort] = React.useState<"cpu" | "mem">("cpu");
   const [pending, setPending] = React.useState<PendingAction | null>(null);
   const [busy, setBusy] = React.useState(false);
+  /** 编辑别名 / 标签 */
+  const [metaOpen, setMetaOpen] = React.useState(false);
 
   // 预设范围跟着刷新频率滚动（否则「最近 30 分钟」会一直停在首次选定的那一段）
   const [tick, setTick] = React.useState(() => Date.now());
@@ -237,12 +243,8 @@ export function NodeDetail() {
   };
 
   const copy = async (text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      toast.push("success", t("detail.copied"));
-    } catch {
-      toast.push("error", t("err.generic"));
-    }
+    const ok = await copyText(text);
+    toast.push(ok ? "success" : "error", t(ok ? "detail.copied" : "toast.copyFailed"));
   };
 
   const confirmCopy = (() => {
@@ -307,7 +309,7 @@ export function NodeDetail() {
             </Link>
             <span className="text-surface-4 dark:text-ink-700">/</span>
             <h2 className="text-lg font-bold text-ink-900 dark:text-surface-0 truncate">
-              {node?.hostname ?? id}
+              {node ? nodeLabel(node) : id}
             </h2>
             <DotBadge
               tone={
@@ -320,8 +322,12 @@ export function NodeDetail() {
           </div>
           {node && (
             <p className="mt-1 text-xs text-ink-400 truncate">
+              {node.alias ? `${node.hostname} · ` : ""}
               {id} · {t("detail.enrolledAt")} {rel(node.enrolled_at_ms)}
             </p>
+          )}
+          {node && node.tags.length > 0 && (
+            <TagList tags={node.tags} className="mt-1 flex flex-wrap gap-1" />
           )}
         </div>
 
@@ -357,6 +363,17 @@ export function NodeDetail() {
               onClick={() => setShowBasic(true)}
             >
               <Info className="w-4 h-4" aria-hidden="true" />
+            </Button>
+          </Tooltip>
+          <Tooltip content={t("nodeMeta.edit")}>
+            <Button
+              variant="secondary"
+              size="icon"
+              aria-label={t("nodeMeta.edit")}
+              disabled={!node}
+              onClick={() => setMetaOpen(true)}
+            >
+              <Pencil className="w-4 h-4" aria-hidden="true" />
             </Button>
           </Tooltip>
           <Tooltip content={t("detail.restart")}>
@@ -830,6 +847,11 @@ export function NodeDetail() {
           }}
         />
       )}
+
+      <NodeMetaDialog
+        node={metaOpen ? (node ?? null) : null}
+        onClose={() => setMetaOpen(false)}
+      />
     </>
   );
 }

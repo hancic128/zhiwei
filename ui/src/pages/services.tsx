@@ -53,7 +53,7 @@ import {
   Tr,
 } from "@/components/ui/table";
 import { useToast } from "@/components/ui/toast";
-import { friendlyError, formatTime, relativeTime } from "@/lib/utils";
+import { friendlyError, formatTime, nodeLabel, relativeTime } from "@/lib/utils";
 import { usePrefs } from "@/components/prefs-provider";
 
 /** 探针类型图标（规范：图标一律 Lucide SVG，禁止 emoji） */
@@ -1099,7 +1099,7 @@ function ProbeDialog({
             <option value="">{t("services.anyNode")}</option>
             {(nodesQ.data ?? []).map((n) => (
               <option key={n.id} value={n.id}>
-                {n.hostname}
+                {nodeLabel(n)}
               </option>
             ))}
           </Select>

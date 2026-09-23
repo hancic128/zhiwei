@@ -42,7 +42,7 @@ import { EmptyState, ErrorState, Skeleton } from "@/components/ui/feedback";
 import { Table, TBody, Td, Th, THead, Tr } from "@/components/ui/table";
 import { useToast } from "@/components/ui/toast";
 import { usePrefs } from "@/components/prefs-provider";
-import { cn, formatTime, friendlyError, TIMEZONES } from "@/lib/utils";
+import { cn, copyText, formatTime, friendlyError, TIMEZONES } from "@/lib/utils";
 
 export function Settings() {
   const { t } = useTranslation();
@@ -129,10 +129,12 @@ function CaSection() {
                   size="icon"
                   aria-label={t("settings.caCopy")}
                   onClick={() => {
-                    void navigator.clipboard
-                      ?.writeText(caQ.data!.fingerprint_sha256)
-                      .then(() => toast.push("success", t("settings.caCopied")))
-                      .catch(() => toast.push("error", t("err.generic")));
+                    void copyText(caQ.data!.fingerprint_sha256).then((ok) =>
+                      toast.push(
+                        ok ? "success" : "error",
+                        t(ok ? "settings.caCopied" : "toast.copyFailed"),
+                      ),
+                    );
                   }}
                 >
                   <Copy className="w-4 h-4" aria-hidden="true" />
@@ -571,10 +573,9 @@ function AiSection() {
   const masked = token ? `${token.slice(0, 8)}…${token.slice(-4)}` : "—";
 
   const copy = (text: string, okKey: string) =>
-    void navigator.clipboard
-      ?.writeText(text)
-      .then(() => toast.push("success", t(okKey)))
-      .catch(() => toast.push("error", t("err.generic")));
+    void copyText(text).then((ok) =>
+      toast.push(ok ? "success" : "error", t(ok ? okKey : "toast.copyFailed")),
+    );
 
   const readOnly = [
     "GET /v1/todo",

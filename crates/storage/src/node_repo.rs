@@ -15,6 +15,10 @@ pub struct NodeRecord {
     pub host_info_json: String,
     /// 节点 Ed25519 公钥（base64）。请求签名用它验签，取代原 mTLS 客户端证书。
     pub public_key: String,
+    /// 管理员给的简短别称（≤10 字符）；空串表示未设置
+    pub alias: String,
+    /// 管理员给的标签（JSON 数组，≤10 个）
+    pub tags_json: String,
 }
 
 /// SQLite 行的裸形态：与 SELECT 的列顺序一一对应。
@@ -27,6 +31,8 @@ type NodeRow = (
     Option<i64>, // last_seen_unix_nano
     String,      // host_info_json
     String,      // public_key (base64)
+    String,      // alias
+    String,      // tags_json
 );
 
 #[derive(Clone)]
@@ -42,8 +48,8 @@ impl NodeRepo {
     pub async fn insert(&self, record: &NodeRecord) -> anyhow::Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO nodes (id, hostname, labels_json, client_cert_pem, enrolled_at_unix_nano, last_seen_unix_nano, public_key)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO nodes (id, hostname, labels_json, client_cert_pem, enrolled_at_unix_nano, last_seen_unix_nano, public_key, alias, tags_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&record.id)
@@ -53,6 +59,8 @@ impl NodeRepo {
         .bind(record.enrolled_at_unix_nano)
         .bind(record.last_seen_unix_nano)
         .bind(&record.public_key)
+        .bind(&record.alias)
+        .bind(&record.tags_json)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -62,7 +70,7 @@ impl NodeRepo {
         let row: Option<NodeRow> =
             sqlx::query_as(
                 r#"
-            SELECT id, hostname, labels_json, client_cert_pem, enrolled_at_unix_nano, last_seen_unix_nano, host_info_json, public_key
+            SELECT id, hostname, labels_json, client_cert_pem, enrolled_at_unix_nano, last_seen_unix_nano, host_info_json, public_key, alias, tags_json
             FROM nodes WHERE id = ?
             "#,
             )
@@ -80,6 +88,8 @@ impl NodeRepo {
                 last_seen_unix_nano,
                 host_info_json,
                 public_key,
+                alias,
+                tags_json,
             )| NodeRecord {
                 id,
                 hostname,
@@ -89,6 +99,8 @@ impl NodeRepo {
                 last_seen_unix_nano,
                 host_info_json,
                 public_key,
+                alias,
+                tags_json,
             },
         ))
     }
@@ -128,11 +140,27 @@ impl NodeRepo {
         Ok(())
     }
 
+    /// 覆盖管理员维护的别名与标签（节点上报不会碰这两列）。
+    pub async fn update_meta(
+        &self,
+        id: &NodeId,
+        alias: &str,
+        tags_json: &str,
+    ) -> anyhow::Result<()> {
+        sqlx::query("UPDATE nodes SET alias = ?, tags_json = ? WHERE id = ?")
+            .bind(alias)
+            .bind(tags_json)
+            .bind(id.as_str())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn list_all(&self) -> anyhow::Result<Vec<NodeRecord>> {
         let rows: Vec<NodeRow> =
             sqlx::query_as(
                 r#"
-            SELECT id, hostname, labels_json, client_cert_pem, enrolled_at_unix_nano, last_seen_unix_nano, host_info_json, public_key
+            SELECT id, hostname, labels_json, client_cert_pem, enrolled_at_unix_nano, last_seen_unix_nano, host_info_json, public_key, alias, tags_json
             FROM nodes ORDER BY enrolled_at_unix_nano DESC
             "#,
             )
@@ -151,6 +179,8 @@ impl NodeRepo {
                     last_seen_unix_nano,
                     host_info_json,
                     public_key,
+                    alias,
+                    tags_json,
                 )| NodeRecord {
                     id,
                     hostname,
@@ -160,6 +190,8 @@ impl NodeRepo {
                     last_seen_unix_nano,
                     host_info_json,
                     public_key,
+                    alias,
+                    tags_json,
                 },
             )
             .collect())

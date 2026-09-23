@@ -35,6 +35,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/enroll", post(enroll_handler))
         .route("/v1/telemetry", post(telemetry_handler))
         .route("/v1/nodes", get(list_nodes_handler))
+        .route("/v1/nodes/:id", axum::routing::patch(patch_node_handler))
         .route("/v1/nodes/:id/telemetry", get(node_telemetry_handler))
         .route("/v1/nodes/:id/series", get(node_series_handler))
         .route("/v1/nodes/:id/containers", get(node_containers_handler))
@@ -612,6 +613,9 @@ async fn enroll_handler(
         // 主机信息在第一次 telemetry 上报时才填充
         host_info_json: "{}".to_string(),
         public_key: public_key_b64.clone(),
+        // 别名与标签由管理员在控制台维护，入网时为空
+        alias: String::new(),
+        tags_json: "[]".to_string(),
     };
     if let Err(e) = state.storage.nodes().insert(&record).await {
         return err(
@@ -762,6 +766,10 @@ struct NodeView {
     id: String,
     hostname: String,
     labels: serde_json::Value,
+    /// 管理员给的简短别称（≤10 字符），空串表示未设置
+    alias: String,
+    /// 管理员给的标签（≤10 个）
+    tags: Vec<String>,
     enrolled_at_unix_nano: i64,
     last_seen_unix_nano: Option<i64>,
     /// 主机基本信息（操作系统 / 内核 / CPU / IP 等），未见上报时为空对象
@@ -840,6 +848,8 @@ async fn list_nodes_handler(State(state): State<AppState>, headers: HeaderMap) -
     for n in nodes {
         out.push(NodeView {
             labels: serde_json::from_str(&n.labels_json).unwrap_or(serde_json::json!({})),
+            alias: n.alias.clone(),
+            tags: parse_tags(&n.tags_json),
             latest: latest_by_node.remove(&n.id),
             id: n.id,
             hostname: n.hostname,
@@ -851,6 +861,116 @@ async fn list_nodes_handler(State(state): State<AppState>, headers: HeaderMap) -
         });
     }
     Json(out).into_response()
+}
+
+/// `tags_json` 里存的是字符串数组；历史行可能是 `{}` 或损坏内容，
+/// 统一降级成空数组，别让一条脏数据把整个列表打成 500。
+fn parse_tags(raw: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<String>>(raw).unwrap_or_default()
+}
+
+/// 别名上限（按字符计，不是字节）：中文别名也该按「几个字」算。
+const MAX_ALIAS_CHARS: usize = 10;
+/// 标签数量上限
+const MAX_TAGS: usize = 10;
+/// 单个标签长度上限
+const MAX_TAG_CHARS: usize = 24;
+
+#[derive(Deserialize)]
+struct NodeMetaPatch {
+    /// 缺省 = 不改（区别于传空串 = 清空别名）
+    #[serde(default)]
+    alias: Option<String>,
+    /// 缺省 = 不改（区别于传空数组 = 清空标签）
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+}
+
+/// `PATCH /v1/nodes/:id`：改管理员维护的别名与标签。
+///
+/// 只接受 alias / tags 两个字段，节点身份（id、公钥、hostname、上报数据）
+/// 一律不可从控制台改。校验失败返回 400 并把原因原样给控制台。
+async fn patch_node_handler(
+    State(state): State<AppState>,
+    axum::extract::Path(node_id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !read_auth_ok(&state, &headers).await {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "authentication required (Bearer admin token)",
+        );
+    }
+    let patch: NodeMetaPatch = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(e) => return err(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
+    };
+    if patch.alias.is_none() && patch.tags.is_none() {
+        return err(StatusCode::BAD_REQUEST, "alias 与 tags 至少要给一个");
+    }
+
+    let node = zhiwei_common::NodeId::from_string(node_id.clone());
+    let current = match state.storage.nodes().find_by_id(&node).await {
+        Ok(Some(n)) => n,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "node not enrolled"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("lookup: {e}")),
+    };
+
+    let alias = match patch.alias {
+        Some(a) => {
+            let a = a.trim();
+            let chars = a.chars().count();
+            if chars > MAX_ALIAS_CHARS {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    format!("别名最多 {MAX_ALIAS_CHARS} 个字符"),
+                );
+            }
+            a.to_string()
+        }
+        None => current.alias.clone(),
+    };
+
+    let tags = match patch.tags {
+        Some(raw) => {
+            // 去空白 / 去空串 / 去重，保持用户给的顺序
+            let mut seen = std::collections::HashSet::new();
+            let mut cleaned = Vec::new();
+            for tag in raw {
+                let tag = tag.trim();
+                if tag.is_empty() {
+                    continue;
+                }
+                if tag.chars().count() > MAX_TAG_CHARS {
+                    return err(
+                        StatusCode::BAD_REQUEST,
+                        format!("单个标签最多 {MAX_TAG_CHARS} 个字符"),
+                    );
+                }
+                if seen.insert(tag.to_string()) {
+                    cleaned.push(tag.to_string());
+                }
+            }
+            if cleaned.len() > MAX_TAGS {
+                return err(StatusCode::BAD_REQUEST, format!("标签最多 {MAX_TAGS} 个"));
+            }
+            cleaned
+        }
+        None => parse_tags(&current.tags_json),
+    };
+
+    let tags_json = serde_json::to_string(&tags).unwrap_or_else(|_| "[]".into());
+    if let Err(e) = state
+        .storage
+        .nodes()
+        .update_meta(&node, &alias, &tags_json)
+        .await
+    {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, format!("update: {e}"));
+    }
+
+    Json(serde_json::json!({ "id": node.as_str(), "alias": alias, "tags": tags })).into_response()
 }
 
 #[derive(Serialize)]
@@ -1664,6 +1784,8 @@ async fn node_processes_handler(
 struct ContainerGroupView {
     node_id: String,
     hostname: String,
+    /// 管理员别名（空串=未设置）；容器页的节点下拉优先显示它
+    alias: String,
     ts_unix_nano: Option<i64>,
     containers: serde_json::Value,
 }
@@ -1700,6 +1822,7 @@ async fn all_containers_handler(State(state): State<AppState>, headers: HeaderMa
         out.push(ContainerGroupView {
             node_id: n.id,
             hostname: n.hostname,
+            alias: n.alias.clone(),
             ts_unix_nano: ts,
             containers,
         });
@@ -2989,12 +3112,9 @@ async fn create_enroll_token_handler(
     let expires_at_unix = now_unix + ttl_secs;
 
     // 从请求头推断 monitor 公开 URL：
-    //   1) 优先 `X-Forwarded-Proto` + `Host`（托管平台会注入）
-    //   2) 回退 `Host` 头 + 默认 scheme（自建/反代靠 TLS 终结层处理）
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("https");
+    //   1) 优先 `X-Forwarded-Proto` + `Host`（托管平台 / nginx 会注入）
+    //   2) 回退见 enroll_url_scheme
+    let scheme = enroll_url_scheme(&headers, state.tls_terminated_locally);
     let host = headers
         .get("host")
         .and_then(|v| v.to_str().ok())
@@ -3163,5 +3283,66 @@ mod enroll_token_tests {
         assert_eq!(metas.len(), 1);
         assert!(metas[0].permanent);
         assert_eq!(metas[0].expires_at_unix, NEVER_EXPIRES);
+    }
+
+    fn headers_with(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(
+                axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                v.parse().unwrap(),
+            );
+        }
+        h
+    }
+
+    #[test]
+    fn enroll_scheme_prefers_forwarded_proto() {
+        // 边缘说的算：内网 Host + 明文监听，对外仍是 https
+        let h = headers_with(&[("host", "127.0.0.1:18445"), ("x-forwarded-proto", "https")]);
+        assert_eq!(enroll_url_scheme(&h, false), "https");
+        // 代理链可能给列表，取第一段
+        let h = headers_with(&[
+            ("host", "example.com"),
+            ("x-forwarded-proto", "http, https"),
+        ]);
+        assert_eq!(enroll_url_scheme(&h, true), "http");
+        // 空值 / 乱值回退到下面的推断
+        let h = headers_with(&[("host", "10.0.0.5:8443"), ("x-forwarded-proto", "")]);
+        assert_eq!(enroll_url_scheme(&h, false), "http");
+    }
+
+    #[test]
+    fn enroll_scheme_uses_http_for_lan_plain_http() {
+        // 自建「内网 IP + 明文」：命令必须是 http，否则节点照抄命令连不上
+        for host in [
+            "127.0.0.1:18445",
+            "10.0.0.5:8443",
+            "192.168.1.9",
+            "172.16.3.4:8443",
+            "[::1]:8443",
+            "localhost:8443",
+            "zhiwei.local:8443",
+        ] {
+            let h = headers_with(&[("host", host)]);
+            assert_eq!(enroll_url_scheme(&h, false), "http", "host={host}");
+        }
+    }
+
+    #[test]
+    fn enroll_scheme_stays_https_for_public_and_local_tls() {
+        for host in [
+            "example.com",
+            "monitor.hancic.site",
+            "49.232.168.161:8443",
+            "170.106.103.36",
+        ] {
+            let h = headers_with(&[("host", host)]);
+            assert_eq!(enroll_url_scheme(&h, false), "https", "host={host}");
+            // 本进程自己终结 TLS 时更明确：一律 https
+            assert_eq!(enroll_url_scheme(&h, true), "https", "host={host}");
+        }
+        // 没有 Host 头也不该崩
+        assert_eq!(enroll_url_scheme(&HeaderMap::new(), false), "https");
     }
 }

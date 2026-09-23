@@ -1,14 +1,14 @@
 import * as React from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { Copy, Plus } from "lucide-react";
+import { Copy, Loader2, Plus } from "lucide-react";
 import { enrollTokens, type EnrollTokenCreated } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { useToast } from "@/components/ui/toast";
-import { cn, friendlyError } from "@/lib/utils";
+import { cn, copyText, friendlyError } from "@/lib/utils";
 
 /**
  * 生成一次性入网命令对话框。
@@ -43,9 +43,15 @@ function formatExpiresIn(seconds: number): string {
 export function EnrollTokenDialog({
   open,
   onClose,
+  autoCreate = false,
 }: {
   open: boolean;
   onClose: () => void;
+  /**
+   * 「接入帮助」用：打开即用默认 TTL 生成命令并自动复制，省掉
+   * 「选 TTL → 点创建 → 再点复制」三步。普通入口仍走表单。
+   */
+  autoCreate?: boolean;
 }) {
   const { t } = useTranslation();
   const toast = useToast();
@@ -72,10 +78,36 @@ export function EnrollTokenDialog({
   });
 
   const copy = (text: string, okMsg: string) =>
-    void navigator.clipboard
-      ?.writeText(text)
-      .then(() => toast.push("success", okMsg))
-      .catch(() => toast.push("error", t("err.generic")));
+    void copyText(text).then((ok) =>
+      toast.push(ok ? "success" : "error", ok ? okMsg : t("toast.copyFailed")),
+    );
+
+  // 自动生成：只在每次打开后触发一次（ref 挡住 effect 的重复执行）
+  const autoStarted = React.useRef(false);
+  React.useEffect(() => {
+    if (!open) {
+      autoStarted.current = false;
+      return;
+    }
+    if (!autoCreate || autoStarted.current) return;
+    autoStarted.current = true;
+    create.mutate();
+    // create.mutate 在 react-query v5 里是稳定引用，不必进依赖
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, autoCreate]);
+
+  // 自动复制：命令生成后立刻写入剪贴板，失败也不阻断（弹窗里还有复制按钮）
+  const autoCopied = React.useRef(false);
+  React.useEffect(() => {
+    if (!open) {
+      autoCopied.current = false;
+      return;
+    }
+    if (!autoCreate || !created || autoCopied.current) return;
+    autoCopied.current = true;
+    copy(created.enroll_command, t("dialog.commandAutoCopied"));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, autoCreate, created]);
 
   const close = () => {
     if (create.isPending) return;
@@ -99,6 +131,10 @@ export function EnrollTokenDialog({
       }
       footer={
         created ? (
+          <Button variant="secondary" onClick={close}>
+            {t("action.close")}
+          </Button>
+        ) : autoCreate ? (
           <Button variant="secondary" onClick={close}>
             {t("action.close")}
           </Button>
@@ -158,6 +194,19 @@ export function EnrollTokenDialog({
           <p className="text-xs text-ink-400">
             {t("dialog.enrollTokenSecretWarn")}
           </p>
+        </div>
+      ) : autoCreate ? (
+        <div className="py-8 text-center text-sm text-ink-500">
+          {create.isError ? (
+            <p className="text-rose-600 dark:text-rose-400">
+              {t(friendlyError(create.error))}
+            </p>
+          ) : (
+            <span className="inline-flex items-center gap-2">
+              <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+              {t("dialog.enrollTokenGenerating")}
+            </span>
+          )}
         </div>
       ) : (
         <div className="space-y-4">

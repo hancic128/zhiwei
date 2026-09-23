@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
-import { cn, friendlyError } from "@/lib/utils";
+import { cn, copyText, friendlyError } from "@/lib/utils";
 
 /**
  * 创建 AI token。
@@ -52,10 +52,9 @@ export function AiTokenDialog({
   });
 
   const copy = (text: string, okMsg: string) =>
-    void navigator.clipboard
-      ?.writeText(text)
-      .then(() => toast.push("success", okMsg))
-      .catch(() => toast.push("error", t("err.generic")));
+    void copyText(text).then((ok) =>
+      toast.push(ok ? "success" : "error", ok ? okMsg : t("toast.copyFailed")),
+    );
 
   const close = () => {
     if (create.isPending) return;

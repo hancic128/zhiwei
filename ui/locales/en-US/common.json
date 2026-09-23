@@ -56,7 +56,8 @@
     "deleted": "Deleted",
     "logoutSuccess": "Signed out, redirecting...",
     "themeChanged": "Theme updated",
-    "copied": "Copied"
+    "copied": "Copied",
+    "copyFailed": "Copy failed — select the text and copy it manually"
   },
   "err": {
     "unauthorized": "Session expired — please enter your token again",
@@ -213,7 +214,7 @@
     "colMem": "Memory",
     "colUptime": "Uptime",
     "colLastSeen": "Last update",
-    "searchPlaceholder": "Search hostname / ID / IP",
+    "searchPlaceholder": "Search alias / hostname / ID / IP / tag",
     "empty": "No nodes yet",
     "emptyHint": "No nodes yet. Generate an enroll command in Settings → Enroll Tokens, then run it on the target machine.",
     "searchEmpty": "No matching nodes",
@@ -233,7 +234,25 @@
     "cardOfflineHint": "no report for over 60s",
     "trendTitle": "All nodes",
     "trendSubtitle": "one line per node — toggle the legend to isolate one",
-    "trendHourly": "Hourly aggregates (the window reaches past raw retention)"
+    "trendHourly": "Hourly aggregates (the window reaches past raw retention)",
+    "filterTag": "Filter by tag",
+    "tagAll": "All tags",
+    "onboardHelp": "Onboarding help",
+    "onboardHelpHint": "Generate an enroll command and copy it — paste it on the target host"
+  },
+  "nodeMeta": {
+    "title": "Edit node",
+    "aliasLabel": "Alias",
+    "aliasPlaceholder": "e.g. Beijing edge",
+    "aliasHint": "Up to {{n}} characters; lists and dropdowns show the alias first",
+    "tagsLabel": "Tags",
+    "tagsPlaceholder": "Press Enter, or separate with commas",
+    "tagsHint": "Up to {{n}}, used to filter nodes",
+    "tagsFull": "At most {{n}} tags",
+    "tagTooLong": "A tag can be at most {{n}} characters",
+    "removeTag": "Remove tag {{tag}}",
+    "saved": "Saved",
+    "edit": "Edit alias / tags"
   },
   "pager": {
     "size": "Rows per page",
@@ -779,6 +798,8 @@
     "tokenShownOnce": "Shown once — closing the dialog means it cannot be retrieved again; create a new token if lost.",
     "tokenCopied": "Token copied",
     "copyToken": "Copy token",
-    "revokeConfirm": "After revoking, this token stops working immediately and every AI client using it disconnects instantly."
+    "revokeConfirm": "After revoking, this token stops working immediately and every AI client using it disconnects instantly.",
+    "enrollTokenGenerating": "Generating enroll command…",
+    "commandAutoCopied": "Command generated and copied"
   }
 }

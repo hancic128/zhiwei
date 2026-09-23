@@ -2,9 +2,10 @@ import * as React from "react";
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useQuery } from "@tanstack/react-query";
-import { Plus, Server } from "lucide-react";
+import { HelpCircle, Pencil, Plus, Server } from "lucide-react";
 import { api, osLabel, primaryIp, trendApi, type NodeView } from "@/api";
 import { EnrollTokenDialog } from "@/components/enroll-token-dialog";
+import { NodeMetaDialog, TagList } from "@/components/node-meta-dialog";
 import { LineChart } from "@/components/chart";
 import { StatCards, type StatCard } from "@/components/stat-cards";
 import { DotBadge } from "@/components/ui/badge";
@@ -19,6 +20,7 @@ import {
 import { SearchInput } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { SortHeader, type SortDir } from "@/components/ui/sort-header";
+import { Tooltip } from "@/components/ui/tooltip";
 import {
   EmptyState,
   ErrorState,
@@ -44,6 +46,7 @@ import {
   formatUptime,
   friendlyError,
   livenessOf,
+  nodeLabel,
 } from "@/lib/utils";
 
 type SortKey =
@@ -67,6 +70,7 @@ export function Nodes() {
   const [q, setQ] = React.useState("");
   const [status, setStatus] = React.useState("all");
   const [system, setSystem] = React.useState("all");
+  const [tag, setTag] = React.useState("all");
   // 默认按状态排、有问题的在前（设计：默认排序＝最需要关注的在前）。
   // 「上次更新」列已去掉，它不该再当默认排序键——那会变成一个看不见的排序依据。
   const [sortKey, setSortKey] = React.useState<SortKey>("status");
@@ -76,6 +80,10 @@ export function Nodes() {
   const [range, setRange] = React.useState<TimeRange>(() => presetRange("1h"));
   /** 生成入网命令的弹窗——空状态点击按钮触发 */
   const [enrollDialogOpen, setEnrollDialogOpen] = React.useState(false);
+  /** 「接入帮助」：自动生成并复制命令，点开即用 */
+  const [onboardDialogOpen, setOnboardDialogOpen] = React.useState(false);
+  /** 正在编辑别名 / 标签的节点（null = 关窗） */
+  const [metaNode, setMetaNode] = React.useState<NodeView | null>(null);
 
   const nodesQ = useQuery({ queryKey: ["nodes"], queryFn: api.nodes });
   const nodes: NodeView[] = nodesQ.data ?? [];
@@ -87,6 +95,13 @@ export function Nodes() {
       const label = osLabel(n.host_info);
       if (label) set.add(label);
     }
+    return [...set].sort();
+  }, [nodes]);
+
+  /** 标签下拉的候选值同样来自真实数据，去重后排序 */
+  const allTags = React.useMemo(() => {
+    const set = new Set<string>();
+    for (const n of nodes) for (const tag of n.tags ?? []) set.add(tag);
     return [...set].sort();
   }, [nodes]);
 
@@ -104,11 +119,15 @@ export function Nodes() {
       const live = livenessOf(n.last_seen_ms);
       if (status !== "all" && live !== status) return false;
       if (system !== "all" && osLabel(n.host_info) !== system) return false;
+      if (tag !== "all" && !(n.tags ?? []).includes(tag)) return false;
       if (!needle) return true;
-      // 搜索在**全量节点**上匹配主机名 / 节点 ID / IP，命中的就是列表
+      // 搜索在**全量节点**上匹配别名 / 主机名 / 节点 ID / IP / 标签，
+      // 命中的就是列表
       return (
+        nodeLabel(n).toLowerCase().includes(needle) ||
         n.hostname.toLowerCase().includes(needle) ||
         n.id.toLowerCase().includes(needle) ||
+        (n.tags ?? []).some((x) => x.toLowerCase().includes(needle)) ||
         primaryIp(n.host_info).toLowerCase().includes(needle)
       );
     });
@@ -116,7 +135,7 @@ export function Nodes() {
     return sortRows(list, sortDir, (n: NodeView) => {
       switch (sortKey) {
         case "hostname":
-          return n.hostname.toLowerCase();
+          return nodeLabel(n).toLowerCase();
         case "status":
           return LIVENESS_RANK[livenessOf(n.last_seen_ms)] ?? 9;
         case "system":
@@ -131,12 +150,12 @@ export function Nodes() {
           return n.last_seen_ms ?? 0;
       }
     });
-  }, [nodes, q, status, system, sortKey, sortDir]);
+  }, [nodes, q, status, system, tag, sortKey, sortDir]);
 
   // 过滤 / 搜索 / 每页条数变化后回到第 1 页，否则会停在空页
   React.useEffect(() => {
     setPage(1);
-  }, [q, status, system, pageSize]);
+  }, [q, status, system, tag, pageSize]);
 
   const { pageCount, current, visible: rows } = paginate(filtered, page, pageSize);
 
@@ -249,6 +268,20 @@ export function Nodes() {
               </option>
             ))}
           </Select>
+          <Select
+            wrapperClassName="w-40"
+            value={tag}
+            onChange={(e) => setTag(e.target.value)}
+            aria-label={t("nodes.filterTag")}
+            disabled={allTags.length === 0}
+          >
+            <option value="all">{t("nodes.tagAll")}</option>
+            {allTags.map((x) => (
+              <option key={x} value={x}>
+                {x}
+              </option>
+            ))}
+          </Select>
           <SearchInput
             className="w-full sm:w-56"
             placeholder={t("nodes.searchPlaceholder")}
@@ -256,6 +289,15 @@ export function Nodes() {
             onChange={(e) => setQ(e.target.value)}
             aria-label={t("action.search")}
           />
+          <Tooltip content={t("nodes.onboardHelpHint")}>
+            <Button
+              variant="secondary"
+              onClick={() => setOnboardDialogOpen(true)}
+            >
+              <HelpCircle className="w-4 h-4" aria-hidden="true" />
+              {t("nodes.onboardHelp")}
+            </Button>
+          </Tooltip>
         </div>
       </TableToolbar>
 
@@ -348,14 +390,34 @@ export function Nodes() {
                 return (
                   <Tr key={node.id}>
                     <Td>
-                      <Link to={`/nodes/${node.id}`} className="block">
-                        <div className="text-sm font-medium text-ink-900 dark:text-surface-0 truncate max-w-[200px]">
-                          {node.hostname}
-                        </div>
-                        <div className="text-xs text-ink-400 truncate max-w-[200px]">
-                          {node.id}
-                        </div>
-                      </Link>
+                      <div className="flex items-start gap-1">
+                        <Link
+                          to={`/nodes/${node.id}`}
+                          className="block min-w-0 flex-1"
+                        >
+                          <div className="text-sm font-medium text-ink-900 dark:text-surface-0 truncate max-w-[200px]">
+                            {nodeLabel(node)}
+                          </div>
+                          <div className="text-xs text-ink-400 truncate max-w-[200px]">
+                            {node.alias ? node.hostname : node.id}
+                          </div>
+                          <TagList
+                            tags={node.tags ?? []}
+                            className="mt-1 flex flex-wrap gap-1"
+                          />
+                        </Link>
+                        <Tooltip content={t("nodeMeta.edit")}>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="w-7 h-7 shrink-0"
+                            aria-label={t("nodeMeta.edit")}
+                            onClick={() => setMetaNode(node)}
+                          >
+                            <Pencil className="w-3.5 h-3.5" aria-hidden="true" />
+                          </Button>
+                        </Tooltip>
+                      </div>
                     </Td>
 
                     <Td className="hidden md:table-cell">
@@ -446,6 +508,13 @@ export function Nodes() {
       open={enrollDialogOpen}
       onClose={() => setEnrollDialogOpen(false)}
     />
+    {/* 接入帮助：打开即生成命令并自动复制，省掉「先选 TTL 再点创建」 */}
+    <EnrollTokenDialog
+      autoCreate
+      open={onboardDialogOpen}
+      onClose={() => setOnboardDialogOpen(false)}
+    />
+    <NodeMetaDialog node={metaNode} onClose={() => setMetaNode(null)} />
     </>
   );
 }

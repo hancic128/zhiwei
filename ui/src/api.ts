@@ -88,6 +88,8 @@ interface RawNode {
   id: string;
   hostname: string;
   labels: Record<string, string>;
+  alias?: string;
+  tags?: string[];
   enrolled_at_unix_nano: number;
   last_seen_unix_nano: number | null;
   host_info?: HostInfo;
@@ -112,6 +114,10 @@ export interface NodeView {
   id: string;
   hostname: string;
   labels: Record<string, string>;
+  /** 管理员给的简短别称（≤10 字符），空串表示未设置 */
+  alias: string;
+  /** 管理员给的标签（≤10 个） */
+  tags: string[];
   enrolled_at_ms: number;
   last_seen_ms: number | null;
   host_info: HostInfo;
@@ -170,6 +176,8 @@ export const api = {
       id: n.id,
       hostname: n.hostname,
       labels: n.labels ?? {},
+      alias: n.alias ?? "",
+      tags: n.tags ?? [],
       enrolled_at_ms: nsToMs(n.enrolled_at_unix_nano) ?? 0,
       last_seen_ms: nsToMs(n.last_seen_unix_nano),
       host_info: n.host_info ?? {},
@@ -177,6 +185,20 @@ export const api = {
       public_key: n.public_key ?? "",
     }));
   },
+
+  /** 改管理员维护的别名 / 标签（只传要改的字段） */
+  updateNode: (
+    id: string,
+    patch: { alias?: string; tags?: string[] },
+  ) =>
+    request<{ id: string; alias: string; tags: string[] }>(
+      `/v1/nodes/${encodeURIComponent(id)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      },
+    ),
 
   telemetry: (id: string, limit = 20) =>
     request<NodeTelemetryView>(
@@ -385,6 +407,8 @@ export interface ProcessInfo {
 export interface ContainerGroup {
   node_id: string;
   hostname: string;
+  /** 管理员别名（空串=未设置）；节点下拉优先显示它 */
+  alias: string;
   ts_unix_nano: number | null;
   containers: ContainerInfo[];
 }

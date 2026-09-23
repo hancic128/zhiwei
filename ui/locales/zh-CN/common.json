@@ -56,7 +56,8 @@
     "deleted": "已删除",
     "logoutSuccess": "已退出登录，正在跳转...",
     "themeChanged": "主题已切换",
-    "copied": "已复制"
+    "copied": "已复制",
+    "copyFailed": "复制失败，请手动选中内容复制"
   },
   "err": {
     "unauthorized": "登录状态已失效，请重新输入令牌",
@@ -213,7 +214,7 @@
     "colMem": "内存",
     "colUptime": "运行时长",
     "colLastSeen": "上次更新",
-    "searchPlaceholder": "搜索主机名 / ID / IP",
+    "searchPlaceholder": "搜索别名 / 主机名 / ID / IP / 标签",
     "empty": "还没有节点接入",
     "emptyHint": "还没有节点。在「设置 → 入网令牌」生成命令，粘贴到目标机器运行。",
     "searchEmpty": "没有匹配的节点",
@@ -233,7 +234,25 @@
     "cardOfflineHint": "超过 60 秒没上报",
     "trendTitle": "全部节点趋势",
     "trendSubtitle": "一条线一个节点，点图例可单独看",
-    "trendHourly": "这条曲线是小时级聚合（窗口超过了原始数据保留期）"
+    "trendHourly": "这条曲线是小时级聚合（窗口超过了原始数据保留期）",
+    "filterTag": "按标签过滤",
+    "tagAll": "全部标签",
+    "onboardHelp": "接入帮助",
+    "onboardHelpHint": "生成一条入网命令并自动复制，粘贴到目标机器执行即可"
+  },
+  "nodeMeta": {
+    "title": "编辑节点信息",
+    "aliasLabel": "节点别名",
+    "aliasPlaceholder": "如「北京入口」",
+    "aliasHint": "最多 {{n}} 个字符；列表与下拉框优先显示别名",
+    "tagsLabel": "标签",
+    "tagsPlaceholder": "输入后回车，或用逗号分隔",
+    "tagsHint": "最多 {{n}} 个，用于过滤节点",
+    "tagsFull": "最多 {{n}} 个标签",
+    "tagTooLong": "单个标签最多 {{n}} 个字符",
+    "removeTag": "移除标签 {{tag}}",
+    "saved": "已保存",
+    "edit": "编辑别名 / 标签"
   },
   "pager": {
     "size": "每页条数",
@@ -779,6 +798,8 @@
     "tokenShownOnce": "只显示一次——关闭后无法再次查看，需重新创建。",
     "tokenCopied": "token 已复制",
     "copyToken": "复制 token",
-    "revokeConfirm": "撤销后此 token 立即失效，相关 AI 客户端会立刻掉线。"
+    "revokeConfirm": "撤销后此 token 立即失效，相关 AI 客户端会立刻掉线。",
+    "enrollTokenGenerating": "正在生成入网命令…",
+    "commandAutoCopied": "命令已生成并复制到剪贴板"
   }
 }

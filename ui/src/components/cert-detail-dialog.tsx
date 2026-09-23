@@ -6,7 +6,7 @@ import { DotBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { usePrefs } from "@/components/prefs-provider";
-import { formatTime } from "@/lib/utils";
+import { copyText, formatTime } from "@/lib/utils";
 
 export interface CertDetailTarget extends CertInfo {
   hostname: string;
@@ -32,13 +32,9 @@ export function CertDetailDialog({
   const days = daysLeft(cert.not_after_unix_nano);
 
   const copy = async (label: string, value: string) => {
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopied(label);
-      window.setTimeout(() => setCopied(null), 1500);
-    } catch {
-      /* 剪贴板不可用（非安全上下文）时静默失败，值本身还能手动选中 */
-    }
+    if (!(await copyText(value))) return;
+    setCopied(label);
+    window.setTimeout(() => setCopied(null), 1500);
   };
 
   const rows: Array<{ label: string; value: React.ReactNode; copyValue?: string }> = [

@@ -45,6 +45,7 @@ import {
   formatTime,
   formatUptime,
   friendlyError,
+  nodeLabel,
   relativeTime,
 } from "@/lib/utils";
 
@@ -64,6 +65,8 @@ const STATE_RANK: Record<string, number> = {
 interface Row extends ContainerInfo {
   nodeId: string;
   hostname: string;
+  /** 节点别名（空串=未设置）；列展示与过滤都用 nodeLabel */
+  alias: string;
 }
 
 export function Containers() {
@@ -112,6 +115,7 @@ export function Containers() {
           ...c,
           nodeId: g.node_id,
           hostname: g.hostname,
+          alias: g.alias ?? "",
         })),
       ),
     [groups],
@@ -127,8 +131,12 @@ export function Containers() {
   const nodes = React.useMemo(
     () =>
       groups
-        .map((g) => ({ id: g.node_id, hostname: g.hostname }))
-        .sort((a, b) => a.hostname.localeCompare(b.hostname)),
+        .map((g) => ({
+          id: g.node_id,
+          hostname: g.hostname,
+          alias: g.alias ?? "",
+        }))
+        .sort((a, b) => nodeLabel(a).localeCompare(nodeLabel(b))),
     [groups],
   );
 
@@ -156,6 +164,7 @@ export function Containers() {
         c.name.toLowerCase().includes(needle) ||
         c.image.toLowerCase().includes(needle) ||
         c.id.toLowerCase().includes(needle) ||
+        nodeLabel(c).toLowerCase().includes(needle) ||
         c.hostname.toLowerCase().includes(needle) ||
         c.nodeId.toLowerCase().includes(needle) ||
         (c.compose_project ?? "").toLowerCase().includes(needle)
@@ -170,7 +179,7 @@ export function Containers() {
           case "name":
             return c.name.toLowerCase();
           case "node":
-            return c.hostname.toLowerCase();
+            return nodeLabel(c).toLowerCase();
           case "uptime":
             return c.started_at_unix_nano ?? 0;
           case "updated":
@@ -256,8 +265,9 @@ export function Containers() {
             <p className="text-sm text-ink-500 mt-0.5">{t("containers.subtitle")}</p>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
+            {/* 固定宽度：别名要能整段显示，长度不随内容变化 */}
             <Select
-              wrapperClassName="w-36"
+              wrapperClassName="w-64"
               value={nodeFilter}
               onChange={(e) => setNodeFilter(e.target.value)}
               aria-label={t("containers.filterNode")}
@@ -265,7 +275,7 @@ export function Containers() {
               <option value="all">{t("containers.nodeAll")}</option>
               {nodes.map((n) => (
                 <option key={n.id} value={n.id}>
-                  {n.hostname}
+                  {nodeLabel(n)}
                 </option>
               ))}
             </Select>
@@ -417,7 +427,9 @@ export function Containers() {
                         </div>
                       </Td>
                       <Td className="hidden md:table-cell">
-                        <span className="text-xs text-ink-500">{c.hostname}</span>
+                        <span className="text-xs text-ink-500" title={c.hostname}>
+                          {nodeLabel(c)}
+                        </span>
                       </Td>
                       <Td>
                         <DotBadge tone={containerTone(c.state)}>{c.state}</DotBadge>

@@ -17,7 +17,7 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { EmptyState, ErrorState } from "@/components/ui/feedback";
 import { useToast } from "@/components/ui/toast";
-import { formatTime, friendlyError } from "@/lib/utils";
+import { formatTime, friendlyError, nodeLabel } from "@/lib/utils";
 import { usePrefs } from "@/components/prefs-provider";
 
 /** 跑一次节点侧扫描（走 scan_certs 命令 + 回执），返回解析后的结果或错误文案 */
@@ -263,7 +263,8 @@ export function CertSourceDialog({
     >
       <div className="space-y-4">
         <div className="flex flex-wrap gap-3">
-          <label className="block min-w-[180px] flex-1">
+          {/* 固定宽度：节点名（别名优先）要能整段显示，但不随内容把弹窗撑宽 */}
+          <label className="block w-64 shrink-0">
             <span className="block text-xs text-ink-500 mb-1">
               {t("certs.sources.node")}
             </span>
@@ -277,7 +278,7 @@ export function CertSourceDialog({
               <option value="">{t("certs.sources.allNodes")}</option>
               {nodes.map((n) => (
                 <option key={n.id} value={n.id}>
-                  {n.hostname}
+                  {nodeLabel(n)}
                 </option>
               ))}
             </Select>
@@ -298,7 +299,7 @@ export function CertSourceDialog({
           <div className="rounded-lg bg-surface-1 dark:bg-ink-700/40 px-4 py-3 flex flex-wrap items-center gap-3">
             <span className="text-xs text-ink-500">{t("certs.sources.allNodesHint")}</span>
             <Select
-              wrapperClassName="w-44"
+              wrapperClassName="w-64"
               className="h-8 text-xs"
               value={testNodeId}
               onChange={(e) => setTestNodeId(e.target.value)}
@@ -306,7 +307,7 @@ export function CertSourceDialog({
             >
               {nodes.map((n) => (
                 <option key={n.id} value={n.id}>
-                  {t("certs.sources.testOn", { node: n.hostname })}
+                  {t("certs.sources.testOn", { node: nodeLabel(n) })}
                 </option>
               ))}
             </Select>

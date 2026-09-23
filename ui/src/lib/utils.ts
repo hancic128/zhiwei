@@ -121,3 +121,51 @@ export function livenessOf(lastSeenMs: number | null | undefined): Liveness {
   if (age < 5 * 60_000) return "lagging";
   return "offline";
 }
+
+/**
+ * 节点显示名：管理员别名优先，没有就用主机名。
+ *
+ * 下拉框、列表标题、日志页选节点统一走这里——别名本来就是给「一眼认出来」
+ * 用的，单独一处漏掉就会出现同一个节点两个名字。
+ */
+export function nodeLabel(
+  n: { alias?: string; hostname?: string } | null | undefined,
+): string {
+  if (!n) return "";
+  const alias = (n.alias ?? "").trim();
+  return alias || (n.hostname ?? "");
+}
+
+/**
+ * 复制到剪贴板，成功返回 true。
+ *
+ * 先走异步 Clipboard API，不可用或失败时退回隐藏 textarea + `execCommand`。
+ * 退路不是怀旧：`navigator.clipboard` 只在**安全上下文**（https / localhost）
+ * 里存在，而自建部署常是 `http://<内网 IP>:8443` 打开控制台，那里它是
+ * `undefined`——「点击即复制」会静默失效，用户只会看到「复制失败」。
+ */
+export async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // 继续走退路
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.top = "-1000px";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}

@@ -10,11 +10,11 @@ pub mod node_repo;
 pub mod probes_repo;
 pub mod telemetry_repo;
 
+pub use ai_tokens_repo::AiTokensRepo;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use std::path::Path;
 use std::str::FromStr;
-pub use ai_tokens_repo::AiTokensRepo;
 
 pub use alerts_repo::AlertsRepo;
 pub use cert_sources_repo::CertSourcesRepo;

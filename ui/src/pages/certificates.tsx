@@ -54,7 +54,13 @@ import { TablePager, paginate, sortRows } from "@/components/ui/pager";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useToast } from "@/components/ui/toast";
 import { usePrefs } from "@/components/prefs-provider";
-import { cn, formatTime, friendlyError, relativeTime } from "@/lib/utils";
+import {
+  cn,
+  formatTime,
+  friendlyError,
+  nodeLabel,
+  relativeTime,
+} from "@/lib/utils";
 
 type Filter = "all" | "expiring" | "expired";
 type SortKey = "domain" | "node" | "expiry" | "days";
@@ -62,6 +68,8 @@ type SortKey = "domain" | "node" | "expiry" | "days";
 interface FlatCert extends CertInfo {
   nodeId: string;
   hostname: string;
+  /** 显示用节点名（别名优先）。hostname 是节点自报的，不随别名变。 */
+  label: string;
   days: number;
 }
 
@@ -117,6 +125,16 @@ export function Certificates() {
     [nodesQ.data],
   );
 
+  // 证书接口只带 hostname，别名要回节点列表里取一次：
+  // 证书页的「节点」列与别名显示保持一致，不然同一个节点会有两个名字。
+  const labelByNodeId = React.useMemo(() => {
+    const m = new Map<string, string>();
+    for (const n of nodesQ.data ?? []) m.set(n.id, nodeLabel(n));
+    return m;
+  }, [nodesQ.data]);
+  const labelOf = (nodeId: string, fallback?: string | null) =>
+    labelByNodeId.get(nodeId) || fallback || "";
+
   const flat: FlatCert[] = React.useMemo(
     () =>
       groups
@@ -125,11 +143,12 @@ export function Certificates() {
             ...c,
             nodeId: g.node_id,
             hostname: g.hostname,
+            label: labelByNodeId.get(g.node_id) || g.hostname,
             days: daysLeft(c.not_after_unix_nano),
           })),
         )
         .sort((a, b) => a.days - b.days), // 最紧急的在前
-    [groups],
+    [groups, labelByNodeId],
   );
 
   const counts = React.useMemo(() => {
@@ -169,6 +188,7 @@ export function Certificates() {
       c.path.toLowerCase().includes(needle) ||
       c.issuer.toLowerCase().includes(needle) ||
       c.hostname.toLowerCase().includes(needle) ||
+      c.label.toLowerCase().includes(needle) ||
       c.domains.some((d) => d.toLowerCase().includes(needle))
     );
   });
@@ -180,7 +200,7 @@ export function Certificates() {
           case "domain":
             return (c.domains[0] || c.subject || c.path).toLowerCase();
           case "node":
-            return c.hostname.toLowerCase();
+            return c.label.toLowerCase();
           case "expiry":
             return c.not_after_unix_nano;
           case "days":
@@ -354,7 +374,9 @@ export function Certificates() {
                           </DotBadge>
                         ) : (
                           <span className="text-xs text-ink-500">
-                            {s.node_hostname ?? (
+                            {s.node_hostname ? (
+                              labelOf(s.node_id, s.node_hostname)
+                            ) : (
                               <span className="text-rose-600 dark:text-rose-400">
                                 {t("certs.sources.nodeGone")}
                               </span>
@@ -638,7 +660,7 @@ export function Certificates() {
                         )}
                       </Td>
                       <Td className="hidden md:table-cell">
-                        <span className="text-xs text-ink-500">{c.hostname}</span>
+                        <span className="text-xs text-ink-500">{c.label}</span>
                       </Td>
                       <Td className="hidden xl:table-cell">
                         <span className="text-xs text-ink-500">
@@ -675,7 +697,7 @@ export function Certificates() {
                               e.stopPropagation();
                               setDetail({
                                 ...c,
-                                hostname: c.hostname,
+                                hostname: c.label,
                                 nodeId: c.nodeId,
                                 sourcePath: sourceOf(c)?.path ?? src,
                               });

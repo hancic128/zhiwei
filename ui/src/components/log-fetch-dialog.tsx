@@ -15,7 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { EmptyState, ErrorState } from "@/components/ui/feedback";
 import { useToast } from "@/components/ui/toast";
-import { cn, friendlyError } from "@/lib/utils";
+import { cn, friendlyError, nodeLabel } from "@/lib/utils";
 
 const MAX_RENDER = 20_000;
 
@@ -188,7 +188,8 @@ export function LogFetchDialog({
           />
         )}
         <div className="flex flex-wrap items-end gap-3">
-          <Field label={t("logs.node")} className="min-w-[180px]">
+          {/* 固定宽度：别名/主机名都要能整段显示，但不随内容把弹窗撑宽 */}
+          <Field label={t("logs.node")} className="w-64 shrink-0">
             <Select
               value={nodeId}
               onChange={(e) => setNodeId(e.target.value)}
@@ -196,7 +197,7 @@ export function LogFetchDialog({
             >
               {nodes.map((n) => (
                 <option key={n.id} value={n.id}>
-                  {n.hostname}
+                  {nodeLabel(n)}
                 </option>
               ))}
             </Select>

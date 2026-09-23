@@ -20,7 +20,7 @@ AI token 是**多值、可撤销**的读凭据，用于 MCP 与外部 AI 客户�
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/v1` | 总览：`{ service, version, authenticated, endpoints, nodes, telemetry_batches }` |
-| GET | `/v1/nodes` | 节点列表（含 `host_info` 与最新一帧的关键指标） |
+| GET | `/v1/nodes` | 节点列表（含 `host_info`、最新一帧关键指标、`alias` 与 `tags`） |
 | GET | `/v1/nodes/:id/telemetry?limit=N` | 某节点最近的 telemetry 帧 |
 | GET | `/v1/nodes/:id/series?range=…` | 时间序列（降采样后） |
 | GET | `/v1/nodes/:id/containers` | 该节点最新容器快照 |
@@ -47,8 +47,9 @@ AI token **调不动**这些——调用会返回 401。
 | DELETE | `/v1/ai-tokens/:id` | 撤销 AI token |
 | POST | `/v1/enroll-tokens` | 创建一次性入网令牌 |
 | DELETE | `/v1/enroll-tokens/:id` | 撤销入网令牌 |
+| PATCH | `/v1/nodes/:id` | 改节点别名 / 标签，body `{ alias?, tags? }`；字段缺省＝不改，给空串 / 空数组＝清空。别名 ≤10 字符，标签 ≤10 个、单个 ≤24 字符，超限 400 |
 | POST/PATCH/DELETE | `/v1/rules`、`/v1/channels`、`/v1/services`、`/v1/probes`、`/v1/cert-sources` | 各类配置增删改 |
-| POST | `/v1/exec` | 下发命令给节点 |
+| POST | `/v1/exec` | 下发命令给节点。转 ops-server 签名不可用时返回 503（`ops-server 不可用：…`）；ops 明确拒绝动作 / 参数时把 ops 的 4xx 原样透传 |
 
 ## 3. AI Token
 

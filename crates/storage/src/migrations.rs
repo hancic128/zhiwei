@@ -378,7 +378,6 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     }
 
-
     // Migration 012: AI token（MCP / 外部 AI 客户端用的读端点凭据）
     //
     // 设计：
@@ -404,6 +403,27 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
             CREATE INDEX idx_ai_tokens_active
                 ON ai_tokens(token_hash) WHERE revoked_at_unix_nano IS NULL;
             INSERT INTO schema_version (version) VALUES (12);
+            "#,
+        )
+        .execute(pool)
+        .await?;
+    }
+
+    // Migration 013: 节点别名 + 标签
+    //
+    // alias 是管理员给的简短别称（≤10 字符），hostname 由节点自报、可能很长，
+    // 列表与下拉框优先显示 alias。tags_json 是 JSON 数组（≤10 个），用于过滤。
+    // 两者都由管理员维护，节点上报不会覆盖。
+    let has_013: Option<i64> =
+        sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 13")
+            .fetch_optional(pool)
+            .await?;
+    if has_013.is_none() {
+        sqlx::query(
+            r#"
+            ALTER TABLE nodes ADD COLUMN alias TEXT NOT NULL DEFAULT '';
+            ALTER TABLE nodes ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]';
+            INSERT INTO schema_version (version) VALUES (13);
             "#,
         )
         .execute(pool)
