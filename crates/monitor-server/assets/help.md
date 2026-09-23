@@ -85,7 +85,9 @@ curl -sSL https://zhiwei.example.com/install-node.sh | \
 monitor 连不上 ops：
 
 - **自建 / 裸机**：`zhiwei-ops` 没起。它是独立进程，默认只监听
-  `127.0.0.1:8444`，monitor 通过 `ZHIWEI_OPS_URL` 找它。**装的如果是发行包**
+  `127.0.0.1:8444`；monitor 连哪个地址写在它自己 `config/monitor.toml` 的
+  `ops_endpoint`（默认 `http://127.0.0.1:8444/exec`，可用 `--config` 换文件）。
+  **装的如果是发行包**
   （`install.sh --bin monitor` 会把 `zhiwei-ops` 装在 `zhiwei-monitor` 旁边），
   monitor 启动时会发现该端口没人监听、并自动把同目录的 `zhiwei-ops` 拉起来；
   手工只留了 `zhiwei-monitor` 一个二进制、或路径不在一起时，用
