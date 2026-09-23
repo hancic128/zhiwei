@@ -13,8 +13,8 @@
 //! hyper-util 的 auto builder 按连接协商 HTTP/1.1 或 HTTP/2。
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
@@ -30,8 +30,8 @@ mod alerts;
 mod ca;
 mod certs_api;
 mod config;
-mod probes_api;
 mod mcp;
+mod probes_api;
 mod retention;
 mod routes;
 mod state;
@@ -126,7 +126,11 @@ const TLS_WARN_INTERVAL_SECS: u64 = 60;
 /// 特意把 `InvalidContentType` 认出来：那条错误的含义是「对方发的是明文 HTTP，
 /// 本进程却按 TLS 解析」，在托管平台上是典型的「忘了开 `--plain-http`」。
 /// 光看 rustls 的原文根本猜不到，所以这里直接给出下一步动作。
-fn warn_tls_handshake_once(err: &std::io::Error, peer: std::net::SocketAddr, last_warn: &AtomicU64) {
+fn warn_tls_handshake_once(
+    err: &std::io::Error,
+    peer: std::net::SocketAddr,
+    last_warn: &AtomicU64,
+) {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -176,7 +180,9 @@ async fn main() -> anyhow::Result<()> {
 
     // 没有显式传 --plain-http / ZHIWEI_PLAIN_HTTP 时，按 PaaS 环境自动判断。
     // 显式 false 永远覆盖自动判断——自建部署保持 TLS 本地终结。
-    let plain_http = args.plain_http.unwrap_or_else(detect_paas_edge_terminates_tls);
+    let plain_http = args
+        .plain_http
+        .unwrap_or_else(detect_paas_edge_terminates_tls);
     tracing::info!(
         ?data_dir,
         %listen,
@@ -274,9 +280,7 @@ async fn main() -> anyhow::Result<()> {
             match admin::validate_env_token("ZHIWEI_BOOTSTRAP_TOKEN", &raw) {
                 Ok(token) => {
                     // 刻意不打印值：它已经在部署面板里，日志不该留明文凭据。
-                    tracing::info!(
-                        "入网令牌来自 ZHIWEI_BOOTSTRAP_TOKEN（长期有效，不随重启变化）"
-                    );
+                    tracing::info!("入网令牌来自 ZHIWEI_BOOTSTRAP_TOKEN（长期有效，不随重启变化）");
                     bootstrap_tokens.add_static(token);
                 }
                 Err(reason) => {
@@ -504,4 +508,3 @@ mod listen_tests {
         }
     }
 }
-

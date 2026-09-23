@@ -245,11 +245,7 @@ async fn dispatch(state: &AppState, bearer: &Option<String>, req: JsonRpcRequest
         "ping" => rpc_result(req.id, json!({})),
         "tools/list" => rpc_result(req.id, tools_list()),
         "tools/call" => call_tool(state, bearer, req.id, req.params).await,
-        other => rpc_error(
-            req.id,
-            -32601,
-            format!("method not found: {other}"),
-        ),
+        other => rpc_error(req.id, -32601, format!("method not found: {other}")),
     }
 }
 
@@ -407,7 +403,6 @@ fn err_response(status: StatusCode, msg: impl Into<String>) -> Response {
     )
         .into_response()
 }
-
 
 #[cfg(test)]
 mod tests {

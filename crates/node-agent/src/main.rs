@@ -783,7 +783,6 @@ async fn fetch_cert_sources(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -811,11 +810,8 @@ mod tests {
     fn interval_cli_overrides_env() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("ZHIWEI_INTERVAL", "120");
-        let a = Args::try_parse_from([
-            "zhiwei-node",
-            "--monitor", "http://x",
-            "--interval", "5",
-        ]).unwrap();
+        let a = Args::try_parse_from(["zhiwei-node", "--monitor", "http://x", "--interval", "5"])
+            .unwrap();
         assert_eq!(a.interval, 5, "命令行 --interval 5 应覆盖 env");
         std::env::remove_var("ZHIWEI_INTERVAL");
     }

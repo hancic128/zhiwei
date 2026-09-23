@@ -185,8 +185,7 @@ mod tests {
     /// 并行跑测试，拆成两个会互相踩。合在一起就天然串行。
     #[tokio::test]
     async fn token_sources_are_env_then_file_then_generated() {
-        let dir = std::env::temp_dir()
-            .join(format!("zhiwei-admin-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("zhiwei-admin-test-{}", std::process::id()));
         tokio::fs::create_dir_all(&dir).await.unwrap();
         let token_path = dir.join("admin.token");
         let _ = tokio::fs::remove_file(&token_path).await;

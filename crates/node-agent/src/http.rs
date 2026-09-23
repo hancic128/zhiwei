@@ -232,7 +232,9 @@ where
         let s = std::str::from_utf8(&line)
             .map_err(|e| anyhow::anyhow!("响应:header 非 UTF-8: {e}"))?
             .trim_end_matches(|c| c == '\r' || c == '\n');
-        let Some((k, v)) = s.split_once(':') else { continue };
+        let Some((k, v)) = s.split_once(':') else {
+            continue;
+        };
         match k.trim().to_ascii_lowercase().as_str() {
             "transfer-encoding" => transfer_encoding = Some(v.trim().to_string()),
             "content-length" => content_length = v.trim().parse().ok(),
@@ -271,7 +273,9 @@ where
 ///
 /// chunk = size-line CRLF data CRLF,size-line = 1*HEX [ ";" ext ]。
 /// 终止 chunk = "0" CRLF *( trailer CRLF ) CRLF。
-pub(crate) async fn decode_chunked_body<R>(br: &mut tokio::io::BufReader<R>) -> anyhow::Result<Vec<u8>>
+pub(crate) async fn decode_chunked_body<R>(
+    br: &mut tokio::io::BufReader<R>,
+) -> anyhow::Result<Vec<u8>>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -288,14 +292,9 @@ where
         let size_str = std::str::from_utf8(&size_line)
             .map_err(|e| anyhow::anyhow!("chunked:size 行非 UTF-8: {e}"))?
             .trim_end_matches(|c| c == '\r' || c == '\n');
-        let size_hex = size_str
-            .split(';')
-            .next()
-            .unwrap_or("")
-            .trim();
-        let size = usize::from_str_radix(size_hex, 16).map_err(|e| {
-            anyhow::anyhow!("chunked:无法解析 size {size_hex:?}: {e}")
-        })?;
+        let size_hex = size_str.split(';').next().unwrap_or("").trim();
+        let size = usize::from_str_radix(size_hex, 16)
+            .map_err(|e| anyhow::anyhow!("chunked:无法解析 size {size_hex:?}: {e}"))?;
 
         if size == 0 {
             // 终止 chunk:后面跟 0 个或多个 trailer(每行 CRLF),最后空行 CRLF 收尾
@@ -312,9 +311,9 @@ where
 
         // data
         let mut chunk = vec![0u8; size];
-        br.read_exact(&mut chunk).await.map_err(|e| {
-            anyhow::anyhow!("chunked:读 {size} 字节 data 失败: {e}")
-        })?;
+        br.read_exact(&mut chunk)
+            .await
+            .map_err(|e| anyhow::anyhow!("chunked:读 {size} 字节 data 失败: {e}"))?;
         out.extend_from_slice(&chunk);
 
         // data 后的 CRLF
@@ -402,7 +401,6 @@ impl rustls::client::danger::ServerCertVerifier for NoVerify {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,7 +420,10 @@ mod tests {
             }
         }
         fn from_vec(bytes: Vec<u8>) -> Self {
-            Self { inner: bytes, pos: 0 }
+            Self {
+                inner: bytes,
+                pos: 0,
+            }
         }
     }
 
@@ -496,10 +497,9 @@ mod tests {
 
     #[tokio::test]
     async fn decodes_chunked_zero_body() {
-        let (status, body) = read_from_payload(
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
-        )
-        .await;
+        let (status, body) =
+            read_from_payload(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n")
+                .await;
         assert_eq!(status, 200);
         assert_eq!(body, b"");
     }
@@ -517,10 +517,8 @@ mod tests {
     #[tokio::test]
     async fn decodes_close_delimited_no_body() {
         // 204 No Content:无 framing,Connection: close
-        let (status, body) = read_from_payload(
-            b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n",
-        )
-        .await;
+        let (status, body) =
+            read_from_payload(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n").await;
         assert_eq!(status, 204);
         assert_eq!(body, b"");
     }
@@ -541,8 +539,7 @@ mod tests {
     /// `serde_json::from_slice::<Value>` 不能失败。
     #[tokio::test]
     async fn probe_config_json_response_parses_as_json() {
-        let body =
-            r#"{"node_id":"abc","probes":[{"id":"p1","service":"s1","name":"n","kind":"tcp","target":{"host":"127.0.0.1","port":80},"expect":{},"interval_seconds":60,"timeout_ms":1000}]}"#;
+        let body = r#"{"node_id":"abc","probes":[{"id":"p1","service":"s1","name":"n","kind":"tcp","target":{"host":"127.0.0.1","port":80},"expect":{},"interval_seconds":60,"timeout_ms":1000}]}"#;
         let payload = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n",
             body.len(),
@@ -556,5 +553,4 @@ mod tests {
         assert_eq!(v["node_id"], "abc");
         assert_eq!(v["probes"].as_array().unwrap().len(), 1);
     }
-
 }

@@ -306,11 +306,7 @@ pub(crate) async fn read_auth_ok(state: &AppState, headers: &HeaderMap) -> bool 
 /// SHA-256 → 小写 hex（用 ring，已在依赖里）。AI token 哈希专用。
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
-    digest
-        .as_ref()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    digest.as_ref().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// 一个入网令牌的元信息。`id` 给 UI 展示 + 撤销用；`token` 字符串本身只在校验路径用。
@@ -3061,10 +3057,7 @@ async fn delete_ai_token_handler(
     let now_unix_nano = zhiwei_common::Timestamp::now().unix_nano();
     match state.storage.ai_tokens().revoke(&id, now_unix_nano).await {
         Ok(true) => Json(serde_json::json!({ "ok": true, "id": id })).into_response(),
-        Ok(false) => err(
-            StatusCode::NOT_FOUND,
-            "id 不存在或已撤销",
-        ),
+        Ok(false) => err(StatusCode::NOT_FOUND, "id 不存在或已撤销"),
         Err(e) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("revoke ai token: {e}"),
@@ -3082,8 +3075,7 @@ async fn list_enroll_tokens_handler(State(state): State<AppState>, headers: Head
             "authentication required (Bearer admin token)",
         );
     }
-    Json(serde_json::json!({ "tokens": state.bootstrap_tokens.list_active() }))
-        .into_response()
+    Json(serde_json::json!({ "tokens": state.bootstrap_tokens.list_active() })).into_response()
 }
 
 #[derive(Deserialize)]
@@ -3352,7 +3344,9 @@ mod enroll_token_tests {
     #[tokio::test]
     async fn expired_tokens_drop_out_of_list_active() {
         let tokens = BootstrapTokens::default();
-        tokens.add_with_label("zhi-bt-expired".into(), 0, String::new()).await;
+        tokens
+            .add_with_label("zhi-bt-expired".into(), 0, String::new())
+            .await;
         // TTL=0 → expires_at == now，过滤条件是 `> now`，所以立刻不可见
         assert!(tokens.list_active().is_empty());
         assert!(!tokens.check("zhi-bt-expired"));
@@ -3361,8 +3355,12 @@ mod enroll_token_tests {
     #[tokio::test]
     async fn revoke_by_id_removes_the_token() {
         let tokens = BootstrapTokens::default();
-        tokens.add_with_label("zhi-bt-a".into(), 3600, "a".into()).await;
-        tokens.add_with_label("zhi-bt-b".into(), 3600, "b".into()).await;
+        tokens
+            .add_with_label("zhi-bt-a".into(), 3600, "a".into())
+            .await;
+        tokens
+            .add_with_label("zhi-bt-b".into(), 3600, "b".into())
+            .await;
         let target_id = tokens
             .list_active()
             .into_iter()
