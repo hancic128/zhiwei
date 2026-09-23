@@ -80,7 +80,13 @@
     "down": "Down",
     "warning": "Warning",
     "critical": "Critical",
-    "info": "Info"
+    "info": "Info",
+    "running": "Running",
+    "exited": "Exited",
+    "paused": "Paused",
+    "created": "Created",
+    "restarting": "Restarting",
+    "dead": "Dead"
   },
   "time": {
     "secondsAgo": "{{n}}s ago",
@@ -273,8 +279,8 @@
     "aliasPlaceholder": "e.g. Beijing edge",
     "aliasHint": "Up to {{n}} characters; lists and dropdowns show the alias first",
     "tagsLabel": "Tags",
-    "tagsPlaceholder": "Press Enter; space, comma or 、 also splits",
-    "tagsHint": "Up to {{n}}, split by space or comma, used to filter nodes",
+    "tagsPlaceholder": "Press Enter to add; space, comma or 、 also split",
+    "tagsHint": "Up to {{n}}, confirm with Enter, used to filter nodes",
     "tagsFull": "At most {{n}} tags",
     "tagTooLong": "A tag can be at most {{n}} characters",
     "removeTag": "Remove tag {{tag}}",
@@ -330,7 +336,7 @@
     "killKillMessage": "Send SIGKILL to {{name}}; it cannot be caught and unsaved data is lost.",
     "cmdOk": "Command executed",
     "cmdFailed": "Command failed",
-    "cmdPending": "Command dispatched, node has not reported back yet",
+    "cmdPending": "Command dispatched, but the node did not report back within 60s — it may be offline, or its agent is out of date",
     "copied": "Copied",
     "nodeKey": "Node identity (Ed25519 public key)",
     "copyKey": "Copy node public key",
@@ -472,7 +478,17 @@
     "nodeEmptyHint": "Containers are reported automatically when Docker is running.",
     "actRemove": "Delete",
     "removeTitle": "Delete container {{name}}",
-    "removeMessage": "The container and its writable layer are permanently removed. This cannot be undone. Stop a running container first."
+    "removeMessage": "The container and its writable layer are permanently removed. This cannot be undone. Stop a running container first.",
+    "statusUp": "Up {{uptime}}",
+    "statusExitedCode": "Exited (code {{code}})",
+    "statusRestarting": "Restarting (crash loop)",
+    "healthHealthy": "health check: healthy",
+    "healthUnhealthy": "health check: unhealthy",
+    "healthStarting": "health check: starting",
+    "usageUnknownHint": "The node did not report usage — its agent may be out of date",
+    "agentOutdated": "Agent update available",
+    "agentOutdatedHint": "This node's agent (v{{agent}}) is older than the console (v{{console}}); container usage and start/stop/logs may not work. Re-run the install script on the node to upgrade.",
+    "logsWaiting": "Dispatched, waiting for the node…"
   },
   "processes": {
     "title": "Processes",

@@ -14,7 +14,13 @@ import { friendlyError } from "@/lib/utils";
 const MAX_ALIAS_CHARS = 10;
 const MAX_TAGS = 10;
 const MAX_TAG_CHARS = 24;
-/** 输入标签时的分隔符：空白 / 英文逗号 / 中文逗号 / 顿号 */
+/**
+ * 输入标签时的分隔符：空白 / 英文逗号 / 中文逗号 / 顿号。
+ *
+ * 只在**提交**（回车 / 失焦）时按它切分，不在 `onChange` 里边输边切——
+ * 中文输入法在拼音候选期间也会逐字触发 change，边输边切会把「还没上屏的词」
+ * 拆成几个标签（用户报的 bug）。
+ */
 const TAG_SEPARATORS = /[\s,，、]/;
 
 /**
@@ -38,6 +44,15 @@ export function NodeMetaDialog({
   const [alias, setAlias] = React.useState("");
   const [tags, setTags] = React.useState<string[]>([]);
   const [draft, setDraft] = React.useState("");
+  /**
+   * 输入法是否正在组词。
+   *
+   * 组词期间按回车是在「选候选字」，不是在「提交标签」——必须放行，
+   * 否则一次中文输入会先被切开、又把没上屏的内容吞掉。
+   * `isComposing` 在 Chrome 的 keydown 上可靠，Safari 需要靠组合事件兜底，
+   * 所以两者都看。
+   */
+  const composing = React.useRef(false);
 
   // 每次打开都从节点现值重新初始化，避免上一次编辑残留
   React.useEffect(() => {
@@ -69,11 +84,21 @@ export function NodeMetaDialog({
     [t, toast],
   );
 
+  /** 把输入框里的草稿按分隔符拆开并成标签（回车 / 失焦时调用） */
+  const commitDraft = React.useCallback(() => {
+    setTags((cur) => mergeTags(cur, draft.split(TAG_SEPARATORS)));
+    setDraft("");
+  }, [draft, mergeTags]);
+
   const save = useMutation({
     mutationFn: () =>
       api.updateNode(node!.id, {
         alias: alias.trim(),
-        tags: tags.map((x) => x.trim()).filter(Boolean),
+        // 输入框里还没回车的草稿也要一并带上：点「保存」时 onBlur 的 setState
+        // 还没生效，只读 tags 会把刚打完的最后一个标签丢掉。
+        tags: mergeTags(tags, draft.split(TAG_SEPARATORS))
+          .map((x) => x.trim())
+          .filter(Boolean),
       }),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["nodes"] });
@@ -147,33 +172,24 @@ export function NodeMetaDialog({
               maxLength={MAX_TAG_CHARS}
               placeholder={t("nodeMeta.tagsPlaceholder")}
               aria-label={t("nodeMeta.tagsLabel")}
-              onChange={(e) => {
-                const v = e.target.value;
-                if (!TAG_SEPARATORS.test(v)) {
-                  setDraft(v);
-                  return;
-                }
-                const segs = v.split(TAG_SEPARATORS);
-                // 结尾不是分隔符时，最后一段是还没输完的，留在输入框里
-                const trailing = TAG_SEPARATORS.test(v.slice(-1))
-                  ? ""
-                  : (segs.pop() ?? "");
-                setTags((cur) => mergeTags(cur, segs));
-                setDraft(trailing);
+              onChange={(e) => setDraft(e.target.value)}
+              onCompositionStart={() => {
+                composing.current = true;
+              }}
+              onCompositionEnd={() => {
+                composing.current = false;
               }}
               onKeyDown={(e) => {
+                // 组词中的回车 / 空格是输入法在选字，绝不能当成分隔
+                if (composing.current || e.nativeEvent.isComposing) return;
                 if (e.key === "Enter") {
                   e.preventDefault();
-                  setTags((cur) => mergeTags(cur, [draft]));
-                  setDraft("");
+                  commitDraft();
                 } else if (e.key === "Backspace" && !draft && tags.length > 0) {
                   setTags((cur) => cur.slice(0, -1));
                 }
               }}
-              onBlur={() => {
-                setTags((cur) => mergeTags(cur, [draft]));
-                setDraft("");
-              }}
+              onBlur={commitDraft}
             />
           </div>
           <span className="mt-1 block text-xs text-ink-400">

@@ -33,7 +33,7 @@ import { LineChart, type Series } from "@/components/chart";
 import { NodeContainers } from "@/components/node-containers";
 import { NodeMetaDialog, TagList } from "@/components/node-meta-dialog";
 import { NodeProbes } from "@/components/node-probes";
-import { DotBadge } from "@/components/ui/badge";
+import { Badge, DotBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -50,6 +50,7 @@ import { Select } from "@/components/ui/select";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useToast } from "@/components/ui/toast";
 import { usePrefs } from "@/components/prefs-provider";
+import { APP_VERSION } from "@/lib/version";
 import {
   cn,
   copyText,
@@ -59,6 +60,7 @@ import {
   formatTime,
   formatUptime,
   friendlyError,
+  isAgentOlder,
   livenessOf,
   maskSecret,
   nodeLabel,
@@ -169,6 +171,10 @@ export function NodeDetail() {
 
   const setCrumbs = useBreadcrumb();
 
+  // 节点 Agent 比控制台旧时给个可点的提示：容器用量 / 启停日志「没反应」多半是它。
+  const agentVersion = node?.host_info?.agent_version;
+  const agentOutdated = isAgentOlder(agentVersion, APP_VERSION);
+
   // 「Nodes / 家用电脑 · Online · Enrolled 9h ago」放在 App 顶部 header 里，
   // 不再挤在内容区顶部。节点数据未回来时先只挂根级，避免叶子文字闪一下。
   React.useEffect(() => {
@@ -189,6 +195,24 @@ export function NodeDetail() {
               {t(`state.${live}`)}
             </DotBadge>
             {node && (
+              <TagList
+                tags={node.tags ?? []}
+                className="flex items-center gap-1 shrink-0"
+              />
+            )}
+            {agentOutdated && (
+              <Tooltip
+                content={t("containers.agentOutdatedHint", {
+                  agent: agentVersion,
+                  console: APP_VERSION,
+                })}
+              >
+                <Badge tone="warn" className="shrink-0">
+                  {t("containers.agentOutdated")}
+                </Badge>
+              </Tooltip>
+            )}
+            {node && (
               <span className="text-xs text-ink-400 whitespace-nowrap">
                 {t("detail.enrolledAt")} {rel(node.enrolled_at_ms)}
               </span>
@@ -197,7 +221,7 @@ export function NodeDetail() {
         ),
       },
     ]);
-  }, [setCrumbs, node, id, t, live]);
+  }, [setCrumbs, node, id, t, live, agentOutdated, agentVersion]);
 
   // 离开详情页时清掉，否则回到列表还会挂着上一个节点的面包屑
   React.useEffect(() => () => setCrumbs([]), [setCrumbs]);

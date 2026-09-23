@@ -430,5 +430,30 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     }
 
+    // Migration 014: 留存按时间删除要用的索引
+    //
+    // 留存删的是「比某个时间点更早的行」（`ts_unix_nano < ?`），而 001 建的索引
+    // 是 (node_id, ts_unix_nano)——首列不是时间，SQLite 只能全表扫描。
+    // 现场症状：`INSERT INTO telemetry_batches ... elapsed=2.88s`（写锁被那条
+    // DELETE 占住），连带控制台的容器操作「点了没反应」。
+    //
+    // 注意：大库首次升级时这条 CREATE INDEX 会扫一遍全表，属一次性开销；
+    // 之后带时间条件的删除与查询才走得上索引。
+    let has_014: Option<i64> =
+        sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 14")
+            .fetch_optional(pool)
+            .await?;
+    if has_014.is_none() {
+        sqlx::query(
+            r#"
+            CREATE INDEX idx_telemetry_ts ON telemetry_batches(ts_unix_nano);
+            CREATE INDEX idx_telemetry_hourly_ts ON telemetry_hourly(ts_hour_unix_nano);
+            INSERT INTO schema_version (version) VALUES (14);
+            "#,
+        )
+        .execute(pool)
+        .await?;
+    }
+
     Ok(())
 }

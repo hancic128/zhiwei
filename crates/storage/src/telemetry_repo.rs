@@ -235,20 +235,167 @@ impl TelemetryRepo {
     }
 
     /// 滚掉过期的原始数据，返回删除行数。
+    ///
+    /// 走 `id` 子查询 + 上限，分小批删（见 `delete_in_batches`）：留存量以百万行
+    /// 计时，一条 `DELETE ... WHERE ts_unix_nano < ?` 会一路持有写锁到扫完为止，
+    /// 期间 telemetry 上报与命令下发全部排队。
     pub async fn delete_raw_before(&self, cutoff_ns: i64) -> anyhow::Result<u64> {
-        let r = sqlx::query("DELETE FROM telemetry_batches WHERE ts_unix_nano < ?")
-            .bind(cutoff_ns)
-            .execute(&self.pool)
-            .await?;
-        Ok(r.rows_affected())
+        delete_in_batches(
+            &self.pool,
+            "DELETE FROM telemetry_batches WHERE id IN (
+                 SELECT id FROM telemetry_batches WHERE ts_unix_nano < ? LIMIT ?
+             )",
+            cutoff_ns,
+            DELETE_BATCH_ROWS,
+        )
+        .await
     }
 
     /// 滚掉过期的小时聚合，返回删除行数。
     pub async fn delete_hourly_before(&self, cutoff_ns: i64) -> anyhow::Result<u64> {
-        let r = sqlx::query("DELETE FROM telemetry_hourly WHERE ts_hour_unix_nano < ?")
+        delete_in_batches(
+            &self.pool,
+            "DELETE FROM telemetry_hourly WHERE rowid IN (
+                 SELECT rowid FROM telemetry_hourly WHERE ts_hour_unix_nano < ? LIMIT ?
+             )",
+            cutoff_ns,
+            DELETE_BATCH_ROWS,
+        )
+        .await
+    }
+}
+
+/// 一条删除语句最多处理多少行。
+///
+/// 数字不是拍脑袋：SQLite 的写锁是**库级**的，一批 5000 行的删除在普通 VPS 上
+/// 是毫秒级——足够短，别的写事务排队也来得及；再大就会把一次上报拖成「慢语句」。
+pub const DELETE_BATCH_ROWS: i64 = 5_000;
+
+/// 一轮留存最多删多少批。长期停机（水位线落后几个月）时，一轮删不完就留给下一轮，
+/// 不为了「一次清干净」把写锁攥住几分钟。
+const MAX_DELETE_BATCHES: usize = 200;
+
+/// 分批删除：每批一条语句、一次提交，写完就让出写锁。
+///
+/// 现场症状（2026-09-23）：容器操作点了没反应，monitor 日志里
+/// `INSERT INTO telemetry_batches ... elapsed=2.88s`——留存那条全表 DELETE 把
+/// 写锁占了近 3 秒，命令的 INSERT 只能干等。索引（migration 014）解决「扫全表」，
+/// 分批解决「一次删太多」。
+async fn delete_in_batches(
+    pool: &SqlitePool,
+    sql: &str,
+    cutoff_ns: i64,
+    batch_rows: i64,
+) -> anyhow::Result<u64> {
+    let mut total = 0u64;
+    for _ in 0..MAX_DELETE_BATCHES {
+        let r = sqlx::query(sql)
             .bind(cutoff_ns)
-            .execute(&self.pool)
+            .bind(batch_rows)
+            .execute(pool)
             .await?;
-        Ok(r.rows_affected())
+        let n = r.rows_affected();
+        total += n;
+        if (n as i64) < batch_rows {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use sqlx::Row;
+
+    /// 内存库 + 跑一遍迁移，拿到可用的 repo。
+    /// 先补一行节点：telemetry 有外键，sqlx 默认开 `PRAGMA foreign_keys`。
+    async fn repo() -> TelemetryRepo {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::migrations::run(&pool).await.expect("migrations");
+        sqlx::query(
+            "INSERT INTO nodes (id, hostname, client_cert_pem, enrolled_at_unix_nano)
+             VALUES ('n1', 'host', '', 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("node row");
+        TelemetryRepo::new(pool)
+    }
+
+    async fn seed(r: &TelemetryRepo, count: i64) {
+        for ts in 0..count {
+            r.insert("n1", ts, 10, b"x").await.expect("insert");
+        }
+    }
+
+    const DELETE_ONE_BATCH_SQL: &str = "DELETE FROM telemetry_batches WHERE id IN (
+         SELECT id FROM telemetry_batches WHERE ts_unix_nano < ? LIMIT ?
+     )";
+
+    #[tokio::test]
+    async fn delete_raw_before_removes_only_older_rows() {
+        let r = repo().await;
+        seed(&r, 10).await;
+        assert_eq!(r.delete_raw_before(4).await.unwrap(), 4);
+        assert_eq!(r.count_by_node("n1").await.unwrap(), 6);
+    }
+
+    #[tokio::test]
+    async fn delete_loops_until_the_backlog_is_gone() {
+        // 一批只删 2 行时，3 行过期的数据要分两批删完——只删一批会留下残渣，
+        // 而留存量是每天 8640 行 × 节点数，必然远超一批。
+        let r = repo().await;
+        seed(&r, 10).await;
+        let deleted = delete_in_batches(&r.pool, DELETE_ONE_BATCH_SQL, 3, 2)
+            .await
+            .unwrap();
+        assert_eq!(deleted, 3);
+        assert_eq!(r.count_by_node("n1").await.unwrap(), 7);
+    }
+
+    #[tokio::test]
+    async fn delete_of_nothing_is_zero() {
+        let r = repo().await;
+        seed(&r, 3).await;
+        assert_eq!(r.delete_raw_before(0).await.unwrap(), 0);
+        assert_eq!(r.count_by_node("n1").await.unwrap(), 3);
+    }
+
+    /// 删除必须走时间索引。
+    ///
+    /// 001 建的索引是 (node_id, ts_unix_nano)，首列不是时间——`WHERE ts < ?` 用不上，
+    /// SQLite 只能全表扫描；一条 DELETE 全程持写锁，现场表现为
+    /// `INSERT INTO telemetry_batches ... elapsed=2.88s` + 容器操作「点了没反应」。
+    /// migration 014 补的 idx_telemetry_ts 就是为这条语句。
+    #[tokio::test]
+    async fn time_based_delete_uses_the_ts_index() {
+        let r = repo().await;
+        for (sql, index) in [
+            (
+                "EXPLAIN QUERY PLAN SELECT id FROM telemetry_batches WHERE ts_unix_nano < 1",
+                "idx_telemetry_ts",
+            ),
+            (
+                "EXPLAIN QUERY PLAN SELECT rowid FROM telemetry_hourly WHERE ts_hour_unix_nano < 1",
+                "idx_telemetry_hourly_ts",
+            ),
+        ] {
+            let rows = sqlx::query(sql).fetch_all(&r.pool).await.unwrap();
+            let plan: Vec<String> = rows.iter().map(|row| row.get::<String, _>(3)).collect();
+            assert!(
+                plan.iter().any(|d| d.contains(index)),
+                "{sql} 没走索引 {index}：{plan:?}"
+            );
+            assert!(
+                !plan.iter().any(|d| d.starts_with("SCAN")),
+                "{sql} 仍在全表扫描：{plan:?}"
+            );
+        }
     }
 }

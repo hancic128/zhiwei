@@ -40,7 +40,16 @@ export function ContainerActions({
   const [pending, setPending] = React.useState<
     "stop" | "restart" | "remove" | null
   >(null);
-  const [busy, setBusy] = React.useState(false);
+  /**
+   * 正在执行的动作。
+   *
+   * 之前只用一个布尔量，按钮在等回执的这段时间里既不转圈也不禁用——用户点完
+   * 看到界面「没反应」，就会连点好几次（每次都真的下发一条命令）。现在按动作
+   * 记名：命中的那个按钮转圈，其余的禁用。
+   */
+  const [busy, setBusy] = React.useState<
+    "start" | "stop" | "restart" | "remove" | "logs" | null
+  >(null);
   const [logs, setLogs] = React.useState<{
     name: string;
     text: string;
@@ -58,8 +67,11 @@ export function ContainerActions({
     }
   }, [qc]);
 
-  const runAction = async (action: string) => {
-    setBusy(true);
+  const runAction = async (
+    action: string,
+    key: "start" | "stop" | "restart" | "remove",
+  ) => {
+    setBusy(key);
     // 节点是否真的回话了：一旦回话就说明「控制台这份状态」可能已经过期，
     // 无论成功失败都重采一次快照，让这一行显示真实状态
     let answered = false;
@@ -78,7 +90,7 @@ export function ContainerActions({
     } catch (e) {
       toast.push("error", t(friendlyError(e)));
     } finally {
-      setBusy(false);
+      setBusy(null);
       setPending(null);
       if (answered) {
         void commandsApi
@@ -118,6 +130,7 @@ export function ContainerActions({
   };
 
   const showLogs = async () => {
+    setBusy("logs");
     setLogs({ name: container.name, text: "", loading: true });
     try {
       const { command_id } = await commandsApi.exec(nodeId, "fetch_logs", {
@@ -146,6 +159,7 @@ export function ContainerActions({
       onError?.(msg);
       toast.push("error", msg);
     } finally {
+      setBusy(null);
       onDone?.();
     }
   };
@@ -159,7 +173,9 @@ export function ContainerActions({
               variant="ghost"
               size="icon"
               aria-label={t("containers.actStart")}
-              onClick={() => void runAction("container_start")}
+              loading={busy === "start"}
+              disabled={busy !== null}
+              onClick={() => void runAction("container_start", "start")}
             >
               <Play className="w-4 h-4" aria-hidden="true" />
             </Button>
@@ -172,6 +188,8 @@ export function ContainerActions({
                 variant="ghost"
                 size="icon"
                 aria-label={t("containers.actStop")}
+                loading={busy === "stop"}
+                disabled={busy !== null}
                 onClick={() => setPending("stop")}
               >
                 <Square className="w-4 h-4" aria-hidden="true" />
@@ -182,6 +200,8 @@ export function ContainerActions({
                 variant="ghost"
                 size="icon"
                 aria-label={t("containers.actRestart")}
+                loading={busy === "restart"}
+                disabled={busy !== null}
                 onClick={() => setPending("restart")}
               >
                 <RotateCw className="w-4 h-4" aria-hidden="true" />
@@ -197,6 +217,8 @@ export function ContainerActions({
               variant="ghost"
               size="icon"
               aria-label={t("containers.actRemove")}
+              loading={busy === "remove"}
+              disabled={busy !== null}
               onClick={() => setPending("remove")}
               className="text-rose-600 dark:text-rose-400"
             >
@@ -209,6 +231,8 @@ export function ContainerActions({
             variant="ghost"
             size="icon"
             aria-label={t("containers.actLogs")}
+            loading={busy === "logs"}
+            disabled={busy !== null}
             onClick={() => void showLogs()}
           >
             <FileText className="w-4 h-4" aria-hidden="true" />
@@ -220,13 +244,13 @@ export function ContainerActions({
         <ConfirmDialog
           open
           danger={PENDING[pending].danger}
-          loading={busy}
+          loading={busy === pending}
           title={PENDING[pending].title}
           message={PENDING[pending].message}
           confirmLabel={PENDING[pending].label}
           cancelLabel={t("action.cancel")}
           onCancel={() => setPending(null)}
-          onConfirm={() => void runAction(PENDING[pending].action)}
+          onConfirm={() => void runAction(PENDING[pending].action, pending)}
         />
       )}
 
@@ -238,7 +262,11 @@ export function ContainerActions({
         description={t("containers.logsSubtitle")}
       >
         {logs?.loading ? (
-          <Skeleton className="h-40 w-full" />
+          <div className="space-y-3">
+            <Skeleton className="h-40 w-full" />
+            {/* 等回执可能十几秒，只给骨架屏会被当成「卡住了」 */}
+            <p className="text-xs text-ink-400">{t("containers.logsWaiting")}</p>
+          </div>
         ) : logs && logs.text.trim() ? (
           <pre className="max-h-[60vh] overflow-auto scrollbar-thin rounded-lg bg-ink-900 text-surface-0 p-4 text-xs font-mono leading-relaxed whitespace-pre-wrap break-all">
             {logs.text}

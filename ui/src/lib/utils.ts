@@ -116,6 +116,94 @@ export function formatUptime(
   return t("detail.uptimeFormatHours", { h, m });
 }
 
+type TranslateFn = (k: string, o?: Record<string, unknown>) => string;
+
+/** 解析 `vX.Y.Z`（允许缺省段与后缀），解析不了返回 null */
+function parseVersion(v: string | undefined): [number, number, number] | null {
+  const m = /^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?/.exec((v ?? "").trim());
+  return m ? [Number(m[1]), Number(m[2] ?? 0), Number(m[3] ?? 0)] : null;
+}
+
+/**
+ * 节点 Agent 是否比控制台旧。
+ *
+ * 版本对不上是「容器用量列空白」「启停/日志点了没反应」的头号原因——节点上跑的
+ * 还是旧二进制。解析不了就当作不旧，宁可不提示也不误报。
+ */
+export function isAgentOlder(
+  agent: string | undefined,
+  consoleVersion: string,
+): boolean {
+  const a = parseVersion(agent);
+  const c = parseVersion(consoleVersion);
+  if (!a || !c) return false;
+  for (let i = 0; i < 3; i++) {
+    if (a[i] !== c[i]) return a[i] < c[i];
+  }
+  return false;
+}
+
+/**
+ * 容器状态徽章的本地化。未知状态原样显示（绝不会把 `state.foo` 这种键漏到界面上）。
+ */
+export function containerStateLabel(state: string, t: TranslateFn): string {
+  return t(`state.${state.toLowerCase()}`, { defaultValue: state });
+}
+
+/**
+ * 容器「运行状态」行的本地化。
+ *
+ * Docker 给的是英文句子（`Up 2 hours (healthy)` / `Exited (0) 3 hours ago`），
+ * 中文界面直接展示很割裂。这里用我们自己的 inspect 时间戳重算时长，再拼上
+ * 健康检查与退出码——信息不丢，语言跟着界面走；原始字符串由调用方放进
+ * `title`，需要逐字核对时仍能看到。
+ */
+export function containerStatusLabel(
+  c: {
+    state: string;
+    status: string;
+    started_at_unix_nano?: number;
+    finished_at_unix_nano?: number;
+  },
+  t: TranslateFn,
+): string {
+  const raw = c.status ?? "";
+  const lower = raw.toLowerCase();
+  const state = c.state.toLowerCase();
+  const health = lower.includes("unhealthy")
+    ? t("containers.healthUnhealthy")
+    : lower.includes("health: starting")
+      ? t("containers.healthStarting")
+      : lower.includes("(healthy)")
+        ? t("containers.healthHealthy")
+        : "";
+  const withHealth = (text: string) => (health ? `${text} · ${health}` : text);
+
+  if (state === "running") {
+    const up = formatUptime(
+      c.started_at_unix_nano
+        ? Math.floor(Date.now() / 1000 - c.started_at_unix_nano / 1e9)
+        : null,
+      t,
+    );
+    return up === "—"
+      ? withHealth(t(`state.${state}`))
+      : withHealth(t("containers.statusUp", { uptime: up }));
+  }
+  if (state === "exited") {
+    const code = /exited \((\d+)\)/.exec(lower)?.[1];
+    const text = code
+      ? t("containers.statusExitedCode", { code })
+      : t(`state.${state}`);
+    const ago = c.finished_at_unix_nano
+      ? relativeTime(Math.floor(c.finished_at_unix_nano / 1e6), t)
+      : "";
+    return ago ? `${text} · ${ago}` : text;
+  }
+  if (state === "restarting") return t("containers.statusRestarting");
+  return raw || t(`state.${state}`);
+}
+
 /**
  * 密钥 / 令牌的密文展示：只留头 8 位与尾 4 位。
  * 完整值不落在 DOM 里（复制按钮需要时才取原值），避免随手截图泄密。

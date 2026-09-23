@@ -28,6 +28,8 @@ import { TablePager, paginate, sortRows } from "@/components/ui/pager";
 import { Tooltip } from "@/components/ui/tooltip";
 import { usePrefs } from "@/components/prefs-provider";
 import {
+  containerStateLabel,
+  containerStatusLabel,
   formatCpuLimit,
   formatPercent,
   formatTime,
@@ -260,12 +262,20 @@ export function NodeContainers({
                         </div>
                       </Td>
                       <Td>
-                        <DotBadge tone={containerTone(c.state)}>{c.state}</DotBadge>
+                        <DotBadge tone={containerTone(c.state)}>
+                          {containerStateLabel(c.state, t)}
+                        </DotBadge>
+                        <div
+                          className="mt-1 text-xs text-ink-400 truncate max-w-[200px]"
+                          title={c.status}
+                        >
+                          {containerStatusLabel(c, t)}
+                        </div>
                       </Td>
                       {/* CPU：占用 + 限额两行；未运行 / 未上报按「—」处理 */}
                       <Td className="hidden md:table-cell" align="right">
                         <div className="text-sm tabular-nums text-ink-700 dark:text-ink-100">
-                          {typeof c.cpu_percent === "number"
+                          {running && typeof c.cpu_percent === "number"
                             ? formatPercent(c.cpu_percent, 1)
                             : "—"}
                         </div>
@@ -283,7 +293,14 @@ export function NodeContainers({
                       </Td>
                       {/* 内存：用量 / 限额（限额 0 = 不限，只显示用量） */}
                       <Td className="hidden lg:table-cell" align="right">
-                        <span className="text-sm tabular-nums text-ink-700 dark:text-ink-100">
+                        <span
+                          className="text-sm tabular-nums text-ink-700 dark:text-ink-100"
+                          title={
+                            running && !c.mem_usage_bytes && !c.mem_limit_bytes
+                              ? t("containers.usageUnknownHint")
+                              : undefined
+                          }
+                        >
                           {running
                             ? formatUsagePair(c.mem_usage_bytes, c.mem_limit_bytes)
                             : "—"}

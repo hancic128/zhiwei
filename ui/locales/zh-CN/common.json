@@ -80,7 +80,13 @@
     "down": "故障",
     "warning": "警告",
     "critical": "严重",
-    "info": "提示"
+    "info": "提示",
+    "running": "运行中",
+    "exited": "已退出",
+    "paused": "已暂停",
+    "created": "已创建",
+    "restarting": "重启中",
+    "dead": "已死亡"
   },
   "time": {
     "secondsAgo": "{{n}} 秒前",
@@ -273,8 +279,8 @@
     "aliasPlaceholder": "如「北京入口」",
     "aliasHint": "最多 {{n}} 个字符；列表与下拉框优先显示别名",
     "tagsLabel": "标签",
-    "tagsPlaceholder": "输入后回车；空格、逗号、顿号都能分隔",
-    "tagsHint": "最多 {{n}} 个，空格 / 逗号分隔，用于过滤节点",
+    "tagsPlaceholder": "输入后按回车添加；空格、逗号、顿号也能分隔",
+    "tagsHint": "最多 {{n}} 个，回车确认，用于过滤节点",
     "tagsFull": "最多 {{n}} 个标签",
     "tagTooLong": "单个标签最多 {{n}} 个字符",
     "removeTag": "移除标签 {{tag}}",
@@ -330,7 +336,7 @@
     "killKillMessage": "对 {{name}} 发送 SIGKILL，进程无法拦截，未落盘的数据会丢失。",
     "cmdOk": "命令已执行",
     "cmdFailed": "命令执行失败",
-    "cmdPending": "命令已下发，节点尚未回执",
+    "cmdPending": "命令已下发，节点 60 秒内未回执——它可能离线，或 Agent 版本过旧",
     "copied": "已复制",
     "nodeKey": "节点身份（Ed25519 公钥）",
     "copyKey": "复制节点公钥",
@@ -472,7 +478,17 @@
     "nodeEmptyHint": "节点运行 Docker 时会自动上报容器列表。",
     "actRemove": "删除",
     "removeTitle": "删除容器 {{name}}",
-    "removeMessage": "容器与其可写层会被永久删除，此操作不可恢复。运行中的容器请先停止。"
+    "removeMessage": "容器与其可写层会被永久删除，此操作不可恢复。运行中的容器请先停止。",
+    "statusUp": "已运行 {{uptime}}",
+    "statusExitedCode": "已退出（退出码 {{code}}）",
+    "statusRestarting": "重启中（反复退出）",
+    "healthHealthy": "健康检查正常",
+    "healthUnhealthy": "健康检查异常",
+    "healthStarting": "健康检查启动中",
+    "usageUnknownHint": "节点未上报用量——Agent 版本可能过旧",
+    "agentOutdated": "Agent 可升级",
+    "agentOutdatedHint": "节点 Agent 版本（v{{agent}}）低于控制台（v{{console}}），容器用量与启停/日志可能不可用。请在节点上重新运行安装脚本以升级。",
+    "logsWaiting": "已下发，等待节点回执…"
   },
   "processes": {
     "title": "进程",

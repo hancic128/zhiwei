@@ -293,7 +293,7 @@ export function Nodes() {
           />
           <Tooltip content={t("nodes.onboardHelpHint")}>
             <Button
-              variant="secondary"
+              variant="ghost"
               onClick={() => setOnboardDialogOpen(true)}
             >
               <HelpCircle className="w-4 h-4" aria-hidden="true" />
