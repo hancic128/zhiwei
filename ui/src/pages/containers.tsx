@@ -42,8 +42,11 @@ import { Tooltip } from "@/components/ui/tooltip";
 import { usePrefs } from "@/components/prefs-provider";
 import {
   cn,
+  formatCpuLimit,
+  formatPercent,
   formatTime,
   formatUptime,
+  formatUsagePair,
   friendlyError,
   nodeLabel,
   relativeTime,
@@ -384,6 +387,12 @@ export function Containers() {
                     sortDir={sortDir}
                     onSort={onSort}
                   />
+                  <Th align="right" className="hidden md:table-cell">
+                    {t("containers.colCpu")}
+                  </Th>
+                  <Th align="right" className="hidden xl:table-cell">
+                    {t("containers.colMem")}
+                  </Th>
                   <SortHeader
                     label={t("containers.colUptime")}
                     k="uptime"
@@ -436,6 +445,33 @@ export function Containers() {
                         <div className="mt-1 text-xs text-ink-400 truncate max-w-[200px]">
                           {c.status}
                         </div>
+                      </Td>
+                      {/* CPU：占用 + 限额两行；未运行 / 未上报按「—」处理 */}
+                      <Td className="hidden md:table-cell" align="right">
+                        <div className="text-sm tabular-nums text-ink-700 dark:text-ink-100">
+                          {typeof c.cpu_percent === "number"
+                            ? formatPercent(c.cpu_percent, 1)
+                            : "—"}
+                        </div>
+                        <div className="text-xs text-ink-400 tabular-nums">
+                          {c.state === "running"
+                            ? c.cpu_limit_nano
+                              ? t("containers.ofLimit", {
+                                  limit: t("containers.unitCores", {
+                                    n: formatCpuLimit(c.cpu_limit_nano),
+                                  }),
+                                })
+                              : t("containers.limitUnlimited")
+                            : ""}
+                        </div>
+                      </Td>
+                      {/* 内存：用量 / 限额（限额 0 = 不限，只显示用量） */}
+                      <Td className="hidden xl:table-cell" align="right">
+                        <span className="text-sm tabular-nums text-ink-700 dark:text-ink-100">
+                          {c.state === "running"
+                            ? formatUsagePair(c.mem_usage_bytes, c.mem_limit_bytes)
+                            : "—"}
+                        </span>
                       </Td>
                       <Td className="hidden lg:table-cell" align="right">
                         <span className="text-sm tabular-nums text-ink-500">

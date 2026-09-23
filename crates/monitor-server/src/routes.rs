@@ -101,6 +101,11 @@ pub fn router(state: AppState) -> Router {
             get(crate::probes_api::list_probes_handler)
                 .post(crate::probes_api::create_probe_handler),
         )
+        // 静态段要排在 `:id` 之前注册：/v1/probes/test 不能被当成 id=test
+        .route(
+            "/v1/probes/test",
+            axum::routing::post(crate::probes_api::test_probe_handler),
+        )
         .route(
             "/v1/probes/:id",
             axum::routing::patch(crate::probes_api::patch_probe_handler)
@@ -1611,6 +1616,10 @@ async fn inventory_handler(
             finished_at_unix_nano: c.finished_at_unix_nano,
             compose_project: c.compose_project.clone(),
             compose_service: c.compose_service.clone(),
+            mem_usage_bytes: c.mem_usage_bytes,
+            mem_limit_bytes: c.mem_limit_bytes,
+            cpu_percent: c.cpu_percent,
+            cpu_limit_nano: c.cpu_limit_nano,
         })
         .collect();
 
@@ -1725,6 +1734,15 @@ struct ContainerView {
     compose_project: String,
     #[serde(default)]
     compose_service: String,
+    /// 用量与限额——老版本节点 agent 上报时全是 0（界面显示「—」/「不限」）
+    #[serde(default)]
+    mem_usage_bytes: u64,
+    #[serde(default)]
+    mem_limit_bytes: u64,
+    #[serde(default)]
+    cpu_percent: f64,
+    #[serde(default)]
+    cpu_limit_nano: u64,
 }
 
 #[derive(Serialize, Clone)]

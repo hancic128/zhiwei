@@ -194,7 +194,9 @@ export function LogFetchDialog({
               value={nodeId}
               onChange={(e) => setNodeId(e.target.value)}
               aria-label={t("logs.node")}
+              disabled={nodesQ.isLoading}
             >
+              {nodesQ.isLoading && <option>{t("logs.loadingNodes")}</option>}
               {nodes.map((n) => (
                 <option key={n.id} value={n.id}>
                   {nodeLabel(n)}
@@ -235,6 +237,11 @@ export function LogFetchDialog({
                   >
                     {t("action.retry")}
                   </button>
+                </span>
+              ) : invQ.isLoading ? (
+                <span className="flex items-center gap-2 text-xs text-ink-400">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
+                  {t("logs.loadingContainers")}
                 </span>
               ) : containers.length === 0 ? (
                 <span className="text-xs text-ink-400">{t("logs.noContainers")}</span>
@@ -324,6 +331,14 @@ export function LogFetchDialog({
           <EmptyState title={t("containers.logsEmpty")} />
         ) : (
           <>
+            {/* 拉到了多少行：日志是一屏一屏看的，先给个量级 */}
+            {text.trim() && (
+              <p className="text-xs text-ink-400">
+                {t("logs.lines", {
+                  n: text.trimEnd().split("\n").length,
+                })}
+              </p>
+            )}
             {follow && lastAt && (
               <p className="flex items-center gap-2 text-xs text-emerald-600 dark:text-emerald-400">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />

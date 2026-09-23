@@ -27,6 +27,12 @@ message Container {
   // 「应用」这个维度由它自动推导，不需要用户手工建层级——见 docs/POSITIONING.md
   string compose_project = 11;      // com.docker.compose.project
   string compose_service = 12;      // com.docker.compose.service
+  // 用量与限额：/containers/{id}/stats 一次采样 + inspect 的 HostConfig。
+  // 只有 running 的容器才有；取不到就留 0，界面显示「—」而不是撒谎成 0。
+  uint64 mem_usage_bytes = 13;      // 已扣 page cache 的常驻内存
+  uint64 mem_limit_bytes = 14;      // HostConfig.Memory；0 = 不限
+  double cpu_percent = 15;          // 相对本机全部核心的占用（和进程列表同一口径）
+  uint64 cpu_limit_nano = 16;       // HostConfig.NanoCpus；0 = 不限
 }
 
 message ProcessInfo {

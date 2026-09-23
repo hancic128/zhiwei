@@ -67,6 +67,31 @@ export function formatBytes(n: number): string {
   return `${v >= 100 ? v.toFixed(0) : v.toFixed(1)} ${units[i]}`;
 }
 
+/**
+ * CPU 限额折算成核数。1e9 nano = 1 核；0 表示不限（docker 的 `--cpus 0`）。
+ */
+export function formatCpuLimit(nano: number): string {
+  if (!Number.isFinite(nano) || nano <= 0) return "—";
+  const cores = nano / 1e9;
+  return cores >= 10 ? cores.toFixed(0) : cores.toFixed(2);
+}
+
+/**
+ * 「用量 / 限额」配对展示，任一侧缺失都不留空：limit = 0（不限）时只给用量。
+ */
+export function formatUsagePair(
+  usage: number | undefined,
+  limit: number | undefined,
+  format: (n: number) => string = formatBytes,
+): string {
+  const hasUsage = Number.isFinite(usage) && (usage ?? 0) > 0;
+  const hasLimit = Number.isFinite(limit) && (limit ?? 0) > 0;
+  if (!hasUsage && !hasLimit) return "—";
+  if (!hasLimit) return format(usage ?? 0);
+  if (!hasUsage) return `0 / ${format(limit ?? 0)}`;
+  return `${format(usage ?? 0)} / ${format(limit ?? 0)}`;
+}
+
 /** 速率（bytes/s）：`1.2 MB/s` */
 export function formatRate(bytesPerSecond: number): string {
   if (!Number.isFinite(bytesPerSecond)) return "—";

@@ -1,10 +1,9 @@
 import * as React from "react";
-import { Link, useParams } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useQuery, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import {
   ArrowDown,
-  ArrowLeft,
   ArrowUp,
   Clock,
   Copy,
@@ -46,6 +45,7 @@ import {
   type TimeRange,
 } from "@/components/ui/date-range-picker";
 import { EmptyState, ErrorState, Skeleton } from "@/components/ui/feedback";
+import { useBreadcrumb } from "@/components/ui/breadcrumb";
 import { Select } from "@/components/ui/select";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useToast } from "@/components/ui/toast";
@@ -166,6 +166,41 @@ export function NodeDetail() {
   const netDown = netRxQ.data?.latest ?? null;
   const live = livenessOf(node?.last_seen_ms);
   const rel = (ms: number) => relativeTime(ms, t);
+
+  const setCrumbs = useBreadcrumb();
+
+  // 「Nodes / 家用电脑 · Online · Enrolled 9h ago」放在 App 顶部 header 里，
+  // 不再挤在内容区顶部。节点数据未回来时先只挂根级，避免叶子文字闪一下。
+  React.useEffect(() => {
+    setCrumbs([
+      { to: "/nodes", label: t("nav.nodes") },
+      {
+        label: (
+          <span className="flex items-center gap-2 min-w-0">
+            <span className="text-base font-semibold text-ink-900 dark:text-surface-0 truncate">
+              {node ? nodeLabel(node) : id}
+            </span>
+            <DotBadge
+              tone={
+                live === "online" ? "success" : live === "lagging" ? "warn" : "neutral"
+              }
+              pulse={live === "online"}
+            >
+              {t(`state.${live}`)}
+            </DotBadge>
+            {node && (
+              <span className="text-xs text-ink-400 whitespace-nowrap">
+                {t("detail.enrolledAt")} {rel(node.enrolled_at_ms)}
+              </span>
+            )}
+          </span>
+        ),
+      },
+    ]);
+  }, [setCrumbs, node, id, t, live]);
+
+  // 离开详情页时清掉，否则回到列表还会挂着上一个节点的面包屑
+  React.useEffect(() => () => setCrumbs([]), [setCrumbs]);
 
   const processes: ProcessInfo[] = React.useMemo(() => {
     const list = [...(procsQ.data?.processes ?? [])];
@@ -303,38 +338,12 @@ export function NodeDetail() {
 
   return (
     <>
-      {/* 标题区：日期范围、刷新频率、基本信息 / 重启 / 关机 全部收在右上角 */}
-      <div className="flex flex-wrap items-start justify-between gap-4">
+      {/* 操作区：日期范围、刷新频率、基本信息 / 重启 / 关机 收在右侧。
+          标题、状态、入网时间已搬到 header 的面包屑里；节点 ID 进「Host info」。 */}
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="min-w-0">
-          <div className="flex items-center gap-3 min-w-0">
-            <Link
-              to="/nodes"
-              className="inline-flex items-center gap-1 text-sm text-ink-500 hover:text-ink-900 dark:hover:text-surface-0 transition-colors"
-            >
-              <ArrowLeft className="w-4 h-4" aria-hidden="true" />
-              {t("detail.back")}
-            </Link>
-            <span className="text-surface-4 dark:text-ink-700">/</span>
-            <h2 className="text-lg font-bold text-ink-900 dark:text-surface-0 truncate">
-              {node ? nodeLabel(node) : id}
-            </h2>
-            <DotBadge
-              tone={
-                live === "online" ? "success" : live === "lagging" ? "warn" : "neutral"
-              }
-              pulse={live === "online"}
-            >
-              {t(`state.${live}`)}
-            </DotBadge>
-          </div>
-          {node && (
-            <p className="mt-1 text-xs text-ink-400 truncate">
-              {node.alias ? `${node.hostname} · ` : ""}
-              {id} · {t("detail.enrolledAt")} {rel(node.enrolled_at_ms)}
-            </p>
-          )}
           {node && node.tags.length > 0 && (
-            <TagList tags={node.tags} className="mt-1 flex flex-wrap gap-1" />
+            <TagList tags={node.tags} className="flex flex-wrap gap-1" />
           )}
         </div>
 
@@ -797,6 +806,25 @@ export function NodeDetail() {
               label={t("detail.agentVersion")}
               value={node.host_info.agent_version ? `v${node.host_info.agent_version}` : "—"}
             />
+            {/* 节点 ID：从标题区搬进来（header 只留「Nodes / 名称 · 状态 · 入网时间」） */}
+            <div className="min-w-0">
+              <dt className="text-xs text-ink-400">{t("detail.nodeId")}</dt>
+              <dd className="mt-1 flex items-center gap-1">
+                <span className="text-sm font-mono tabular-nums text-ink-900 dark:text-surface-0 truncate">
+                  {id}
+                </span>
+                <Tooltip content={t("detail.copyKey")}>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label={t("detail.nodeId")}
+                    onClick={() => void copy(id)}
+                  >
+                    <Copy className="w-4 h-4" aria-hidden="true" />
+                  </Button>
+                </Tooltip>
+              </dd>
+            </div>
             <div className="sm:col-span-2">
               <dt className="text-xs text-ink-400">{t("detail.addresses")}</dt>
               <dd className="mt-1 flex flex-wrap gap-1">

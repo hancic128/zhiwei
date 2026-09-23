@@ -20,6 +20,10 @@ import { cn } from "@/lib/utils";
 import { APP_VERSION } from "@/lib/version";
 import { Sidebar, useSidebarCollapsed } from "@/components/sidebar";
 import { FloatingControls } from "@/components/floating-controls";
+import {
+  BreadcrumbOutlet,
+  BreadcrumbProvider,
+} from "@/components/ui/breadcrumb";
 import { HelpPage } from "@/pages/help";
 import { Badge, DotBadge } from "@/components/ui/badge";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -47,7 +51,9 @@ export default function App() {
 
   return (
     <TooltipProvider>
-      <Console onLogout={() => setHasToken(false)} />
+      <BreadcrumbProvider>
+        <Console onLogout={() => setHasToken(false)} />
+      </BreadcrumbProvider>
     </TooltipProvider>
   );
 }
@@ -112,11 +118,17 @@ function Console({ onLogout }: { onLogout: () => void }) {
             >
               <Menu className="w-5 h-5 text-ink-700 dark:text-surface-4" aria-hidden="true" />
             </button>
-            <div className="min-w-0">
-              <h1 className="text-base font-semibold text-ink-900 dark:text-surface-0 truncate">
-                {title}
-              </h1>
-            </div>
+            {/* 节点详情页把「Nodes / 家用电脑 · 状态 · 入网时间」投递到 header；
+                其余页面继续显示单段标题，外观不变。 */}
+            {pathname.startsWith("/nodes/") ? (
+              <BreadcrumbOutlet />
+            ) : (
+              <div className="min-w-0">
+                <h1 className="text-base font-semibold text-ink-900 dark:text-surface-0 truncate">
+                  {title}
+                </h1>
+              </div>
+            )}
           </div>
 
           <div className="flex items-center gap-2 shrink-0">

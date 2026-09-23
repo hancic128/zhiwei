@@ -55,6 +55,9 @@ interface ToastContextValue {
   push: (level: ToastLevel, message: string) => void;
 }
 
+/** 提示自动消失的时间：统一 5 秒 */
+const TOAST_TTL = 5000;
+
 const ToastContext = React.createContext<ToastContextValue | null>(null);
 
 export function useToast() {
@@ -67,6 +70,8 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   const { t } = useTranslation();
   const [items, setItems] = React.useState<ToastItem[]>([]);
   const nextId = React.useRef(1);
+  /** 每条提示的自动消失定时器：手动关闭 / 卸载时要能取消 */
+  const timers = React.useRef(new Map<number, number>());
 
   const remove = React.useCallback((id: number) => {
     setItems((prev) => prev.filter((t) => t.id !== id));
@@ -77,11 +82,36 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
       const id = nextId.current++;
       // 最多 3 条，超出时最早的一条被移除
       setItems((prev) => [...prev, { id, level, message }].slice(-3));
-      if (level === "success" || level === "info") {
-        window.setTimeout(() => remove(id), 3000);
-      }
+      // 所有提示都自动消失：常驻的横幅会挡住内容，也容易被当成「还没处理完」
+      const timer = window.setTimeout(() => {
+        timers.current.delete(id);
+        remove(id);
+      }, TOAST_TTL);
+      timers.current.set(id, timer);
     },
     [remove],
+  );
+
+  // 手动关掉时把定时器一并清掉，避免它稍后再来删一个已经不在的 id
+  const close = React.useCallback(
+    (id: number) => {
+      const timer = timers.current.get(id);
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+        timers.current.delete(id);
+      }
+      remove(id);
+    },
+    [remove],
+  );
+
+  // 卸载时清干净，避免定时器在 provider 消失后触发 setState
+  React.useEffect(
+    () => () => {
+      timers.current.forEach((timer) => window.clearTimeout(timer));
+      timers.current.clear();
+    },
+    [],
   );
 
   const value = React.useMemo(() => ({ push }), [push]);
@@ -120,7 +150,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
               <p className={cn("flex-1 text-sm", cfg.text)}>{item.message}</p>
               <button
                 type="button"
-                onClick={() => remove(item.id)}
+                onClick={() => close(item.id)}
                 aria-label={t("action.close")}
                 className={cn("shrink-0 opacity-70 hover:opacity-100", cfg.text)}
               >

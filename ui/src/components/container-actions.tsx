@@ -60,23 +60,27 @@ export function ContainerActions({
 
   const runAction = async (action: string) => {
     setBusy(true);
-    let ok = false;
+    // 节点是否真的回话了：一旦回话就说明「控制台这份状态」可能已经过期，
+    // 无论成功失败都重采一次快照，让这一行显示真实状态
+    let answered = false;
     try {
       const { command_id } = await commandsApi.exec(nodeId, action, {
         container: container.name,
       });
       const row = await waitForCommand(command_id);
       if (!row) toast.push("warn", t("detail.cmdPending"));
-      else if (row.result_ok) {
-        ok = true;
-        toast.push("success", row.result_text || t("detail.cmdOk"));
-      } else toast.push("error", row.result_error || t("detail.cmdFailed"));
+      else {
+        answered = true;
+        if (row.result_ok) {
+          toast.push("success", row.result_text || t("detail.cmdOk"));
+        } else toast.push("error", row.result_error || t("detail.cmdFailed"));
+      }
     } catch (e) {
       toast.push("error", t(friendlyError(e)));
     } finally {
       setBusy(false);
       setPending(null);
-      if (ok) {
+      if (answered) {
         void commandsApi
           .exec(nodeId, "refresh_inventory", {})
           .catch(() => undefined);

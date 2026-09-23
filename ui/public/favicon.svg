@@ -1,7 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="知微">
-  <!-- 知微标识：朱砂底 + 素色「见微」折线（三笔由粗到细，取「见微知著」之意） -->
-  <rect width="32" height="32" rx="7" fill="#C73225"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="3.6 8.6 24.8 21.2" role="img" aria-label="知微">
+  <!--
+    知微标识：只有「见微」折线本身（三笔由粗到细，取「见微知著」之意），
+    不加底板、不加描边。这里写死朱砂只是「JS 还没跑起来」时的兜底：
+    运行时 applyFavicon() 会按当前主题色（朱砂/靛蓝/翡翠/玫红/琥珀/石板）
+    重新生成同样的折线，所以标签页图标与侧边栏 logo 始终同色。
+    改折线时与 ui/src/components/ui/logo.tsx 的 GLYPH 一起改。
+  -->
   <path d="M7 21.5h4.5l2.5-6 3 11 3-14.5 2.5 9.5H25"
-        fill="none" stroke="#FFFFFF" stroke-width="2.4"
+        fill="none" stroke="#C73225" stroke-width="2.4"
         stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

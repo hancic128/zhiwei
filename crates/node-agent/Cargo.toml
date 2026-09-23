@@ -29,6 +29,7 @@ bytes = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+futures = { workspace = true }
 
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }

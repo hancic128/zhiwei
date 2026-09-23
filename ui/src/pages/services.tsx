@@ -1,6 +1,7 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import {
   Activity,
   AlertTriangle,
@@ -21,6 +22,7 @@ import {
   trendApi,
   type ProbeResultView,
   type ProbeStateName,
+  type ProbeTestResult,
   type ProbeView,
   type ServiceView,
 } from "@/api";
@@ -53,7 +55,13 @@ import {
   Tr,
 } from "@/components/ui/table";
 import { useToast } from "@/components/ui/toast";
-import { friendlyError, formatTime, nodeLabel, relativeTime } from "@/lib/utils";
+import {
+  cn,
+  friendlyError,
+  formatTime,
+  nodeLabel,
+  relativeTime,
+} from "@/lib/utils";
 import { usePrefs } from "@/components/prefs-provider";
 
 /** 探针类型图标（规范：图标一律 Lucide SVG，禁止 emoji） */
@@ -184,6 +192,8 @@ export function Services() {
   const toast = useToast();
 
   const [q, setQ] = React.useState("");
+  const [groupFilter, setGroupFilter] = React.useState("all");
+  const [tierFilter, setTierFilter] = React.useState("all");
   const [serviceDialog, setServiceDialog] = React.useState<{
     open: boolean;
     service?: ServiceView;
@@ -244,19 +254,43 @@ export function Services() {
   });
 
   const needle = q.trim().toLowerCase();
+
+  /** 分组下拉的可选项：真实分组 + 「未分组」这一档（group_name 为空） */
+  const groups = React.useMemo(
+    () =>
+      Array.from(
+        new Set(services.map((s) => s.group_name.trim()).filter((g) => g !== "")),
+      ).sort((a, b) => a.localeCompare(b)),
+    [services],
+  );
+  const tiers = React.useMemo(
+    () =>
+      Array.from(new Set(services.map((s) => s.tier))).sort((a, b) => a - b),
+    [services],
+  );
+
   const filtered = React.useMemo(() => {
-    if (!needle) return services;
-    return services.filter(
-      (s) =>
+    return services.filter((s) => {
+      if (groupFilter === "__none__" && s.group_name.trim() !== "") return false;
+      if (
+        groupFilter !== "all" &&
+        groupFilter !== "__none__" &&
+        s.group_name !== groupFilter
+      )
+        return false;
+      if (tierFilter !== "all" && String(s.tier) !== tierFilter) return false;
+      if (!needle) return true;
+      return (
         s.name.toLowerCase().includes(needle) ||
         s.group_name.toLowerCase().includes(needle) ||
         s.probes.some(
           (p) =>
             p.name.toLowerCase().includes(needle) ||
             targetSummary(p).toLowerCase().includes(needle),
-        ),
-    );
-  }, [services, needle]);
+        )
+      );
+    });
+  }, [services, needle, groupFilter, tierFilter]);
 
   const healthy = services.filter((s) => s.health === "ok").length;
   const degradedCount = services.filter((s) => s.health === "degraded").length;
@@ -315,7 +349,36 @@ export function Services() {
             })}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <Select
+            wrapperClassName="w-40"
+            value={groupFilter}
+            onChange={(e) => setGroupFilter(e.target.value)}
+            aria-label={t("services.filterGroup")}
+          >
+            <option value="all">{t("services.groupAll")}</option>
+            {groups.map((g) => (
+              <option key={g} value={g}>
+                {g}
+              </option>
+            ))}
+            {services.some((s) => s.group_name.trim() === "") && (
+              <option value="__none__">{t("services.groupUngrouped")}</option>
+            )}
+          </Select>
+          <Select
+            wrapperClassName="w-36"
+            value={tierFilter}
+            onChange={(e) => setTierFilter(e.target.value)}
+            aria-label={t("services.filterTier")}
+          >
+            <option value="all">{t("services.tierAll")}</option>
+            {tiers.map((tier) => (
+              <option key={tier} value={String(tier)}>
+                {t(`services.tier${tier}`)}
+              </option>
+            ))}
+          </Select>
           <SearchInput
             className="w-48 md:w-64"
             placeholder={t("services.searchPlaceholder")}
@@ -361,10 +424,17 @@ export function Services() {
         </Card>
       ) : filtered.length === 0 ? (
         <Card>
-          <SearchEmptyState
-            title={t("services.searchEmpty")}
-            description={t("services.searchEmptyHint")}
-          />
+          {needle ? (
+            <SearchEmptyState
+              title={t("services.searchEmpty")}
+              description={t("services.searchEmptyHint")}
+            />
+          ) : (
+            <EmptyState
+              title={t("services.filterEmpty")}
+              description={t("services.filterEmptyHint")}
+            />
+          )}
         </Card>
       ) : (
         <div className="space-y-4 md:space-y-6">
@@ -841,6 +911,8 @@ function ProbeDialog({
     String(probe?.failure_threshold ?? 3),
   );
   const [nodeId, setNodeId] = React.useState(probe?.node_id ?? "");
+  /** 一次性测试结果；改任何会影响目标的字段就作废（避免显示过期结论） */
+  const [testResult, setTestResult] = React.useState<ProbeTestResult | null>(null);
 
   const nodesQ = useQuery({ queryKey: ["nodes"], queryFn: api.nodes });
 
@@ -921,6 +993,45 @@ function ProbeDialog({
     onError: (e) => toast.push("error", t(friendlyError(e))),
   });
 
+  /**
+   * 一次性测试：只发当前表单里的目标 / 期望，不落库。由 monitor 侧执行一次，
+   * 用来在保存前确认「地址写对没、期望配置能不能通过」。
+   */
+  const testProbe = useMutation({
+    mutationFn: () => {
+      const p = buildPayload();
+      return servicesApi.test({
+        kind: p.kind,
+        target_json: p.target_json,
+        expect_json: p.expect_json,
+        timeout_ms: p.timeout_ms,
+      });
+    },
+    onSuccess: (r) => setTestResult(r),
+    onError: (e) => {
+      setTestResult(null);
+      toast.push("error", t(friendlyError(e)));
+    },
+  });
+
+  // 目标 / 期望项一改，上一次的测试结论就不算数了
+  React.useEffect(() => {
+    setTestResult(null);
+  }, [
+    kind,
+    url,
+    host,
+    port,
+    sni,
+    statusCodes,
+    bodyContains,
+    banner,
+    maxLatency,
+    minDays,
+    tlsVerify,
+    timeoutMs,
+  ]);
+
   const targetValid =
     name.trim().length > 0 &&
     (kind === "http" ? url.trim().startsWith("http") : host.trim().length > 0 && Number(port) > 0);
@@ -933,6 +1044,18 @@ function ProbeDialog({
       onClose={onClose}
       footer={
         <>
+          {/* 测试放左边：它是「先验证再保存」的辅助动作，不该和主按钮争视觉位置 */}
+          <Button
+            variant="secondary"
+            className="mr-auto"
+            loading={testProbe.isPending}
+            disabled={!targetValid}
+            onClick={() => testProbe.mutate()}
+          >
+            {testProbe.isPending
+              ? t("services.testing")
+              : t("services.testProbe")}
+          </Button>
           <Button variant="secondary" onClick={onClose}>
             {t("action.cancel")}
           </Button>
@@ -1120,8 +1243,104 @@ function ProbeDialog({
           </label>
         </div>
       </div>
+
+      {/* 测试结论：reason 由后端给，文案在这里选，保证中英都通 */}
+      {testResult && (
+        <div
+          className={cn(
+            "rounded-lg border px-3 py-2",
+            testResult.state === "ok"
+              ? "border-emerald-200 dark:border-emerald-700/40"
+              : testResult.state === "degraded"
+                ? "border-amber-200 dark:border-amber-700/40"
+                : "border-rose-200 dark:border-rose-700/40",
+          )}
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <DotBadge
+              tone={
+                testResult.state === "ok"
+                  ? "success"
+                  : testResult.state === "degraded"
+                    ? "warn"
+                    : "danger"
+              }
+            >
+              {t(
+                testResult.state === "ok"
+                  ? "services.testPassed"
+                  : testResult.state === "degraded"
+                    ? "services.testDegraded"
+                    : "services.testFailed",
+              )}
+            </DotBadge>
+            {testResult.latency_ms !== null && (
+              <span className="text-xs text-ink-400 tabular-nums">
+                {formatLatency(testResult.latency_ms)}
+              </span>
+            )}
+            {testResult.status_code !== null && (
+              <span className="text-xs text-ink-400 tabular-nums">
+                HTTP {testResult.status_code}
+              </span>
+            )}
+          </div>
+          <p className="mt-1 text-sm text-ink-700 dark:text-surface-4 break-all">
+            {testReasonText(testResult, t)}
+          </p>
+        </div>
+      )}
+      <p className="text-xs text-ink-400">{t("services.testHint")}</p>
     </Dialog>
   );
+}
+
+/** 把后端的 reason/args 翻成人话；未知原因码原样带出来，便于排查 */
+function testReasonText(r: ProbeTestResult, t: TFunction): string {
+  const arg = (k: string) => (r.args?.[k] == null ? "" : String(r.args[k]));
+  const expected = Array.isArray(r.args?.expected)
+    ? (r.args.expected as unknown[]).join(", ")
+    : "";
+  switch (r.reason) {
+    case "ok":
+      return t("services.testReasonOk");
+    case "timeout":
+      return t("services.testReasonTimeout", { ms: arg("ms") });
+    case "connect":
+      return t("services.testReasonConnect", {
+        target: arg("target"),
+        detail: arg("detail"),
+      });
+    case "bad_url":
+      return t("services.testReasonBadUrl");
+    case "status":
+      return t("services.testReasonStatus", {
+        got: r.status_code ?? arg("got"),
+        expected,
+      });
+    case "body":
+      return t("services.testReasonBody", { needle: arg("needle") });
+    case "latency":
+      return t("services.testReasonLatency", {
+        ms: arg("ms"),
+        threshold: arg("threshold"),
+      });
+    case "banner":
+      return t("services.testReasonBanner", { needle: arg("needle") });
+    case "tls":
+      return t("services.testReasonTls", { detail: arg("detail") });
+    case "cert_expired":
+      return t("services.testReasonCertExpired", { days: arg("days") });
+    case "cert_days":
+      return t("services.testReasonCertDays", {
+        days: arg("days"),
+        min: arg("min"),
+      });
+    case "unsupported":
+      return t("services.testReasonUnsupported", { kind: arg("kind") });
+    default:
+      return t("services.testReasonUnknown", { reason: r.reason });
+  }
 }
 
 // ---------- 结果明细 ----------

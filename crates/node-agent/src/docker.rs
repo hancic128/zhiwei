@@ -6,6 +6,7 @@
 
 use anyhow::Context;
 use bytes::Bytes;
+use futures::StreamExt;
 use http_body_util::{BodyExt, Empty};
 use hyper::Request;
 use hyper_util::rt::TokioIo;
@@ -43,6 +44,10 @@ pub struct ContainerRuntime {
     pub compose_project: String,
     /// compose 服务名（`com.docker.compose.service`）
     pub compose_service: String,
+    /// 内存限额（`HostConfig.Memory` 字节）；0 = 不限
+    pub mem_limit_bytes: u64,
+    /// CPU 限额（`HostConfig.NanoCpus` 纳秒）；0 = 不限
+    pub cpu_limit_nano: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,6 +56,22 @@ struct InspectResponse {
     state: Option<InspectState>,
     #[serde(rename = "Config", default)]
     config: Option<InspectConfig>,
+    #[serde(rename = "HostConfig", default)]
+    host_config: Option<InspectHostConfig>,
+}
+
+/// 只取我们需要的 HostConfig 部分：限额。
+#[derive(Debug, Default, Deserialize)]
+struct InspectHostConfig {
+    #[serde(rename = "Memory", default)]
+    memory: u64,
+    #[serde(rename = "NanoCpus", default)]
+    nano_cpus: u64,
+    /// `--cpu-quota` 老写法：限额靠 quota/period 两个数一起表达
+    #[serde(rename = "CpuQuota", default)]
+    cpu_quota: i64,
+    #[serde(rename = "CpuPeriod", default)]
+    cpu_period: i64,
 }
 
 /// 只取我们需要的 Config 部分。
@@ -88,10 +109,22 @@ const LABEL_COMPOSE_SERVICE: &str = "com.docker.compose.service";
 fn runtime_from_inspect(parsed: InspectResponse) -> ContainerRuntime {
     let state = parsed.state.unwrap_or_default();
     let labels = parsed.config.and_then(|c| c.labels).unwrap_or_default();
+    let host = parsed.host_config.unwrap_or_default();
+    // 老写法 `--cpu-quota`：NanoCpus 为空时用 quota/period 换算（1e9 = 1 核）
+    let quota_period = match (host.cpu_quota, host.cpu_period) {
+        (q, p) if q > 0 && p > 0 => (q as u64).saturating_mul(1_000_000_000) / p as u64,
+        _ => 0,
+    };
     ContainerRuntime {
         state: state.status,
         started_at_unix_nano: parse_docker_time(&state.started_at),
         finished_at_unix_nano: parse_docker_time(&state.finished_at),
+        mem_limit_bytes: host.memory,
+        cpu_limit_nano: if host.nano_cpus > 0 {
+            host.nano_cpus
+        } else {
+            quota_period
+        },
         compose_project: labels
             .get(LABEL_COMPOSE_PROJECT)
             .cloned()
@@ -136,6 +169,12 @@ pub async fn container_action(container: &str, action: &str) -> anyhow::Result<S
         other => anyhow::bail!("未知容器动作 {other}"),
     };
     let (status, body) = docker_write("POST", &path).await?;
+    // 304 = 已经在目标状态。docker 拿它表示「这次点击没有改变任何东西」，
+    // 而控制台那份状态来自最多 5 分钟前的快照——把 304 当失败，用户就会看到
+    // 「容器关不掉 / 启不了」这种假故障。
+    if status == 304 {
+        return Ok(already_message(container, action));
+    }
     if !(200..300).contains(&status) {
         anyhow::bail!("{}", docker_error_message(status, &body));
     }
@@ -145,6 +184,16 @@ pub async fn container_action(container: &str, action: &str) -> anyhow::Result<S
         _ => "已重启",
     };
     Ok(format!("容器 {container} {zh}"))
+}
+
+/// 「本来就是这个状态」时给用户看的话——说清没做改动，而不是含糊地说成功
+fn already_message(container: &str, action: &str) -> String {
+    let zh = match action {
+        "start" => "已经在运行",
+        "stop" => "已经是停止状态",
+        _ => "刚刚重启过",
+    };
+    format!("容器 {container} {zh}（本次未做改动）")
 }
 
 /// 删除容器。
@@ -158,6 +207,11 @@ pub async fn container_remove(container: &str, force: bool) -> anyhow::Result<St
         if force { "1" } else { "0" }
     );
     let (status, body) = docker_write("DELETE", &path).await?;
+    // 已经不在了：控制台那行是快照留下的幽灵。删除意图已经满足，别报错——
+    // 刷新之后这行就消失了。
+    if status == 404 {
+        return Ok(format!("容器 {container} 已经不存在（可能已被删除）"));
+    }
     if !(200..300).contains(&status) {
         anyhow::bail!("{}", docker_error_message(status, &body));
     }
@@ -245,10 +299,162 @@ pub async fn list_containers() -> anyhow::Result<Option<Vec<Container>>> {
             finished_at_unix_nano: rt.finished_at_unix_nano,
             compose_project: rt.compose_project,
             compose_service: rt.compose_service,
+            mem_limit_bytes: rt.mem_limit_bytes,
+            cpu_limit_nano: rt.cpu_limit_nano,
+            // 用量随后并发补齐
+            mem_usage_bytes: 0,
+            cpu_percent: 0.0,
         });
     }
 
+    // 用量：`stats` 每次采样要等一个间隔（one-shot 可立即返回），所以只对运行中的
+    // 容器取，并且并发跑、上限 12 条连接——几十个容器也要在一秒内采完。
+    // 单个容器失败只意味着这一格显示「—」，不该影响整份快照。
+    let usage: Vec<(String, ContainerUsage)> = futures::stream::iter(
+        containers
+            .iter()
+            .filter(|c| c.state == "running")
+            .map(|c| c.id.clone())
+            .collect::<Vec<_>>(),
+    )
+    .map(|id| async move {
+        let got = tokio::time::timeout(CONTAINER_STATS_TIMEOUT, container_usage(&id))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default();
+        (id, got)
+    })
+    .buffer_unordered(12)
+    .collect()
+    .await;
+    for (id, u) in usage {
+        if let Some(c) = containers.iter_mut().find(|c| c.id == id) {
+            c.mem_usage_bytes = u.mem_usage_bytes;
+            c.cpu_percent = u.cpu_percent;
+        }
+    }
+
     Ok(Some(containers))
+}
+
+/// 单次采样的用量。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ContainerUsage {
+    /// 已扣 page cache 的常驻内存（和 `docker stats` 同一算法）
+    pub mem_usage_bytes: u64,
+    /// 相对本机全部核心的占用百分比（和进程列表同一口径）
+    pub cpu_percent: f64,
+}
+
+/// stats 是即时查询、正常毫秒级返回；卡住就别拖累整份快照
+const CONTAINER_STATS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[derive(Debug, Default, Deserialize)]
+struct StatsResponse {
+    #[serde(default)]
+    memory_stats: Option<StatsMemory>,
+    #[serde(default)]
+    cpu_stats: Option<StatsCpu>,
+    #[serde(default)]
+    precpu_stats: Option<StatsCpu>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct StatsMemory {
+    #[serde(default)]
+    usage: u64,
+    /// cgroup 明细：v1 叫 cache / total_inactive_file，v2 叫 inactive_file
+    #[serde(default)]
+    stats: Option<std::collections::BTreeMap<String, u64>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct StatsCpu {
+    #[serde(default)]
+    cpu_usage: Option<StatsCpuUsage>,
+    #[serde(default)]
+    system_cpu_usage: u64,
+    #[serde(default)]
+    online_cpus: u64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct StatsCpuUsage {
+    #[serde(default)]
+    total_usage: u64,
+    #[serde(default)]
+    percpu_usage: Option<Vec<u64>>,
+}
+
+/// stats 响应 → 用量（纯函数，便于单测）。
+///
+/// CPU 百分比沿用 docker CLI 的算法：两次采样的差值之比 × 核心数。
+/// 单次采样（stream=false）时 `cpu_stats` 与 `precpu_stats` 恰好是相邻两拍。
+fn usage_from_stats(s: &StatsResponse) -> ContainerUsage {
+    let mem = s.memory_stats.as_ref();
+    let cache = mem
+        .and_then(|m| m.stats.as_ref())
+        .map(|st| {
+            ["inactive_file", "cache", "total_inactive_file"]
+                .iter()
+                .find_map(|k| st.get(*k).copied())
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+    let mem_usage_bytes = mem.map(|m| m.usage.saturating_sub(cache)).unwrap_or(0);
+
+    let cpu = s.cpu_stats.as_ref().and_then(|c| c.cpu_usage.as_ref());
+    let pre = s.precpu_stats.as_ref().and_then(|c| c.cpu_usage.as_ref());
+    let system_delta = s
+        .cpu_stats
+        .as_ref()
+        .map(|c| c.system_cpu_usage)
+        .unwrap_or(0)
+        .saturating_sub(
+            s.precpu_stats
+                .as_ref()
+                .map(|c| c.system_cpu_usage)
+                .unwrap_or(0),
+        );
+    let cpu_delta = cpu
+        .map(|c| c.total_usage)
+        .unwrap_or(0)
+        .saturating_sub(pre.map(|c| c.total_usage).unwrap_or(0));
+    let cores = s
+        .cpu_stats
+        .as_ref()
+        .map(|c| {
+            if c.online_cpus > 0 {
+                c.online_cpus
+            } else {
+                c.cpu_usage
+                    .as_ref()
+                    .map(|u| u.percpu_usage.as_ref().map(|v| v.len()).unwrap_or(0) as u64)
+                    .unwrap_or(0)
+            }
+        })
+        .unwrap_or(0);
+    let cpu_percent = if system_delta == 0 || cores == 0 {
+        0.0
+    } else {
+        cpu_delta as f64 / system_delta as f64 * cores as f64 * 100.0
+    };
+
+    ContainerUsage {
+        mem_usage_bytes,
+        cpu_percent,
+    }
+}
+
+/// 采一次容器的用量。老 daemon（API < 1.41）不认 `one-shot`，退回等一拍的老写法。
+async fn container_usage(id: &str) -> anyhow::Result<ContainerUsage> {
+    let body = match docker_get(&format!("/containers/{id}/stats?stream=false&one-shot=1")).await {
+        Ok(b) => b,
+        Err(_) => docker_get(&format!("/containers/{id}/stats?stream=false")).await?,
+    };
+    let parsed: StatsResponse = serde_json::from_slice(&body).context("解析 docker stats 响应")?;
+    Ok(usage_from_stats(&parsed))
 }
 
 /// 取容器日志末尾 N 行。
@@ -408,6 +614,25 @@ mod tests {
         "State": { "Status": "running", "StartedAt": "0001-01-01T00:00:00Z", "FinishedAt": "0001-01-01T00:00:00Z" }
     }"#;
 
+    /// 真实 `docker stats?stream=false` 的骨架（cgroup v2：inactive_file）
+    const STATS_CGROUP_V2: &str = r#"{
+        "read": "2026-09-23T10:00:00.000000000Z",
+        "memory_stats": {
+            "usage": 104857600,
+            "limit": 536870912,
+            "stats": { "inactive_file": 20971520, "anon": 83886080 }
+        },
+        "cpu_stats": {
+            "cpu_usage": { "total_usage": 300000000, "percpu_usage": [1, 2, 3, 4] },
+            "system_cpu_usage": 2000000000,
+            "online_cpus": 4
+        },
+        "precpu_stats": {
+            "cpu_usage": { "total_usage": 200000000, "percpu_usage": [1, 2, 3, 4] },
+            "system_cpu_usage": 1000000000
+        }
+    }"#;
+
     /// Docker 对没有标签的容器返回的是 `"Labels": null`，不是空对象
     const NULL_LABELS_INSPECT: &str = r#"{
         "Id": "222222",
@@ -471,5 +696,115 @@ mod tests {
             docker_error_message(400, r#"{"message":"   "}"#),
             "docker API 返回 400"
         );
+    }
+
+    #[test]
+    fn limits_come_from_host_config() {
+        // compose 里写了 cpus: "2" 与 mem_limit: 512m 时 inspect 长这样
+        let rt = runtime_of(
+            r#"{
+                "State": { "Status": "running" },
+                "HostConfig": { "Memory": 536870912, "NanoCpus": 2000000000 }
+            }"#,
+        );
+        assert_eq!(rt.mem_limit_bytes, 536870912);
+        assert_eq!(rt.cpu_limit_nano, 2_000_000_000);
+    }
+
+    #[test]
+    fn cpu_limit_falls_back_to_quota_over_period() {
+        // `--cpu-quota 50000 --cpu-period 100000` = 半核，NanoCpus 是空的
+        let rt = runtime_of(
+            r#"{
+                "State": { "Status": "running" },
+                "HostConfig": { "CpuQuota": 50000, "CpuPeriod": 100000 }
+            }"#,
+        );
+        assert_eq!(rt.cpu_limit_nano, 500_000_000);
+    }
+
+    #[test]
+    fn no_host_config_means_no_limit() {
+        // 老 daemon / 异常响应：限额未知就留 0（界面显示「不限」，不是编一个数）
+        let rt = runtime_of(NO_CONFIG_INSPECT);
+        assert_eq!(rt.mem_limit_bytes, 0);
+        assert_eq!(rt.cpu_limit_nano, 0);
+    }
+
+    #[test]
+    fn repeat_click_on_a_settled_container_is_not_an_error() {
+        // docker 对「已经在跑还让你 start」回 304；把它当失败，用户就会以为
+        // 「容器关不掉 / 启不了」——这正是控制台那份 5 分钟前的快照最常见的撞车
+        assert_eq!(
+            already_message("nginx", "start"),
+            "容器 nginx 已经在运行（本次未做改动）"
+        );
+        assert_eq!(
+            already_message("nginx", "stop"),
+            "容器 nginx 已经是停止状态（本次未做改动）"
+        );
+        assert_eq!(
+            already_message("nginx", "restart"),
+            "容器 nginx 刚刚重启过（本次未做改动）"
+        );
+    }
+
+    #[test]
+    fn usage_subtracts_page_cache_and_computes_cpu_percent() {
+        let parsed: StatsResponse =
+            serde_json::from_str(STATS_CGROUP_V2).expect("stats JSON 应能解析");
+        let u = usage_from_stats(&parsed);
+        // 100 MiB - 20 MiB 的 inactive_file
+        assert_eq!(u.mem_usage_bytes, 83886080);
+        // (300e6-200e6)/(2000e6-1000e6) * 4 核 * 100 = 40%
+        assert!((u.cpu_percent - 40.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn usage_falls_back_to_cgroup_v1_cache_key() {
+        let parsed: StatsResponse = serde_json::from_str(
+            r#"{
+                "memory_stats": { "usage": 104857600, "stats": { "cache": 41943040, "total_inactive_file": 10485760 } },
+                "cpu_stats": { "cpu_usage": { "total_usage": 100 }, "system_cpu_usage": 1000 },
+                "precpu_stats": { "cpu_usage": { "total_usage": 50 }, "system_cpu_usage": 500 }
+            }"#,
+        )
+        .expect("stats JSON 应能解析");
+        let u = usage_from_stats(&parsed);
+        // v1 用 cache（和 docker CLI 一致），取不到才退回 total_inactive_file
+        assert_eq!(u.mem_usage_bytes, 104857600 - 41943040);
+        // online_cpus 缺失时用 percpu_usage 的长度；这里两者都没有 → 不算百分比，免得撒谎
+        assert_eq!(u.cpu_percent, 0.0);
+    }
+
+    #[test]
+    fn usage_uses_percpu_len_when_online_cpus_missing() {
+        let parsed: StatsResponse = serde_json::from_str(
+            r#"{
+                "cpu_stats": {
+                    "cpu_usage": { "total_usage": 300000000, "percpu_usage": [1, 2] },
+                    "system_cpu_usage": 2000000000
+                },
+                "precpu_stats": {
+                    "cpu_usage": { "total_usage": 200000000 },
+                    "system_cpu_usage": 1000000000
+                }
+            }"#,
+        )
+        .expect("stats JSON 应能解析");
+        let u = usage_from_stats(&parsed);
+        // (100e6/1000e6) * 2 核 * 100 = 20%
+        assert!((u.cpu_percent - 20.0).abs() < 1e-9);
+        assert_eq!(u.mem_usage_bytes, 0);
+    }
+
+    #[test]
+    fn usage_of_a_stopped_container_is_all_zero() {
+        // 停掉的容器 docker 返回的 stats 里没有 memory/cpu 明细，不解析失败也不算错
+        let parsed: StatsResponse = serde_json::from_str(r#"{"read":"2026-09-23T10:00:00Z"}"#)
+            .expect("stats JSON 应能解析");
+        let u = usage_from_stats(&parsed);
+        assert_eq!(u.mem_usage_bytes, 0);
+        assert_eq!(u.cpu_percent, 0.0);
     }
 }

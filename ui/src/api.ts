@@ -356,6 +356,14 @@ export interface ContainerInfo {
   /** compose 项目 / 服务（自动标签，「应用」维度由它推导）；非 compose 容器为空 */
   compose_project?: string;
   compose_service?: string;
+  /** 内存用量（已扣 page cache）；0 = 未上报 / 未运行 */
+  mem_usage_bytes?: number;
+  /** 内存限额（docker HostConfig.Memory）；0 = 不限 */
+  mem_limit_bytes?: number;
+  /** CPU 占用百分比（相对全部核心）；0 = 未上报 / 未运行 */
+  cpu_percent?: number;
+  /** CPU 限额（纳秒，1e9 = 1 核）；0 = 不限 */
+  cpu_limit_nano?: number;
 }
 
 /**
@@ -995,7 +1003,30 @@ export const servicesApi = {
     request<unknown>(`/v1/probes/${id}`, { method: "DELETE" }),
   results: (id: string, limit = 50) =>
     request<ProbeResultView[]>(`/v1/probes/${id}/results?limit=${limit}`),
+  /** 新建 / 编辑探针时的一次性测试：由 monitor 立即执行一遍，不落库 */
+  test: (body: {
+    kind: string;
+    target_json: string;
+    expect_json: string;
+    timeout_ms?: number;
+  }) =>
+    request<ProbeTestResult>("/v1/probes/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
 };
+
+/** 探针测试结果：state 与探针状态同名（ok / degraded / down） */
+export interface ProbeTestResult {
+  state: "ok" | "degraded" | "down";
+  latency_ms: number | null;
+  status_code: number | null;
+  /** 机器可读的原因码，用来选文案（ok / timeout / connect / status / body / ...） */
+  reason: string;
+  /** 原因码的参数（如 needle、阈值、目标地址） */
+  args: Record<string, unknown>;
+}
 
 // ---------- 入网令牌（运行时生成的临时 bootstrap 命令） ----------
 

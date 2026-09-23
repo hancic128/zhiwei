@@ -2,6 +2,7 @@ import * as React from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { LogoMark } from "@/components/ui/logo";
 import { setToken } from "@/api";
 
 /** 规范 07-3.2 居中卡片布局 + 3.3 登录页通用规则（无导航栏，保留悬浮面板）。 */
@@ -41,11 +42,8 @@ export function LoginPage({ onSubmit }: { onSubmit: () => void }) {
   return (
     <div className="min-h-screen flex items-center justify-center px-4 bg-surface-2 dark:bg-ink-900">
       <div className="w-full max-w-sm">
-        <div className="w-12 h-12 rounded-lg bg-brand-600 mx-auto mb-8 flex items-center justify-center">
-          <span className="text-white text-lg font-semibold">
-            {t("app.name").slice(0, 1)}
-          </span>
-        </div>
+        {/* 与标签页图标 / 侧边栏同一枚标识：无底板、无边框，颜色随主题色 */}
+        <LogoMark className="w-12 h-12 mx-auto mb-8 text-brand-600 dark:text-brand-500" />
 
         <div className="bg-surface-0 dark:bg-ink-700 rounded-xl shadow-lg border border-surface-3 dark:border-ink-700 p-8">
           <h1 className="text-base font-semibold text-ink-900 dark:text-surface-0 text-center">

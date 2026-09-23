@@ -607,6 +607,59 @@ pub async fn create_probe_handler(
     }
 }
 
+/// `POST /v1/probes/test` —— 保存前的一次性测试，只跑不落库。
+///
+/// 从控制台（monitor）发起，用来快速确认目标可达、期望配置写得对；
+/// 真正的探针仍然由执行节点周期性运行。结论里的 reason/args 交给前端做文案。
+pub async fn test_probe_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !read_auth_ok(&state, &headers).await {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "authentication required (Bearer admin token)",
+        );
+    }
+    #[derive(serde::Deserialize)]
+    struct Body {
+        kind: String,
+        #[serde(default)]
+        target_json: String,
+        #[serde(default)]
+        expect_json: String,
+        #[serde(default = "default_timeout")]
+        timeout_ms: i64,
+    }
+    fn default_timeout() -> i64 {
+        5000
+    }
+
+    let b: Body = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(e) => return err(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
+    };
+    // 与创建探针用同一套校验：测出来的东西必须和存下去的一致
+    let (target_json, expect_json) =
+        match normalize_probe_parts(&b.kind, &b.target_json, &b.expect_json) {
+            Ok(v) => v,
+            Err(e) => return err(StatusCode::BAD_REQUEST, e),
+        };
+    let target: serde_json::Value = serde_json::from_str(&target_json).unwrap_or_default();
+    let expect: serde_json::Value = serde_json::from_str(&expect_json).unwrap_or_default();
+
+    let out = crate::probe_test::run(&b.kind, &target, &expect, b.timeout_ms).await;
+    Json(serde_json::json!({
+        "state": out.state,
+        "latency_ms": out.latency_ms,
+        "status_code": out.status_code,
+        "reason": out.reason,
+        "args": out.args,
+    }))
+    .into_response()
+}
+
 pub async fn patch_probe_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,

@@ -32,6 +32,7 @@ mod ca;
 mod certs_api;
 mod config;
 mod mcp;
+mod probe_test;
 mod probes_api;
 mod retention;
 mod routes;

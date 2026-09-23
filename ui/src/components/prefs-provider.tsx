@@ -11,6 +11,7 @@ import {
   type Theme,
 } from "@/lib/prefs";
 import { switchLocale } from "@/i18n";
+import { applyFavicon } from "@/lib/favicon";
 
 interface PrefsValue {
   theme: Theme;
@@ -51,6 +52,11 @@ export function PrefsProvider({ children }: { children: React.ReactNode }) {
   React.useEffect(() => {
     document.documentElement.classList.toggle("dark", colorScheme === "dark");
   }, [colorScheme]);
+
+  // 标签页图标与侧边栏 logo 同色：主题色或明暗一变就重画一遍
+  React.useEffect(() => {
+    applyFavicon();
+  }, [theme, colorScheme]);
 
   React.useEffect(() => {
     document.documentElement.lang = locale;
