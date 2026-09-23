@@ -34,3 +34,6 @@ ui/dist/
 # 本地预览 / 走查产物
 .playwright-mcp/
 shots/
+
+# 本机 agent 记忆（session 之间攒的笔记，不该进仓库）
+.openhands/
