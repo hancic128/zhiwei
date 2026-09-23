@@ -108,14 +108,9 @@ export function FloatingControls() {
 
   return (
     <>
-      <div
-        className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-3"
-        onMouseEnter={() => {
-          cancelClose();
-          setOpen(true);
-        }}
-        onMouseLeave={scheduleClose}
-      >
+      {/* 悬停展开只认「按钮本体」：handler 挂在外层容器上时，收起状态那列
+          透明区域也算悬停区，鼠标扫过主按钮**上方**就会展开。 */}
+      <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-3">
         {/* 子按钮组：展开后自上而下 导航 → 帮助 → 主题色 → 明暗 → 语言 → 退出 */}
         <div
           className={cn(
@@ -124,6 +119,8 @@ export function FloatingControls() {
               ? "opacity-100"
               : "opacity-0 pointer-events-none",
           )}
+          onMouseEnter={cancelClose}
+          onMouseLeave={scheduleClose}
         >
           {/* 页面导航 */}
           <Popover.Root>
@@ -254,6 +251,11 @@ export function FloatingControls() {
           type="button"
           aria-label={t("action.quickControls")}
           aria-expanded={open}
+          onMouseEnter={() => {
+            cancelClose();
+            setOpen(true);
+          }}
+          onMouseLeave={scheduleClose}
           onClick={() => setOpen((v) => !v)}
           className={cn(
             "w-12 h-12 rounded-full bg-brand-600 text-white shadow-lg",

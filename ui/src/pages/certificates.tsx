@@ -438,7 +438,7 @@ export function Certificates() {
                         <div className="flex items-center justify-end gap-1">
                           <Tooltip content={t("certs.sources.test")}>
                             <Button
-                              variant="secondary"
+                              variant="ghost"
                               size="icon"
                               aria-label={t("certs.sources.test")}
                               onClick={() => setTesting(s)}
@@ -448,7 +448,7 @@ export function Certificates() {
                           </Tooltip>
                           <Tooltip content={t("action.edit")}>
                             <Button
-                              variant="secondary"
+                              variant="ghost"
                               size="icon"
                               aria-label={t("action.edit")}
                               onClick={() => {
@@ -461,10 +461,11 @@ export function Certificates() {
                           </Tooltip>
                           <Tooltip content={t("action.delete")}>
                             <Button
-                              variant="secondary"
+                              variant="ghost"
                               size="icon"
                               aria-label={t("action.delete")}
                               onClick={() => setRemoving(s)}
+                              className="text-rose-600 dark:text-rose-400"
                             >
                               <Trash2 className="w-4 h-4" aria-hidden="true" />
                             </Button>
@@ -541,7 +542,7 @@ export function Certificates() {
             />
             <Tooltip content={t("action.refresh")}>
               <Button
-                variant="secondary"
+                variant="ghost"
                 size="icon"
                 aria-label={t("action.refresh")}
                 onClick={invalidate}
@@ -690,7 +691,7 @@ export function Certificates() {
                       <Td align="right">
                         <Tooltip content={t("certs.detail.title")}>
                           <Button
-                            variant="secondary"
+                            variant="ghost"
                             size="icon"
                             aria-label={t("certs.detail.title")}
                             onClick={(e) => {

@@ -2,7 +2,8 @@
   "app": {
     "name": "ZhiWei",
     "console": "Console",
-    "slogan": "Know the subtle, await the right moment"
+    "slogan": "Know the subtle, await the right moment",
+    "title": "ZhiWei · Console"
   },
   "nav": {
     "todo": "To-do",

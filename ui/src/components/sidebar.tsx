@@ -16,6 +16,7 @@ import { useQuery } from "@tanstack/react-query";
 import { todoApi } from "@/api";
 import { cn } from "@/lib/utils";
 import { loadSidebarCollapsed, persist } from "@/lib/prefs";
+import { LogoMark } from "@/components/ui/logo";
 import { Tooltip } from "@/components/ui/tooltip";
 
 interface NavItem {
@@ -118,9 +119,7 @@ export function Sidebar({
           collapsed ? "justify-center px-3" : "px-6",
         )}
       >
-        <span className="w-7 h-7 shrink-0 rounded-lg bg-brand-600 text-white flex items-center justify-center text-sm font-semibold">
-          {t("app.name").slice(0, 1)}
-        </span>
+        <LogoMark className="w-7 h-7 text-brand-600 dark:text-brand-500" />
         {!collapsed && (
           <span className="ml-3 text-sm font-semibold text-ink-900 dark:text-surface-0 truncate">
             {t("app.name")}

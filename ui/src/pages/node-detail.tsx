@@ -363,7 +363,7 @@ export function NodeDetail() {
           </Tooltip>
           <Tooltip content={t("detail.basicTitle")}>
             <Button
-              variant={showBasic ? "primary" : "secondary"}
+              variant={showBasic ? "primary" : "ghost"}
               size="icon"
               aria-label={t("detail.basicTitle")}
               aria-pressed={showBasic}
@@ -374,7 +374,7 @@ export function NodeDetail() {
           </Tooltip>
           <Tooltip content={t("nodeMeta.edit")}>
             <Button
-              variant="secondary"
+              variant="ghost"
               size="icon"
               aria-label={t("nodeMeta.edit")}
               disabled={!node}
@@ -385,7 +385,7 @@ export function NodeDetail() {
           </Tooltip>
           <Tooltip content={t("detail.restart")}>
             <Button
-              variant="secondary"
+              variant="ghost"
               size="icon"
               aria-label={t("detail.restart")}
               onClick={() => setPending({ kind: "restart" })}
@@ -395,10 +395,11 @@ export function NodeDetail() {
           </Tooltip>
           <Tooltip content={t("detail.shutdown")}>
             <Button
-              variant="danger"
+              variant="ghost"
               size="icon"
               aria-label={t("detail.shutdown")}
               onClick={() => setPending({ kind: "shutdown" })}
+              className="text-rose-600 dark:text-rose-400"
             >
               <Power className="w-4 h-4" aria-hidden="true" />
             </Button>
@@ -620,7 +621,7 @@ export function NodeDetail() {
                   />
                   <Tooltip content={t("action.refresh")}>
                     <Button
-                      variant="secondary"
+                      variant="ghost"
                       size="icon"
                       aria-label={t("action.refresh")}
                       disabled={procsQ.isFetching}
@@ -707,7 +708,7 @@ export function NodeDetail() {
                             <div className="flex items-center justify-end gap-1">
                               <Tooltip content={t("detail.killTerm")}>
                                 <Button
-                                  variant="secondary"
+                                  variant="ghost"
                                   size="icon"
                                   aria-label={t("detail.killTerm")}
                                   onClick={() =>
@@ -719,12 +720,13 @@ export function NodeDetail() {
                               </Tooltip>
                               <Tooltip content={t("detail.killKill")}>
                                 <Button
-                                  variant="danger"
+                                  variant="ghost"
                                   size="icon"
                                   aria-label={t("detail.killKill")}
                                   onClick={() =>
                                     setPending({ kind: "kill", pid: p.pid, name: p.name })
                                   }
+                                  className="text-rose-600 dark:text-rose-400"
                                 >
                                   <Skull className="w-4 h-4" aria-hidden="true" />
                                 </Button>
@@ -819,7 +821,7 @@ export function NodeDetail() {
                 </span>
                 <Tooltip content={t("detail.copyKey")}>
                   <Button
-                    variant="secondary"
+                    variant="ghost"
                     size="icon"
                     aria-label={t("detail.copyKey")}
                     onClick={() => void copy(node.public_key)}
@@ -991,7 +993,7 @@ function TrendCard({
             )}
             <Tooltip content={t("action.refresh")}>
               <Button
-                variant="secondary"
+                variant="ghost"
                 size="icon"
                 aria-label={t("action.refresh")}
                 disabled={refreshing ?? query.isFetching}

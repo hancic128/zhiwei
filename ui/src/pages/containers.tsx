@@ -314,7 +314,7 @@ export function Containers() {
             />
             <Tooltip content={t("containers.fileLogs")}>
               <Button
-                variant="secondary"
+                variant="ghost"
                 size="icon"
                 aria-label={t("containers.fileLogs")}
                 onClick={() => setFileLogsOpen(true)}
@@ -324,7 +324,7 @@ export function Containers() {
             </Tooltip>
             <Tooltip content={t("action.refresh")}>
               <Button
-                variant="secondary"
+                variant="ghost"
                 size="icon"
                 aria-label={t("action.refresh")}
                 onClick={() => void qc.invalidateQueries({ queryKey: ["containers"] })}

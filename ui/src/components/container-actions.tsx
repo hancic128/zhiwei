@@ -152,7 +152,7 @@ export function ContainerActions({
         {!running && (
           <Tooltip content={t("containers.actStart")}>
             <Button
-              variant="secondary"
+              variant="ghost"
               size="icon"
               aria-label={t("containers.actStart")}
               onClick={() => void runAction("container_start")}
@@ -165,7 +165,7 @@ export function ContainerActions({
           <>
             <Tooltip content={t("containers.actStop")}>
               <Button
-                variant="secondary"
+                variant="ghost"
                 size="icon"
                 aria-label={t("containers.actStop")}
                 onClick={() => setPending("stop")}
@@ -175,7 +175,7 @@ export function ContainerActions({
             </Tooltip>
             <Tooltip content={t("containers.actRestart")}>
               <Button
-                variant="secondary"
+                variant="ghost"
                 size="icon"
                 aria-label={t("containers.actRestart")}
                 onClick={() => setPending("restart")}
@@ -190,18 +190,19 @@ export function ContainerActions({
         {!running && (
           <Tooltip content={t("containers.actRemove")}>
             <Button
-              variant="secondary"
+              variant="ghost"
               size="icon"
               aria-label={t("containers.actRemove")}
               onClick={() => setPending("remove")}
+              className="text-rose-600 dark:text-rose-400"
             >
-              <Trash2 className="w-4 h-4 text-rose-600" aria-hidden="true" />
+              <Trash2 className="w-4 h-4" aria-hidden="true" />
             </Button>
           </Tooltip>
         )}
         <Tooltip content={t("containers.actLogs")}>
           <Button
-            variant="secondary"
+            variant="ghost"
             size="icon"
             aria-label={t("containers.actLogs")}
             onClick={() => void showLogs()}

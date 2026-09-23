@@ -125,7 +125,7 @@ function CaSection() {
                   {caQ.data.fingerprint_sha256}
                 </code>
                 <Button
-                  variant="secondary"
+                  variant="ghost"
                   size="icon"
                   aria-label={t("settings.caCopy")}
                   onClick={() => {
@@ -306,14 +306,13 @@ function ChannelsSection() {
                           {t(c.enabled ? "alerts.enabled" : "alerts.disabled")}
                         </button>
                         <Button
-                          variant="secondary"
+                          variant="ghost"
                           size="icon"
                           aria-label={t("alerts.delete")}
                           onClick={() => setConfirmDelete(c)}
+                          className="text-rose-600 dark:text-rose-400"
                         >
-                          <Trash2
-                            className="w-4 h-4 text-rose-600"
-                            aria-hidden="true"
+                          <Trash2 className="w-4 h-4" aria-hidden="true"
                           />
                         </Button>
                       </div>
@@ -624,7 +623,7 @@ function AiSection() {
                 {base}
               </code>
               <Button
-                variant="secondary"
+                variant="ghost"
                 size="icon"
                 aria-label={t("settings.aiCopyBase")}
                 onClick={() => copy(base, "settings.aiBaseCopied")}
@@ -640,7 +639,7 @@ function AiSection() {
                 {revealed ? token : masked}
               </code>
               <Button
-                variant="secondary"
+                variant="ghost"
                 size="icon"
                 aria-label={t(revealed ? "settings.aiHide" : "settings.aiReveal")}
                 onClick={() => setRevealed((v) => !v)}
@@ -652,7 +651,7 @@ function AiSection() {
                 )}
               </Button>
               <Button
-                variant="secondary"
+                variant="ghost"
                 size="icon"
                 aria-label={t("settings.aiCopyToken")}
                 onClick={() => copy(token, "settings.aiTokenCopied")}
@@ -815,14 +814,13 @@ function EnrollTokensSection() {
                     </Td>
                     <Td align="right">
                       <Button
-                        variant="secondary"
+                        variant="ghost"
                         size="icon"
                         aria-label={t("alerts.delete")}
                         onClick={() => setPendingRevoke(tok)}
+                        className="text-rose-600 dark:text-rose-400"
                       >
-                        <Trash2
-                          className="w-4 h-4 text-rose-600"
-                          aria-hidden="true"
+                        <Trash2 className="w-4 h-4" aria-hidden="true"
                         />
                       </Button>
                     </Td>
@@ -989,15 +987,14 @@ function AiTokensSection() {
                     </Td>
                     <Td align="right">
                       <Button
-                        variant="secondary"
+                        variant="ghost"
                         size="icon"
                         aria-label={t("alerts.delete")}
                         onClick={() => setPendingRevoke(tok)}
+                        className="text-rose-600 dark:text-rose-400"
                         disabled={tok.revoked_at_unix_nano != null}
                       >
-                        <Trash2
-                          className="w-4 h-4 text-rose-600"
-                          aria-hidden="true"
+                        <Trash2 className="w-4 h-4" aria-hidden="true"
                         />
                       </Button>
                     </Td>

@@ -112,12 +112,13 @@ export function RulesTable({
                     {t(r.enabled ? "alerts.enabled" : "alerts.disabled")}
                   </button>
                   <Button
-                    variant="secondary"
+                    variant="ghost"
                     size="icon"
                     aria-label={t("alerts.delete")}
                     onClick={() => onDelete(r)}
+                    className="text-rose-600 dark:text-rose-400"
                   >
-                    <Trash2 className="w-4 h-4 text-rose-600" aria-hidden="true" />
+                    <Trash2 className="w-4 h-4" aria-hidden="true" />
                   </Button>
                 </div>
               </Td>

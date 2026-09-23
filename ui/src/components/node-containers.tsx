@@ -130,7 +130,7 @@ export function NodeContainers({
         action={
           <Tooltip content={t("action.refresh")}>
             <Button
-              variant="secondary"
+              variant="ghost"
               size="icon"
               aria-label={t("action.refresh")}
               disabled={qy.isFetching}
