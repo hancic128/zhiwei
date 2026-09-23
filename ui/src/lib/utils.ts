@@ -100,6 +100,10 @@ export function maskSecret(value: string | undefined | null): string {
 export function friendlyError(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err ?? "");
   if (/401|unauthor|未授权/i.test(raw)) return "err.unauthorized";
+  // 后端自己写好的中文提示（如「ops-server 不可用：连不上 …」）比这里的任何
+  // 映射都准，先原样放行：传输层那条正则连「超时 / 连接」都会命中，
+  // 一旦被吃掉，用户就只剩一句没用的「网络错误」。
+  if (/[\u4e00-\u9fa5]/.test(raw)) return raw;
   if (/network|fetch|ECONN|timeout|超时/i.test(raw)) return "err.network";
   // 裸状态码（http_502 / 502 Bad Gateway）不直接给用户看
   if (/^http_\d+$/.test(raw) || /^\d{3}\b/.test(raw)) {

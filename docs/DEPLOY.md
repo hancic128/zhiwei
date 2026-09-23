@@ -56,6 +56,11 @@ docker run -d --name zhiwei-monitor \
   zhiwei-monitor
 ```
 
+镜像的 entrypoint 会在同一个容器里先起 `zhiwei-ops`（控制平面）再起 monitor
+（数据平面），两者共用数据目录。想只跑数据平面就加 `ZHIWEI_OPS_DISABLE=1`；
+等公钥的超时可用 `ZHIWEI_OPS_WAIT=<秒>` 调（默认 5）。细节见本文
+[「命令通道：ops-server 与 monitor 同容器运行」](#命令通道ops-server-与-monitor-同容器运行)。
+
 ### 架构（Apple Silicon / ARM 机器必读）
 
 若在 Apple Silicon（M 系列）上开发，`docker build` 默认产出 **linux/arm64** 镜像，
@@ -306,32 +311,53 @@ Northflank 只在**端口被标为 Public** 时才分配域名，格式是
 > InvalidContentType`——边缘发的 `GET /healthz` 被容器当成 ClientHello 解析。
 > 修法就是打开明文 HTTP（`ZHIWEI_PLAIN_HTTP=1`）。
 
-### 命令通道在托管平台上的当前状态
+### 命令通道：ops-server 与 monitor 同容器运行
 
-托管平台的部署只起了一个 Web Service（`zhiwei-monitor`），**没有起 ops-server**。
-后果是 monitor 启动时读不到 `data/ops.pub`（或读到的内容为空），enroll 时不下发
-`ops_public_key`，节点 `state.ops_public_key` 一直是 `None` —— 节点日志里会出现：
+平台部署只有**一个 Web Service**（`zhiwei-monitor`），没有第二个进程的位置；
+而控制台里「看容器日志 / 文件日志、杀进程、重启主机、续签证书」都要经
+ops-server 签名才能下发。镜像的 entrypoint 因此在同一个容器里先起
+`zhiwei-ops`、再 `exec zhiwei-monitor`（见 `scripts/docker-entrypoint.sh`），
+两个进程共用 `ZHIWEI_DATA_DIR`：
+
+- 两个进程仍然**各自独立**：签名私钥只在 `zhiwei-ops` 进程内（`ops.key`，0600），
+  monitor 只读 `ops.pub` 下发给节点做 TOFU；monitor 被攻陷也伪造不了命令。
+- entrypoint 会等 `ops.pub` 落盘（默认最多 5 秒，`ZHIWEI_OPS_WAIT` 可调）再放行
+  monitor；即使等超时也照常启动 monitor——它在缓存为空时会按需再读一次盘，
+  新节点 enroll 时照样能拿到公钥。
+- `ZHIWEI_OPS_DISABLE=1` 可以退回「只跑数据平面」（telemetry + 探活 + 证书扫描）：
+  此时命令通道不可用，控制台里的日志 / 杀进程 / 重启会明确报
+  「命令通道未启用」。
+
+> **挂持久卷**：`ops.key` 和 `monitor.db` 都在数据目录里。不挂卷时每次冷启动
+> 都会换一个签名密钥，已经入网、pin 了旧公钥的节点会拒绝新命令（表观是
+> 「命令一直没回执」）。数据目录挂上卷，`ops.key` 就稳定了。
+>
+> Northflank / Render 上若用**面板里的 Command 字段**覆盖了 entrypoint，
+> ops-server 就不会被拉起——那种情况下要么删掉覆盖，要么自己把
+> `zhiwei-ops &` 加进自定义启动命令里。
+
+### 只跑数据平面（不启 ops-server）
+
+`ZHIWEI_OPS_DISABLE=1` 时 entrypoint 不拉 ops-server，monitor 读不到
+`ops.pub`，enroll 时不下发 `ops_public_key`，节点 `state.ops_public_key`
+一直是 `None` —— 节点日志里会出现：
 
 ```
 WARN zhiwei_node::control: 未持有 ops 公钥，控制通道不会拉取命令（安全侧默认拒绝）
 ```
 
 这是**设计上的安全默认**：拿不到 ops 公钥 = 没法验签命令 = 不可能执行任何
-来自 monitor 的「杀进程 / 重启主机 / 停容器」之类的写操作。如果你暂时不需要
-远程命令通道（只想要 telemetry + 探活 + 证书扫描），这条 WARN 可以安全忽略。
+来自 monitor 的「杀进程 / 重启主机 / 停容器」之类的写操作。只想要
+telemetry + 探活 + 证书扫描时，这条 WARN 可以安全忽略；此时控制台里的
+日志 / 杀进程 / 重启会报「ops-server 不可用：连不上 …：该地址上没有进程在监听」。
 
-要打开命令通道，需要把 ops-server 也部署起来，且让 monitor 能读到它的 `ops.pub`。
-两条路线：
+### 历史备选：拆成两个 Service（未采用）
 
-1. **同 Service 多进程**：在 `Dockerfile` 里同时启动 monitor 和 ops-server，让
-   ops-server 把 `ops.pub` 写到 `ZHIWEI_DATA_DIR` 共享卷（最简单）
-2. **拆 Service**：起一个独立的 `zhiwei-ops` Service，让它的 `ops.pub` 通过
-   共享卷 / 外部存储（KMS / Secrets Manager / S3）传给 monitor —— 这种部署形态
-   暂未实装，需要先在 `crates/ops-server/Cargo.toml` 加 Dockerfile + 在部署定义里
-   加第二个 service。
-
-无论哪条路线，节点侧不需要改 —— 一旦 monitor 把 `ops_public_key` 填进
-`EnrollResponse`，节点就会自动写到 `state_dir/ops.pub` 并开始拉命令。
+起一个独立的 `zhiwei-ops` Service，让它的 `ops.pub` 通过共享卷 / 外部存储
+（KMS / Secrets Manager / S3）传给 monitor。这条路**未实装**，而且要注意
+`zhiwei-ops` 的 `/exec` 默认只绑回环、没有自己的鉴权——跨机暴露等于把
+「签发任意命令」的能力交给网络对端。要拆 Service 得先给 ops 加一层
+调用方鉴权，别只是把监听地址改成 `0.0.0.0`。
 
 ### 节点侧的 CA pinning（踩过一次的坑）
 

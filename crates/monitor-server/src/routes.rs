@@ -535,6 +535,22 @@ pub(crate) fn enroll_ca_pem(ca_cert_pem: &str, tls_terminated_locally: bool) -> 
     }
 }
 
+/// ops 签名公钥（base64），随 enroll 下发给节点做 TOFU。
+///
+/// monitor 启动时就缓存了一份，但**缓存为空时会再读一次盘**：同容器多进程部署时
+/// ops-server 可能比 monitor 起得晚（见 `scripts/docker-entrypoint.sh`），
+/// 早启动的 monitor 不该因此永久不给新节点下发公钥——那种节点会一直
+/// 「未持有 ops 公钥」，命令通道静默失效。
+pub(crate) async fn ops_public_key(state: &AppState) -> String {
+    if !state.ops_public_key.is_empty() {
+        return state.ops_public_key.clone();
+    }
+    tokio::fs::read_to_string(state.data_dir.join("ops.pub"))
+        .await
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
 async fn enroll_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -628,7 +644,7 @@ async fn enroll_handler(
         node_id: node_id.to_string(),
         ca_cert_pem: enroll_ca_pem(&state.ca_cert_pem, state.tls_terminated_locally),
         monitor_cert_pem: String::new(), // nodes pin via the CA bundle returned above
-        ops_public_key: state.ops_public_key.clone(),
+        ops_public_key: ops_public_key(&state).await,
     };
     let mut buf = Vec::new();
     if let Err(e) = prost::Message::encode(&resp, &mut buf) {
@@ -2698,8 +2714,13 @@ pub(crate) async fn ops_sign(
         tokio::net::TcpStream::connect((host, port)),
     )
     .await
-    .map_err(|_| OpsSignError::Unavailable("连接超时".into()))?
-    .map_err(|e| OpsSignError::Unavailable(format!("连接失败：{e}")))?;
+    .map_err(|_| {
+        OpsSignError::Unavailable(format!(
+            "连不上 {endpoint}：3 秒内没有响应。自建部署请确认 zhiwei-ops 在跑；\
+             容器 / 托管平台部署请用镜像自带的 entrypoint。"
+        ))
+    })?
+    .map_err(|e| OpsSignError::Unavailable(ops_connect_error_hint(&e, endpoint)))?;
 
     let io = hyper_util::rt::TokioIo::new(stream);
     let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
@@ -3075,6 +3096,97 @@ struct CreateEnrollTokenBody {
     label: Option<String>,
 }
 
+/// 连不上 ops-server 时给控制台看的文案。
+///
+/// 「没起 ops-server」是部署形态问题，原始 OS 报错（`Connection refused
+/// (os error 111)`）对使用者毫无帮助，所以这里直接把「该做什么」写进文案；
+/// 调用方已经加了「ops-server 不可用：」前缀，这里别再复述。
+fn ops_connect_error_hint(e: &std::io::Error, endpoint: &str) -> String {
+    if is_connection_refused(e) {
+        format!(
+            "连不上 {endpoint}（{e}）：该地址上没有进程在监听。\
+             自建部署请启动 zhiwei-ops；容器 / 托管平台部署请用镜像自带的 \
+             entrypoint（它会在同一容器里一并拉起 zhiwei-ops）。"
+        )
+    } else {
+        format!(
+            "连不上 {endpoint}（{e}）：自建部署请确认 zhiwei-ops 在跑；\
+             容器 / 托管平台部署请用镜像自带的 entrypoint。"
+        )
+    }
+}
+
+/// 判断「对端没有监听」。
+///
+/// 光看 `ErrorKind` 不够：解析主机名 / 经过中间层时 kind 会掉成
+/// `Uncategorized`，只剩文案里的 "Connection refused" 还认得出来——线上
+/// 报回来的正是 `连接失败：Connection refused (os error 111)` 这种形态，
+/// 只认 kind 就漏成了没头没尾的原始报错。errno 111 是 Linux 的 ECONNREFUSED。
+fn is_connection_refused(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::ConnectionRefused
+        || e.raw_os_error() == Some(111)
+        || e.to_string().contains("Connection refused")
+}
+
+/// 生成入网命令时该用 http 还是 https。
+///
+/// 1) `X-Forwarded-Proto` 最权威——只有边缘知道对外那一段是明文还是 TLS；
+/// 2) 没有它：本进程自己终结 TLS → https；
+/// 3) 本进程是明文 HTTP，且 Host 是回环 / 内网地址 → http。
+///
+/// 第 3 条专治「内网 IP + 明文」的自建部署：以前一律猜 https，控制台给出的
+/// 命令是 `https://10.0.0.5:8443/install-node.sh`，照着执行必然连不上。
+/// 公网域名不在第 3 条范围内（仍猜 https）：托管平台边缘几乎总会给
+/// `X-Forwarded-Proto`，而它没给的时候「对外是 https」的可能性更大。
+fn enroll_url_scheme(headers: &HeaderMap, tls_terminated_locally: bool) -> &'static str {
+    if let Some(v) = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+    {
+        // 可能是 "https, http" 这种列表，取第一个
+        let first = v.split(',').next().unwrap_or("").trim();
+        if !first.is_empty() {
+            return match first {
+                "http" => "http",
+                "https" => "https",
+                _ => "https",
+            };
+        }
+    }
+    if tls_terminated_locally {
+        return "https";
+    }
+    let host = headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if host_is_local(host) {
+        "http"
+    } else {
+        "https"
+    }
+}
+
+/// Host 头（可带端口）是不是回环 / 内网 / mDNS 地址。
+fn host_is_local(host: &str) -> bool {
+    let bare = match host.rsplit_once(':') {
+        // IPv6 字面量形如 [::1]:8443，去掉端口后还要剥掉方括号
+        Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) => h,
+        _ => host,
+    };
+    let bare = bare.trim_start_matches('[').trim_end_matches(']');
+    if bare.eq_ignore_ascii_case("localhost") || bare.ends_with(".local") {
+        return true;
+    }
+    match bare.parse::<std::net::IpAddr>() {
+        Ok(ip) => match ip {
+            std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+            std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unique_local(),
+        },
+        Err(_) => false,
+    }
+}
+
 /// `POST /v1/enroll-tokens` —— 创建一个临时入网令牌，返回完整 enroll 命令。
 async fn create_enroll_token_handler(
     State(state): State<AppState>,
@@ -3344,5 +3456,37 @@ mod enroll_token_tests {
         }
         // 没有 Host 头也不该崩
         assert_eq!(enroll_url_scheme(&HeaderMap::new(), false), "https");
+    }
+
+    #[test]
+    fn connection_refused_detected_even_without_the_right_kind() {
+        // 正常路径：errno 111 → kind 也是 ConnectionRefused
+        let e = std::io::Error::from_raw_os_error(111);
+        assert_eq!(e.kind(), std::io::ErrorKind::ConnectionRefused);
+        assert!(is_connection_refused(&e));
+
+        // 线上真实形态：kind 掉成 Other，只剩文案能认
+        let e = std::io::Error::other("Connection refused (os error 111)");
+        assert!(is_connection_refused(&e));
+        let e = std::io::Error::new(std::io::ErrorKind::NotConnected, "Connection refused");
+        assert!(is_connection_refused(&e));
+
+        // 其它网络错误不要误判成「没起 ops-server」
+        for msg in ["connection reset by peer", "timed out", "dns error"] {
+            assert!(!is_connection_refused(&std::io::Error::other(msg)));
+        }
+    }
+
+    #[test]
+    fn ops_connect_hint_always_says_what_to_do() {
+        let refused = std::io::Error::other("Connection refused (os error 111)");
+        let hint = ops_connect_error_hint(&refused, "http://127.0.0.1:8444");
+        assert!(hint.contains("该地址上没有进程在监听"), "{hint}");
+        assert!(hint.contains("entrypoint"), "{hint}");
+
+        let other = std::io::Error::other("connection reset by peer");
+        let hint = ops_connect_error_hint(&other, "http://127.0.0.1:8444");
+        assert!(hint.contains("zhiwei-ops"), "{hint}");
+        assert!(hint.contains("entrypoint"), "{hint}");
     }
 }

@@ -41,7 +41,7 @@ RUN mkdir -p crates/common/src crates/proto/src crates/storage/src \
     && : > crates/common/src/lib.rs \
     && : > crates/proto/src/lib.rs \
     && : > crates/storage/src/lib.rs \
-    && cargo build --release --bin zhiwei-monitor \
+    && cargo build --release --bin zhiwei-monitor --bin zhiwei-ops \
     && rm -rf crates/*/src
 
 # Layer 2: real sources.
@@ -54,7 +54,7 @@ COPY crates/ crates/
 # assets/ 留副本），构建阶段必须能读到仓库根的这份。
 COPY scripts/install-node.sh scripts/install-node.sh
 RUN find crates -name '*.rs' -exec touch {} + \
-    && cargo build --release --bin zhiwei-monitor
+    && cargo build --release --bin zhiwei-monitor --bin zhiwei-ops
 
 # ---- ui ----
 # 控制台（React SPA）单独用一个 node 阶段构建：monitor 在 ZHIWEI_UI_DIR
@@ -74,9 +74,14 @@ FROM debian:bookworm-slim AS runtime
 # service account with the `useradd` that Debian's essential `passwd` provides.
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /src/target/release/zhiwei-monitor /usr/local/bin/zhiwei-monitor
+# 控制平面：和 monitor 同一个容器、同一个数据目录，双进程各持其职
+# （签名私钥只在 zhiwei-ops 内）。见 scripts/docker-entrypoint.sh。
+COPY --from=builder /src/target/release/zhiwei-ops /usr/local/bin/zhiwei-ops
+COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY --from=ui-builder /ui/dist /app/ui/dist
 
-RUN useradd --create-home --home-dir /var/lib/zhiwei --uid 10001 \
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
+    && useradd --create-home --home-dir /var/lib/zhiwei --uid 10001 \
       --shell /usr/sbin/nologin zhiwei \
     && mkdir -p /var/lib/zhiwei \
     && chown -R zhiwei:zhiwei /var/lib/zhiwei
@@ -95,4 +100,6 @@ USER zhiwei
 # Render / Railway 不读这行，但这行决定了 Northflank 上开箱能不能访问。
 EXPOSE 8443
 
-ENTRYPOINT ["/usr/local/bin/zhiwei-monitor"]
+# entrypoint 负责先拉起 zhiwei-ops 再 exec zhiwei-monitor（同容器双进程）；
+# 传进来的参数会原样转给 monitor，`docker run … --plain-http` 依旧可用。
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
