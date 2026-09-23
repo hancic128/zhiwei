@@ -95,6 +95,13 @@ interface RawNode {
   host_info?: HostInfo;
   latest?: NodeLatest | null;
   public_key?: string;
+  command_channel?: RawCommandChannel;
+}
+
+/** 命令通道状态：节点在线却不来拉命令时，启停 / 日志都是死按钮 */
+interface RawCommandChannel {
+  state: string;
+  last_poll_age_ms: number | null;
 }
 
 /** 最新一帧里的关键指标（列表页 CPU / 内存 / 磁盘列直接用，免去每节点一次请求） */
@@ -124,6 +131,18 @@ export interface NodeView {
   latest: NodeLatest | null;
   /** 节点身份公钥（base64）；界面上按「密文」掩码展示 */
   public_key: string;
+  /** 命令通道状态；老 monitor 不带这个字段，按 unknown 处理 */
+  command_channel: CommandChannel;
+}
+
+/**
+ * 命令通道状态（见后端 crates/monitor-server/src/control_channel.rs）。
+ * `down` = 节点在线却一直不来拉命令，它的启停 / 重启 / 日志都执行不了。
+ */
+export interface CommandChannel {
+  state: "ok" | "down" | "unknown";
+  /** 最近一次拉命令距今多少毫秒；本进程从没见过它拉就是 null */
+  last_poll_age_ms: number | null;
 }
 
 export interface IndexBody {
@@ -183,6 +202,11 @@ export const api = {
       host_info: n.host_info ?? {},
       latest: n.latest ?? null,
       public_key: n.public_key ?? "",
+      command_channel: {
+        // 老 monitor 不返回这个字段：当作「说不好」，别误报故障
+        state: (n.command_channel?.state as CommandChannel["state"]) ?? "unknown",
+        last_poll_age_ms: n.command_channel?.last_poll_age_ms ?? null,
+      },
     }));
   },
 
