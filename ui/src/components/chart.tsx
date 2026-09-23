@@ -113,12 +113,23 @@ export function LineChart({
     const gridColor = dark ? "#27272a" : "#f4f4f5";
     const labelColor = "#71717a";
 
+    // 多系列才有图例；图例占一行，所以网格顶部要给它留出空间，
+    // 否则图例与曲线互相遮盖。`type: "scroll"` 让节点多时图例横向滚动，
+    // 而不是折行堆叠糊成一片。
+    const hasLegend = series.length > 1;
+
     chart.setOption(
       {
         animationDuration: 200,
         color: palette,
         // 规范 7.9.3：左 8 右 16 上下 8
-        grid: { left: 8, right: 16, top: 16, bottom: 8, containLabel: true },
+        grid: {
+          left: 8,
+          right: 16,
+          top: hasLegend ? 34 : 16,
+          bottom: 8,
+          containLabel: true,
+        },
         tooltip: {
           trigger: "axis",
           backgroundColor: "#18181b",
@@ -134,17 +145,21 @@ export function LineChart({
               ? valueFormatter(Number(v))
               : `${Number(v).toFixed(decimals)}${unit}`,
         },
-        legend:
-          series.length > 1
-            ? {
-                top: 0,
-                right: 0,
-                icon: "roundRect",
-                itemWidth: 12,
-                itemHeight: 12,
-                textStyle: { color: labelColor, fontSize: 12 },
-              }
-            : undefined,
+        legend: hasLegend
+          ? {
+              // scroll：图例排成一行、超出宽度就左右翻页——节点多时不会
+              // 折行叠在曲线上，也不会互相遮盖。
+              type: "scroll",
+              top: 0,
+              left: 0,
+              right: 0,
+              icon: "roundRect",
+              itemWidth: 12,
+              itemHeight: 12,
+              itemGap: 16,
+              textStyle: { color: labelColor, fontSize: 12 },
+            }
+          : undefined,
         xAxis: {
           type: "time",
           boundaryGap: false,

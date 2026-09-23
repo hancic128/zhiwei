@@ -77,7 +77,7 @@ export function Nodes() {
   const [sortDir, setSortDir] = React.useState<SortDir>("desc");
   const [page, setPage] = React.useState(1);
   const [pageSize, setPageSize] = React.useState(10);
-  const [range, setRange] = React.useState<TimeRange>(() => presetRange("1h"));
+  const [range, setRange] = React.useState<TimeRange>(() => presetRange("3h"));
   /** 生成入网命令的弹窗——空状态点击按钮触发 */
   const [enrollDialogOpen, setEnrollDialogOpen] = React.useState(false);
   /** 「接入帮助」：自动生成并复制命令，点开即用 */
@@ -233,7 +233,9 @@ export function Nodes() {
       </div>
     )}
 
-    {nodes.length > 0 && <NodesTrend range={range} onRange={setRange} />}
+    {nodes.length > 0 && (
+      <NodesTrend nodes={nodes} range={range} onRange={setRange} />
+    )}
 
     <TableShell>
       <TableToolbar>
@@ -283,7 +285,7 @@ export function Nodes() {
             ))}
           </Select>
           <SearchInput
-            className="w-full sm:w-56"
+            className="w-full sm:w-72 lg:w-80"
             placeholder={t("nodes.searchPlaceholder")}
             value={q}
             onChange={(e) => setQ(e.target.value)}
@@ -523,11 +525,15 @@ export function Nodes() {
  * 全部节点趋势：**一条线一个节点**，带图例。
  *
  * 抽稀与长窗口切源都由后端统一处理（`/v1/series/nodes`），这里只管画。
+ * 系列名用别名（没设别名回落主机名），并且以**已入网节点**为准建系列——
+ * 后端只返回有数据的节点，直接照抄会让离线 / 刚入网的机器整条从图例里消失。
  */
 function NodesTrend({
+  nodes,
   range,
   onRange,
 }: {
+  nodes: NodeView[];
   range: TimeRange;
   onRange: (r: TimeRange) => void;
 }) {
@@ -542,10 +548,21 @@ function NodesTrend({
       ),
   });
 
-  const series = (q.data?.nodes ?? []).map((n) => ({
-    name: n.hostname,
-    data: n.points.map((p) => [p.t, p.v] as [number, number]),
-  }));
+  const series = React.useMemo(() => {
+    const pointsByNode = new Map(
+      (q.data?.nodes ?? []).map((n) => [n.node_id, n.points]),
+    );
+    return nodes.map((n) => ({
+      name: nodeLabel(n),
+      data: (pointsByNode.get(n.id) ?? []).map(
+        (p) => [p.t, p.v] as [number, number],
+      ),
+    }));
+  }, [nodes, q.data]);
+
+  // 全都没数据时才给空状态：图例本身要一直显示（它承担「图上有哪些节点」），
+  // 但一条点都没有时，一张空网格不如明说「这段时间没有数据」。
+  const hasAnyPoint = series.some((s) => s.data.length > 0);
 
   return (
     <Card>
@@ -580,8 +597,11 @@ function NodesTrend({
             onRetry={() => void q.refetch()}
             retrying={q.isFetching}
           />
-        ) : series.length === 0 ? (
-          <EmptyState title={t("detail.chartEmpty")} />
+        ) : !hasAnyPoint ? (
+          <EmptyState
+            title={t("detail.chartEmpty")}
+            description={t("detail.chartEmptyHint")}
+          />
         ) : (
           <LineChart
             series={series}

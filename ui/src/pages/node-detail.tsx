@@ -1,7 +1,7 @@
 import * as React from "react";
 import { Link, useParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import {
   ArrowDown,
   ArrowLeft,
@@ -117,12 +117,17 @@ export function NodeDetail() {
     queryKey: ["nodes"],
     queryFn: api.nodes,
     refetchInterval: refreshMs,
+    // 刷新 / 切换范围时保留上一帧：整页内容不该因为一次后台请求而清空
+    placeholderData: keepPreviousData,
   });
   const node = nodesQ.data?.find((n) => n.id === id);
 
   /**
    * 所有曲线都常驻拉取（含磁盘绝对值），切换「占比 / 绝对值」只是换个渲染，
    * 不触发任何请求——切换图表不该刷别的图表。
+   *
+   * `placeholderData` 让窗口滚动（预设范围按刷新频率重算，queryKey 随之变化）
+   * 或手动刷新时继续用上一段数据渲染，而不是闪成骨架屏。
    */
   const seriesQ = (metric: string, rate = false) =>
     useQuery({
@@ -131,6 +136,7 @@ export function NodeDetail() {
         api.series(id, metric, { from: win.from, to: win.to, limit: 600, rate }),
       enabled: !!id,
       refetchInterval: refreshMs,
+      placeholderData: keepPreviousData,
     });
   const cpuQ = seriesQ(METRICS.cpu);
   const memQ = seriesQ(METRICS.memUsed);
@@ -144,6 +150,7 @@ export function NodeDetail() {
     queryFn: () => containersApi.processes(id),
     enabled: !!id,
     refetchInterval: refreshMs,
+    placeholderData: keepPreviousData,
   });
 
   const cores = node?.host_info.cpu_cores ?? 0;

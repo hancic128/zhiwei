@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { X } from "lucide-react";
 import { api, type NodeView } from "@/api";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -13,8 +14,8 @@ import { friendlyError } from "@/lib/utils";
 const MAX_ALIAS_CHARS = 10;
 const MAX_TAGS = 10;
 const MAX_TAG_CHARS = 24;
-/** 输入标签时的分隔符：英文逗号 / 中文逗号 / 顿号 */
-const TAG_SEPARATORS = /[,，、]/;
+/** 输入标签时的分隔符：空白 / 英文逗号 / 中文逗号 / 顿号 */
+const TAG_SEPARATORS = /[\s,，、]/;
 
 /**
  * 编辑节点的别名与标签。
@@ -184,7 +185,7 @@ export function NodeMetaDialog({
   );
 }
 
-/** 标签列表（只读展示），列表页 / 详情页共用 */
+/** 标签列表（只读展示），列表页 / 详情页共用；统一用徽章样式 */
 export function TagList({
   tags,
   className,
@@ -196,12 +197,9 @@ export function TagList({
   return (
     <span className={className}>
       {tags.map((tag) => (
-        <span
-          key={tag}
-          className="inline-flex items-center rounded bg-surface-2 dark:bg-ink-700 px-1.5 py-0.5 text-[11px] text-ink-500 dark:text-surface-4"
-        >
+        <Badge key={tag} tone="neutral">
           {tag}
-        </span>
+        </Badge>
       ))}
     </span>
   );

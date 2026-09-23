@@ -17,10 +17,11 @@ import { useTranslation } from "react-i18next";
 
 import { ApiError, api, clearAdminToken, getToken } from "@/api";
 import { cn } from "@/lib/utils";
+import { APP_VERSION } from "@/lib/version";
 import { Sidebar, useSidebarCollapsed } from "@/components/sidebar";
 import { FloatingControls } from "@/components/floating-controls";
 import { HelpPage } from "@/pages/help";
-import { DotBadge } from "@/components/ui/badge";
+import { Badge, DotBadge } from "@/components/ui/badge";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { LoginPage } from "@/pages/login";
 import { Certificates } from "@/pages/certificates";
@@ -119,6 +120,8 @@ function Console({ onLogout }: { onLogout: () => void }) {
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
+            {/* 版本徽章：写死的构建常量，不随在线状态波动 */}
+            <Badge tone="neutral">{APP_VERSION}</Badge>
             <DotBadge
               tone={indexQ.isSuccess ? "success" : "danger"}
               pulse={indexQ.isSuccess}

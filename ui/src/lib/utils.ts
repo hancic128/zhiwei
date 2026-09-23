@@ -73,7 +73,12 @@ export function formatRate(bytesPerSecond: number): string {
   return `${formatBytes(bytesPerSecond)}/s`;
 }
 
-/** 运行时长：天 + 小时（不足一天给「小时 + 分」），禁止裸显秒数 */
+/**
+ * 运行时长：天 + 小时（不足一天给「小时 + 分」），禁止裸显秒数。
+ *
+ * 两个档位都必须走语言包：以前不足一天那档硬编码成 `21h 36m`，于是同一个
+ * 页面上「100 天 9 小时」和「21h 36m」两种语言并排出现（切到英文时反过来）。
+ */
 export function formatUptime(
   seconds: number | undefined | null,
   t: (k: string, o?: Record<string, unknown>) => string,
@@ -83,7 +88,7 @@ export function formatUptime(
   const h = Math.floor((seconds % 86400) / 3600);
   if (d > 0) return t("detail.uptimeFormat", { d, h });
   const m = Math.floor((seconds % 3600) / 60);
-  return `${h}h ${m}m`;
+  return t("detail.uptimeFormatHours", { h, m });
 }
 
 /**
