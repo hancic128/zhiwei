@@ -224,6 +224,13 @@ export const api = {
       },
     ),
 
+  /** 节点永久删除：连带所有 telemetry / inventory / 探针结果 / 告警一起清掉。
+   * 成功后端返回 204，本接口只关心有没有抛错。 */
+  deleteNode: (id: string) =>
+    request<void>(`/v1/nodes/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+
   telemetry: (id: string, limit = 20) =>
     request<NodeTelemetryView>(
       `/v1/nodes/${encodeURIComponent(id)}/telemetry?limit=${limit}`,

@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useQuery, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import {
@@ -17,6 +17,7 @@ import {
   RefreshCw,
   RotateCw,
   Skull,
+  Trash2,
   Zap,
 } from "lucide-react";
 import {
@@ -80,11 +81,13 @@ type PendingAction =
   | { kind: "term"; pid: number; name: string }
   | { kind: "kill"; pid: number; name: string }
   | { kind: "restart" }
-  | { kind: "shutdown" };
+  | { kind: "shutdown" }
+  | { kind: "deleteNode" };
 
 export function NodeDetail() {
   const { t } = useTranslation();
   const { id = "" } = useParams();
+  const navigate = useNavigate();
   const { timezone } = usePrefs();
   const qc = useQueryClient();
   const toast = useToast();
@@ -308,6 +311,30 @@ export function NodeDetail() {
     }
   };
 
+  /** 节点删除：成功后跳回列表 + 让 nodes 列表缓存失效。失败只弹 toast。
+   *  404 当作「被别人删了」，也按成功处理，跳回列表避免用户对着一具尸体困惑。 */
+  const runDeleteNode = async () => {
+    setBusy(true);
+    try {
+      await api.deleteNode(id);
+      toast.push("success", t("detail.deleteNodeOk"));
+      void qc.invalidateQueries({ queryKey: ["nodes"] });
+      navigate("/nodes");
+    } catch (e) {
+      const err = e as { status?: number; message?: string };
+      if (err?.status === 404) {
+        toast.push("success", t("detail.deleteNodeOk"));
+        void qc.invalidateQueries({ queryKey: ["nodes"] });
+        navigate("/nodes");
+        return;
+      }
+      toast.push("error", t(friendlyError(e)));
+    } finally {
+      setBusy(false);
+      setPending(null);
+    }
+  };
+
   const copy = async (text: string) => {
     const ok = await copyText(text);
     toast.push(ok ? "success" : "error", t(ok ? "detail.copied" : "toast.copyFailed"));
@@ -341,6 +368,13 @@ export function NodeDetail() {
           title: t("detail.shutdown"),
           message: t("detail.shutdownMessage", { name: node?.hostname ?? id }),
           label: t("detail.shutdown"),
+          danger: true,
+        };
+      case "deleteNode":
+        return {
+          title: t("detail.deleteNode"),
+          message: t("detail.deleteNodeMessage", { name: node?.hostname ?? id }),
+          label: t("detail.deleteNodeConfirm"),
           danger: true,
         };
       default:
@@ -428,6 +462,17 @@ export function NodeDetail() {
             className="text-rose-600 dark:text-rose-400"
           >
             <Power className="w-4 h-4" aria-hidden="true" />
+          </Button>
+        </Tooltip>
+        <Tooltip content={t("detail.deleteNode")}>
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label={t("detail.deleteNode")}
+            onClick={() => setPending({ kind: "deleteNode" })}
+            className="text-rose-600 dark:text-rose-400"
+          >
+            <Trash2 className="w-4 h-4" aria-hidden="true" />
           </Button>
         </Tooltip>
       </div>
@@ -896,7 +941,8 @@ export function NodeDetail() {
             else if (pending.kind === "kill")
               void runCommand("kill_process", { pid: pending.pid, signal: "kill" });
             else if (pending.kind === "restart") void runCommand("restart_host", {});
-            else void runCommand("shutdown_host", {});
+            else if (pending.kind === "shutdown") void runCommand("shutdown_host", {});
+            else void runDeleteNode();
           }}
         />
       )}
