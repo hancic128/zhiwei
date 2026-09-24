@@ -716,6 +716,105 @@ fn probe_alert_rule(name: &str, severity: &str) -> AlertRule {
     }
 }
 
+/// 节点离线告警的载体——和 `probe_alert_rule` 一样，纯用来喂 notify() 的
+/// 「严重度过滤 + 命名」。`metric = host.online` 是为了和探针/证书告警的
+/// 指标列做明显区分（前缀 `host.`），不会和真实指标冲突。
+fn node_offline_alert_rule(severity: &str) -> AlertRule {
+    AlertRule {
+        id: 0,
+        name: "节点离线".to_string(),
+        metric: "host.online".to_string(),
+        op: "eq".to_string(),
+        threshold: 0.0,
+        duration_seconds: 0,
+        severity: severity.to_string(),
+        enabled: true,
+        created_at_unix_nano: 0,
+        updated_at_unix_nano: 0,
+    }
+}
+
+/// 节点上下线事件——一次性把一组节点的状态变化喂进来。
+///
+/// 设计上由后台任务每 ~30 秒扫一遍所有节点算出来（见 `spawn_node_liveness_watcher`）：
+/// 上次在线 / 现在仍在线 = 跳过；上次在线 / 现在离线 = 开告警 + 通知；
+/// 上次离线 / 现在在线 = 关告警 + 通知恢复；其它（从未上报 / 刚入网观察期） = 跳过。
+///
+/// 一个节点同时只允许一条未解决的离线告警（`open_node_offline_alert` 内部
+/// 检查 `open_node_offline_alert_id`），所以重复触发不会堆历史。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Liveness {
+    Online,
+    Offline,
+}
+
+/// 评估一组节点的最新 liveness，把翻转写入 alerts 表并按渠道投递通知。
+///
+/// 调用方要做的只是「拿 `last_seen` 算 online / offline」，别的事
+/// （去重、关旧告警、严重度、通知文案）都收在这里。
+pub async fn on_node_liveness_change(state: &AppState, transitions: &[(String, String, Liveness)]) {
+    for (node_id, hostname, status) in transitions {
+        let now = Timestamp::now().unix_nano();
+        let repo = state.storage.alerts();
+        match status {
+            Liveness::Offline => {
+                // 已经在开着就只刷 message / started_at，不再通知（避免每 30 秒刷屏）
+                let existing = match repo.open_node_offline_alert_id(node_id).await {
+                    Ok(id) => id,
+                    Err(e) => {
+                        warn!(%node_id, error = %e, "查询节点离线告警失败");
+                        continue;
+                    }
+                };
+                let message = format!("节点 {hostname} 已失联");
+                let severity = "critical";
+                let alert_id = match repo
+                    .open_node_offline_alert(node_id, hostname, severity, &message, now)
+                    .await
+                {
+                    Ok(id) => id,
+                    Err(e) => {
+                        warn!(%node_id, error = %e, "开节点离线告警失败");
+                        continue;
+                    }
+                };
+                if existing.is_none() {
+                    // 只在「第一次开」时通知，避免 30s 周期里反复推
+                    let rule = node_offline_alert_rule(severity);
+                    let facts = AlertFacts {
+                        node: hostname.clone(),
+                        firing: true,
+                        fields: vec![("节点", hostname.clone()), ("状态", "离线".to_string())],
+                        detail: message,
+                    };
+                    notify(state, &rule, &facts, now).await;
+                    info!(alert_id, %node_id, "节点离线告警触发");
+                }
+            }
+            Liveness::Online => {
+                let resolved = match repo.resolve_node_offline_alerts(node_id, now).await {
+                    Ok(n) => n,
+                    Err(e) => {
+                        warn!(%node_id, error = %e, "关节点离线告警失败");
+                        continue;
+                    }
+                };
+                if resolved > 0 {
+                    let rule = node_offline_alert_rule("warning");
+                    let facts = AlertFacts {
+                        node: hostname.clone(),
+                        firing: false,
+                        fields: vec![("节点", hostname.clone()), ("状态", "已恢复".to_string())],
+                        detail: format!("节点 {hostname} 恢复上报"),
+                    };
+                    notify(state, &rule, &facts, now).await;
+                    info!(count = resolved, %node_id, "节点离线告警已关闭");
+                }
+            }
+        }
+    }
+}
+
 /// 证书到期评估：每次节点交回快照后跑一遍。
 ///
 /// 判定口径：
@@ -1096,6 +1195,102 @@ pub async fn seed_default_rules(state: &AppState) -> anyhow::Result<()> {
     }
     info!("已写入 {} 条默认告警规则", defaults.len());
     Ok(())
+}
+
+/// 「多久没上报」算离线——和前端 `livenessOf()` 同口径（见 ui/src/lib/utils.ts）。
+/// 60s 是「刚刚还活着」；再往后由各告警规则各自的 duration 决定要不要告警。
+pub const NODE_OFFLINE_AFTER_MS: i64 = 60_000;
+
+/// 后台 liveness 巡检的周期。
+///
+/// 30s 是平衡值：太短会疯狂查库；太长会让「离线 → 告警」这条链感觉拖沓
+/// （最坏情况要等一个完整周期才能进待办）。考虑到 telemetry 默认 10s 一次，
+/// 30s 周期能保证任何节点失联后 ≤ 90s 内（= 60s 阈值 + 30s 巡检周期）出告警。
+const LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(30);
+
+/// 起一个常驻任务，周期扫所有节点的 `last_seen_unix_nano`，把翻转写到 alerts 表。
+///
+/// 第一次跑不通知——冷启动那几十秒里每个节点都「没拉过命令 / 没上报」，并不是故障；
+/// 只在「曾经记过某个状态、这次变了」时才动 alerts / 通知。
+///
+/// 设计上不动 telemetry / 探针：节点持续在线时「最近一次」会一直更新，但本任务只看
+/// 是否过了 60s 阈值，对冷启动 / 单次抖动都友好。
+pub fn spawn_node_liveness_watcher(state: AppState) {
+    tokio::spawn(async move {
+        // 启动 5s 后再跑第一轮：给 telemetry 上报留时间，避免误报冷启动期。
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        // 用 HashMap 记「上一轮认为它处于什么状态」，没记过的就跳过——
+        // 「从未上报」的节点（刚入网 / 离线很久）不该一上来就报离线。
+        let mut last_seen_state: std::collections::HashMap<String, Liveness> =
+            std::collections::HashMap::new();
+
+        loop {
+            let transitions = match compute_transitions(&state, &last_seen_state).await {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!(error = %e, "节点 liveness 巡检失败");
+                    tokio::time::sleep(LIVENESS_POLL_INTERVAL).await;
+                    continue;
+                }
+            };
+            // 先把状态记下来再通知，避免 notify 期间又来一遍相同的转换
+            for (id, _, liveness) in &transitions {
+                last_seen_state.insert(id.clone(), *liveness);
+            }
+            if !transitions.is_empty() {
+                on_node_liveness_change(&state, &transitions).await;
+            }
+            tokio::time::sleep(LIVENESS_POLL_INTERVAL).await;
+        }
+    });
+}
+
+/// 算一次「状态翻转」：每个节点拿最新 last_seen 算 Liveness，
+/// 再和上一轮的对照——只有「上一轮 + 这一轮都能确定」才报。
+async fn compute_transitions(
+    state: &AppState,
+    last_seen_state: &std::collections::HashMap<String, Liveness>,
+) -> anyhow::Result<Vec<(String, String, Liveness)>> {
+    let nodes = state.storage.nodes().list_all().await?;
+    let now_ms = Timestamp::now().unix_nano() / 1_000_000;
+    let mut out = Vec::new();
+    for n in nodes {
+        // 还没上报过的节点（刚入网 / 离线很久）跳过本轮：再给一个周期的窗口。
+        let Some(last_seen) = n.last_seen_unix_nano else {
+            continue;
+        };
+        let age_ms = now_ms - last_seen / 1_000_000;
+        let current = if age_ms < NODE_OFFLINE_AFTER_MS {
+            Liveness::Online
+        } else {
+            Liveness::Offline
+        };
+        // 仅在「上一轮记过、且与现在不同」时才报，避免冷启动噪声。
+        match last_seen_state.get(&n.id) {
+            Some(prev) if *prev != current => {
+                let hostname = if !n.alias.is_empty() {
+                    n.alias.clone()
+                } else {
+                    n.hostname.clone()
+                };
+                out.push((n.id, hostname, current));
+            }
+            None => {
+                // 第一轮：记一下当前状态但不通知——避免重启后报一屏「刚启动就恢复」。
+                // 但 offline 的节点**第一轮就报**：monitor 长时间重启之后就该接住。
+                if current == Liveness::Offline {
+                    let hostname = if !n.alias.is_empty() {
+                        n.alias.clone()
+                    } else {
+                        n.hostname.clone()
+                    };
+                    out.push((n.id, hostname, current));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

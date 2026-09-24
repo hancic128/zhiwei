@@ -496,6 +496,11 @@ async fn main() -> anyhow::Result<()> {
     // 失败会开一条平台告警进待办，见 retention.rs 与设计文档 §8。
     retention::spawn(state.clone());
 
+    // 节点离线告警：每 30s 巡检一次节点的 last_seen_unix_nano，
+    // 超过 60s 没上报即视为离线，写一条 source='node_offline' 的真告警 + 通知。
+    // 见 alerts::spawn_node_liveness_watcher。
+    alerts::spawn_node_liveness_watcher(state.clone());
+
     let app = routes::router(state);
 
     // Serve the console when a build is present; everything not under /v1 or

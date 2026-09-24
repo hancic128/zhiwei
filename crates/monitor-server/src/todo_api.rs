@@ -17,9 +17,9 @@ use serde::Serialize;
 use crate::routes::{err, read_auth_ok};
 use crate::state::AppState;
 
-/// 节点多久没上报算离线。
-/// 与节点列表 / 概览卡片的判定保持一致（同一套「在线」定义，避免产品里出现两个阈值）。
-pub const NODE_OFFLINE_AFTER_MS: i64 = 60_000;
+/// 节点多久没上报算离线——和后台 liveness 巡检共用同一个常量（见 alerts::NODE_OFFLINE_AFTER_MS），
+/// 避免出现「控制台显示在线 / 后台已经在告警」这种不一致。
+pub(crate) use crate::alerts::NODE_OFFLINE_AFTER_MS;
 
 /// 已恢复的留痕条数——留痕是建立信任用的，不需要长
 const RECOVERED_LIMIT: i64 = 5;
@@ -232,30 +232,8 @@ pub async fn todo_handler(State(state): State<AppState>, headers: HeaderMap) -> 
         }
     }
 
-    // 节点离线：只报「曾经上报过、现在联系不上」的节点。
-    // 从未上报过的（刚入网还没跑起来）不算——那会变成噪音。
-    for n in &nodes {
-        let Some(last_seen) = n.last_seen_unix_nano else {
-            continue;
-        };
-        if is_online(Some(last_seen)) {
-            continue;
-        }
-        now_items.push(TodoItem {
-            id: format!("node-offline-{}", n.id),
-            source: "node_offline".into(),
-            severity: "critical".into(),
-            title: display_of(&n.id, &n.hostname),
-            // 文案由前端按 hint_key + 时间拼，保证中英双语
-            detail: String::new(),
-            hint_key: "nodeOffline",
-            node_id: n.id.clone(),
-            hostname: display_of(&n.id, &n.hostname),
-            since_unix_nano: last_seen,
-            resolved_at_unix_nano: None,
-            link: format!("/nodes/{}", n.id),
-        });
-    }
+    // 节点离线：来自 alerts 表的真实告警（见 `alerts::on_node_liveness_change`）。
+    // 这里不再合成——真实告警的好处是：能走通知渠道、能按 ID 静默、历史在「已恢复」里能看到。
 
     // 急的先看；同档里拖得久的排前面
     let sort_items = |items: &mut Vec<TodoItem>| {

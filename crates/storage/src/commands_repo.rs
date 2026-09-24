@@ -183,6 +183,18 @@ impl CommandsRepo {
         .await?;
         Ok(rows.into_iter().map(map_row).collect())
     }
+
+    /// 统计某节点未发出的命令数（state = pending）。
+    /// 删除节点前用来判断「还在路上」的命令——这些一旦删了就再也没人回执。
+    pub async fn count_pending_for_node(&self, node_id: &str) -> anyhow::Result<i64> {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM commands WHERE node_id = ? AND state = 'pending'",
+        )
+        .bind(node_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(n)
+    }
 }
 
 fn map_row(r: Row) -> CommandRow {

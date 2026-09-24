@@ -544,6 +544,85 @@ impl AlertsRepo {
         Ok(r.rows_affected())
     }
 
+    // ---------- 节点离线告警（source = node_offline） ----------
+
+    /// 这台节点当前是否还有未解决的离线告警？
+    /// 用 `source_ref = node_id` 做幂等键——一个节点同时只允许有一条离线告警开着。
+    pub async fn open_node_offline_alert_id(&self, node_id: &str) -> anyhow::Result<Option<i64>> {
+        let id: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM alerts
+             WHERE source = 'node_offline' AND source_ref = ? AND resolved_at_unix_nano IS NULL
+             ORDER BY id DESC LIMIT 1",
+        )
+        .bind(node_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(id)
+    }
+
+    /// 开一条「节点离线」告警。
+    ///
+    /// 同一节点已有未解决的告警就**复用**并刷新 message / started_at_unix_nano，
+    /// 不堆新行——和 `open_platform_alert` 同一套思路，节点反复进出时别把历史刷成
+    /// 噪音。返回写入 / 命中行的 id。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_node_offline_alert(
+        &self,
+        node_id: &str,
+        hostname: &str,
+        severity: &str,
+        message: &str,
+        now: i64,
+    ) -> anyhow::Result<i64> {
+        if let Some(existing) = self.open_node_offline_alert_id(node_id).await? {
+            sqlx::query(
+                "UPDATE alerts
+                 SET message = ?, severity = ?, started_at_unix_nano = ?
+                 WHERE id = ?",
+            )
+            .bind(message)
+            .bind(severity)
+            .bind(now)
+            .bind(existing)
+            .execute(&self.pool)
+            .await?;
+            return Ok(existing);
+        }
+        let r = sqlx::query(
+            r#"INSERT INTO alerts
+               (rule_id, rule_name, node_id, hostname, severity, metric, op, threshold, value,
+                message, started_at_unix_nano, source, source_ref)
+               VALUES (0, '节点离线', ?, ?, ?, 'host.online', 'eq', 0, 0, ?, ?, 'node_offline', ?)"#,
+        )
+        .bind(node_id)
+        .bind(hostname)
+        .bind(severity)
+        .bind(message)
+        .bind(now)
+        .bind(node_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(r.last_insert_rowid())
+    }
+
+    /// 关闭某节点所有未解决的离线告警（节点恢复上报时调用）。
+    /// 返回关闭条数。
+    pub async fn resolve_node_offline_alerts(
+        &self,
+        node_id: &str,
+        now: i64,
+    ) -> anyhow::Result<u64> {
+        let r = sqlx::query(
+            "UPDATE alerts SET resolved_at_unix_nano = ?
+             WHERE source = 'node_offline' AND source_ref = ? AND resolved_at_unix_nano IS NULL",
+        )
+        .bind(now)
+        .bind(node_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(r.rows_affected())
+    }
+
     pub async fn resolve_alert(&self, alert_id: i64, now: i64) -> anyhow::Result<()> {
         sqlx::query("UPDATE alerts SET resolved_at_unix_nano = ? WHERE id = ? AND resolved_at_unix_nano IS NULL")
             .bind(now)
@@ -649,5 +728,136 @@ impl AlertsRepo {
                 min_severity: r.9,
             })
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod node_offline_tests {
+    //! 离线告警专用测试。共用 alerts_repo 的字段（rule_id、source、source_ref），
+    //! 但**不是**指标规则告警——所以 `rule_id = 0`，从 `rule_id NOT NULL` 约束里借
+    //! 一个永远不被引用的特殊值。
+    //!
+    //! 关键不变量：
+    //!   1. 同一节点同时只能有一条未解决的离线告警（重复 open 不堆行）；
+    //!   2. resolve 只关 `source = node_offline` 的行，不会误伤其它告警；
+    //!   3. resolve 后再次 open 会落新行（而不是去更新老行）。
+
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn fresh_pool() -> sqlx::SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::migrations::run(&pool).await.expect("migrations");
+        pool
+    }
+
+    #[tokio::test]
+    async fn open_node_offline_alert_is_idempotent_per_node() {
+        let pool = fresh_pool().await;
+        let repo = AlertsRepo::new(pool.clone());
+
+        let id_a = repo
+            .open_node_offline_alert("n1", "host-a", "critical", "first", 100)
+            .await
+            .unwrap();
+        let id_b = repo
+            .open_node_offline_alert("n1", "host-a", "critical", "second", 200)
+            .await
+            .unwrap();
+        assert_eq!(
+            id_a, id_b,
+            "同节点第二次 open 应该命中既有告警而不是新插一行"
+        );
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM alerts WHERE source = 'node_offline'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 1, "alerts 表里只能有一条未解决的离线告警");
+
+        // 再开第二个节点的离线告警：应该新插一行
+        let id_c = repo
+            .open_node_offline_alert("n2", "host-b", "critical", "third", 300)
+            .await
+            .unwrap();
+        assert_ne!(id_a, id_c);
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM alerts WHERE source = 'node_offline'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn resolve_node_offline_alerts_only_touches_node_offline_source() {
+        let pool = fresh_pool().await;
+        let repo = AlertsRepo::new(pool.clone());
+
+        // 一条 node_offline + 一条 probe（人工插的行）共存，resolve 不该误伤 probe
+        let off = repo
+            .open_node_offline_alert("n1", "host-a", "critical", "offline", 100)
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"INSERT INTO alerts
+               (rule_id, rule_name, node_id, hostname, severity, metric, op, threshold, value,
+                message, started_at_unix_nano, source, source_ref)
+               VALUES (0, 'probe probe', 'n1', 'host-a', 'warning', 'probe.state', 'eq', 0, 1,
+                       'should not be touched', 100, 'probe', 'probe-1')"#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let n = repo.resolve_node_offline_alerts("n1", 500).await.unwrap();
+        assert_eq!(n, 1, "应该只关掉一条 node_offline");
+
+        // node_offline 那条应已关闭
+        let resolved: Option<i64> =
+            sqlx::query_scalar("SELECT resolved_at_unix_nano FROM alerts WHERE id = ?")
+                .bind(off)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(resolved, Some(500));
+
+        // probe 那条应保持未解决
+        let probe_resolved: Option<i64> =
+            sqlx::query_scalar("SELECT resolved_at_unix_nano FROM alerts WHERE source = 'probe'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(probe_resolved, None);
+    }
+
+    #[tokio::test]
+    async fn reopen_after_resolve_inserts_new_row() {
+        let pool = fresh_pool().await;
+        let repo = AlertsRepo::new(pool.clone());
+
+        let first = repo
+            .open_node_offline_alert("n1", "host-a", "critical", "first", 100)
+            .await
+            .unwrap();
+        repo.resolve_node_offline_alerts("n1", 200).await.unwrap();
+        let second = repo
+            .open_node_offline_alert("n1", "host-a", "critical", "second", 300)
+            .await
+            .unwrap();
+        assert_ne!(first, second, "resolve 后再 open 应该插新行而不是复活旧的");
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM alerts WHERE source = 'node_offline'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        // 一条已恢复 + 一条新开 = 两条
+        assert_eq!(count, 2);
     }
 }

@@ -35,7 +35,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/enroll", post(enroll_handler))
         .route("/v1/telemetry", post(telemetry_handler))
         .route("/v1/nodes", get(list_nodes_handler))
-        .route("/v1/nodes/:id", axum::routing::patch(patch_node_handler))
+        .route(
+            "/v1/nodes/:id",
+            axum::routing::patch(patch_node_handler).delete(delete_node_handler),
+        )
         .route("/v1/nodes/:id/telemetry", get(node_telemetry_handler))
         .route("/v1/nodes/:id/series", get(node_series_handler))
         .route("/v1/nodes/:id/containers", get(node_containers_handler))
@@ -1009,6 +1012,83 @@ async fn patch_node_handler(
     }
 
     Json(serde_json::json!({ "id": node.as_str(), "alias": alias, "tags": tags })).into_response()
+}
+
+/// `DELETE /v1/nodes/:id`：节点永久删除。
+///
+/// 范围：节点行 + 引用它的所有数据（telemetry / inventory / 探针结果 / 证书来源 /
+/// 命令历史 / 告警 / 告警状态机）一律清掉。`audit_log` 保留——它是事后追责用的，
+/// 不能因为节点没了就连带洗白。
+///
+/// 前置条件：没有「pending」状态的命令——这些命令还在路上、节点删了就再也没人
+/// 回执，会留下悬空记录。要么先 cancel，要么等节点拉完。
+///
+/// 探针绑定：把节点 id 从所有 `probes.node_ids_json` 数组里摘掉。探针若没剩
+/// 任何节点绑定，会回落到「任意节点」（空数组 = 全节点）——这是写入路径的语义，
+/// 不是新引入的副作用。
+async fn delete_node_handler(
+    State(state): State<AppState>,
+    axum::extract::Path(node_id): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !read_auth_ok(&state, &headers).await {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "authentication required (Bearer admin token)",
+        );
+    }
+    let trimmed = node_id.trim().to_string();
+    if trimmed.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "node id 不能为空");
+    }
+    let id = zhiwei_common::NodeId::from_string(trimmed.clone());
+    let exists = match state.storage.nodes().find_by_id(&id).await {
+        Ok(Some(_)) => true,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "节点未入网"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("lookup: {e}")),
+    };
+
+    let pending = match state
+        .storage
+        .commands()
+        .count_pending_for_node(&trimmed)
+        .await
+    {
+        Ok(n) => n,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("count commands: {e}"),
+            )
+        }
+    };
+    if pending > 0 {
+        return err(
+            StatusCode::CONFLICT,
+            format!(
+                "该节点还有 {pending} 条未发出的命令（pending 状态），请先取消或等节点拉完再删"
+            ),
+        );
+    }
+
+    match state.storage.nodes().delete(&trimmed).await {
+        Ok(true) => {
+            info!(node_id = %trimmed, "节点已删除");
+            (StatusCode::NO_CONTENT).into_response()
+        }
+        Ok(false) => {
+            // exists=true 走到这里不该发生，但兜底：节点在并发里被别人删了
+            if exists {
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "delete 报告 0 行影响，但节点刚刚还在",
+                )
+            } else {
+                err(StatusCode::NOT_FOUND, "节点未入网")
+            }
+        }
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("delete: {e}")),
+    }
 }
 
 #[derive(Serialize)]
