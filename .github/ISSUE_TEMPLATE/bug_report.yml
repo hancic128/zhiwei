@@ -1,0 +1,103 @@
+name: Bug Report
+description: Create a report to help us improve
+title: "[Bug] "
+labels: ["bug"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Bug Report
+
+        Thanks for taking the time to fill out this bug report!
+
+  - type: checkboxes
+    id: prerequisites
+    attributes:
+      label: Prerequisites
+      description: Please confirm the following before submitting
+      options:
+        - label: I have searched the existing issues and verified this is not a duplicate
+          required: true
+        - label: I am using the latest version
+          required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - zhiwei-monitor (server)
+        - zhiwei-node (agent)
+        - zhiwei-ops (operations server)
+        - Web UI
+        - API
+        - Documentation
+        - Install script
+        - Docker image
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        - OS (e.g., Ubuntu 22.04, macOS 14, Debian 12)
+        - Deployment method (self-hosted, Docker, Render, etc.)
+        - Version (run `zhiwei-node --version` or check Docker image tag)
+        - Architecture (x86_64, aarch64, armv7)
+      placeholder: |
+        OS: Ubuntu 22.04 LTS
+        Deployment: Docker on VPS
+        Version: v0.1.0
+        Architecture: x86_64
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe what you expected to happen and what actually happened
+      placeholder: |
+        Expected: Nodes should appear in the dashboard after enrollment
+        Actual: Dashboard shows "No nodes enrolled" even after running enrollment
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: How can we reproduce the issue?
+      placeholder: |
+        1. Run `./scripts/dev.sh start`
+        2. Wait for node enrollment
+        3. Navigate to /nodes
+        4. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Log Output
+      description: Paste relevant log output. **Do not** redact error messages - they help diagnose the issue.
+      placeholder: |
+        ```
+        [zhiwei-monitor] 2024-01-01 12:00:00 ERROR enrollment failed: ...
+        ```
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context
+      description: Any other context about the problem (screenshots, config files, etc.)
+      placeholder: |
+        Add any other context about the problem here.
+    validations:
+      required: false

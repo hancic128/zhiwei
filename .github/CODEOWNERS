@@ -1,0 +1,34 @@
+# Code Owners
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository-about-code-owners
+
+# Default owner (fallback)
+* @hancic128
+
+# Crates
+/crates/*              @hancic128
+/crates/common         @hancic128
+/crates/proto          @hancic128
+/crates/storage        @hancic128
+/crates/monitor-server @hancic128
+/crates/node-agent     @hancic128
+/crates/ops-server     @hancic128
+
+# Frontend
+/ui                    @hancic128
+
+# Scripts & DevOps
+/scripts               @hancic128
+/.github/workflows      @hancic128
+Dockerfile             @hancic128
+
+# Documentation
+/docs                  @hancic128
+README.md              @hancic128
+CONTRIBUTING.md        @hancic128
+SECURITY.md            @hancic128
+CODE_OF_CONDUCT.md     @hancic128
+
+# Configuration
+/rustfmt.toml          @hancic128
+/clippy.toml            @hancic128
+/deny.toml              @hancic128

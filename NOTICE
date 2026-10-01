@@ -1,0 +1,51 @@
+# Notice
+#
+# This project includes the following third-party dependencies
+# under their respective licenses:
+#
+# - Rust standard library: Apache-2.0 OR MIT
+# - tokio: MIT
+# - serde: MIT OR Apache-2.0
+# - sqlx: Apache-2.0 OR MIT OR SQLITE
+# - axum: MIT
+# - ring: MIT OR ISC OR OpenSSL
+# - uuid: Apache-2.0 OR MIT
+# - chrono: MIT OR Apache-2.0
+# - tower: MIT
+# - tower-http: MIT
+# - rustls: Apache-2.0 OR ISC OR MIT
+# - pki-types: MIT OR Apache-2.0
+# - ed25519-dalek: BSD-2-Clause
+# - rand: MIT OR Apache-2.0
+# - async-trait: MIT OR Apache-2.0
+# - bytes: MIT OR Apache-2.0
+# - base64: MIT OR Apache-2.0
+# - sha2: MIT OR Apache-2.0
+# - hmac: MIT OR Apache-2.0
+# - hex: MIT OR Apache-2.0
+# - http-body-util: MIT OR Apache-2.0
+# - hyper: MIT OR Apache-2.0
+# - axum-core: MIT
+# - mime: MIT OR Apache-2.0
+# - thiserror: MIT OR Apache-2.0
+# - anyhow: MIT OR Apache-2.0
+# - tracing: MIT
+# - tracing-subscriber: MIT
+# - tokio-rustls: MIT OR Apache-2.0
+#
+# For the complete list of dependencies and their licenses,
+# run: cargo metadata --format-version=1
+#
+# This software also includes code derived from:
+# - Ed25519 signature schemes (RFC 8032): Public Domain or 3-Clause BSD
+# - SQLite (for WAL mode documentation): Public Domain
+#
+# ====================
+# 知微 / ZhiWei
+# Copyright 2024-2026 hancic128
+# ====================
+
+ZhiWei is an open-source multi-host observability platform.
+
+This file contains attribution notices for third-party software
+included in this project.

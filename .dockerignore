@@ -1,0 +1,16 @@
+target/
+ui/node_modules/
+ui/dist/
+.git/
+.github/
+docs/
+data/
+*.pem
+*.crt
+*.key
+*.csr
+*.db
+*.db-shm
+*.db-wal
+.env
+.cargo/

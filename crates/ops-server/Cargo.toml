@@ -1,0 +1,31 @@
+[package]
+name = "zhiwei-ops-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ZhiWei ops-server: control plane (signs commands with its own key)"
+
+[[bin]]
+name = "zhiwei-ops"
+path = "src/main.rs"
+
+[dependencies]
+zhiwei-common = { path = "../common" }
+zhiwei-proto = { path = "../proto" }
+zhiwei-storage = { path = "../storage" }
+
+tokio = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+prost = { workspace = true }
+bytes = { workspace = true }
+base64 = { workspace = true }
+uuid = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }

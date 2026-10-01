@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust (${{ matrix.job }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - job: fmt
+            command: cargo fmt --check
+          - job: clippy
+            command: cargo clippy --all-targets -- -D warnings
+          - job: test
+            command: cargo test --all-targets
+          - job: deny
+            command: cargo deny check
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates
+
+      - name: ${{ matrix.job }}
+        run: ${{ matrix.command }}
+
+  ui:
+    name: UI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "ui/node_modules"
+          cache-dependency-path: "ui/package-lock.json"
+
+      - name: Install dependencies
+        working-directory: ui
+        run: npm ci
+
+      - name: Build
+        working-directory: ui
+        run: npm run build
+
+      - name: Lint
+        working-directory: ui
+        run: npm run lint
+
+  docker:
+    name: Docker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: zhiwei:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=min
+
+  # 合并状态：所有 job 必须通过
+  success:
+    name: All checks passed
+    needs: [rust, ui, docker]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "All CI checks passed!"

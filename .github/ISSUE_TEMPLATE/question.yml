@@ -1,0 +1,44 @@
+name: Question
+description: Ask a question about the project
+title: "[Question] "
+labels: ["question"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Question
+
+        Got a question? We're happy to help!
+
+        For bugs or feature requests, please use the other templates.
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Your Question
+      description: What do you want to know?
+      placeholder: |
+        How do I configure TLS termination?
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Any relevant context (environment, what you've tried, etc.)
+      placeholder: |
+        I'm trying to deploy on [platform] and wondering about...
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: search
+    attributes:
+      label: Search History
+      options:
+        - label: I have checked the [docs](./docs/) first
+          required: true
+        - label: I have searched existing issues
+          required: true

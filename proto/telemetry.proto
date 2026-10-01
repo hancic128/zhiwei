@@ -1,0 +1,131 @@
+syntax = "proto3";
+
+package zhiwei.telemetry.v1;
+
+import "common.proto";
+
+message Metric {
+  string name = 1;            // e.g. "cpu.usage", "mem.used"
+  double value = 2;
+  map<string, string> labels = 3;
+}
+
+message Container {
+  string id = 1;
+  string name = 2;
+  string image = 3;
+  string state = 4;              // running / exited / paused / created / restarting
+  // 老版本用字段 5 存开始时间，现改为下面的 started_at_unix_nano
+  reserved 5;
+  int64 created_at_unix_nano = 6;
+  string status = 7;             // 人类可读，如 "Up 3 days (healthy)"
+  string runtime = 8;            // "docker"
+  // 逐容器 inspect 补上（列表接口不返回）：启动时长与「上次更新」都要用
+  int64 started_at_unix_nano = 9;   // 0 = 未知 / 从未启动
+  int64 finished_at_unix_nano = 10; // 0 = 未知 / 仍在运行
+  // compose 标签（非 compose 起出来的容器为空串）。
+  // 「应用」这个维度由它自动推导，不需要用户手工建层级——见 docs/POSITIONING.md
+  string compose_project = 11;      // com.docker.compose.project
+  string compose_service = 12;      // com.docker.compose.service
+  // 用量与限额：/containers/{id}/stats 一次采样 + inspect 的 HostConfig。
+  // 只有 running 的容器才有；取不到就留 0，界面显示「—」而不是撒谎成 0。
+  uint64 mem_usage_bytes = 13;      // 已扣 page cache 的常驻内存
+  uint64 mem_limit_bytes = 14;      // HostConfig.Memory；0 = 不限
+  double cpu_percent = 15;          // 相对本机全部核心的占用（和进程列表同一口径）
+  uint64 cpu_limit_nano = 16;       // HostConfig.NanoCpus；0 = 不限
+}
+
+message ProcessInfo {
+  int32 pid = 1;
+  string name = 2;
+  string cmdline = 3;
+  string user = 4;
+  double cpu_percent = 5;
+  uint64 memory_bytes = 6;
+}
+
+message ProcessSnapshot {
+  repeated ProcessInfo processes = 1;
+}
+
+message NetworkInterface {
+  string name = 1;
+  uint64 rx_bytes = 2;
+  uint64 tx_bytes = 3;
+  uint64 rx_packets = 4;
+  uint64 tx_packets = 5;
+}
+
+message DiskMount {
+  string mountpoint = 1;
+  string filesystem = 2;
+  uint64 total_bytes = 3;
+  uint64 used_bytes = 4;
+}
+
+message CertInfo {
+  string path = 1;
+  string subject = 2;              // 主体 CN
+  string issuer = 3;               // 签发者 CN
+  int64 not_after_unix_nano = 4;   // 到期时刻
+  int64 not_before_unix_nano = 5;
+  repeated string domains = 6;     // SAN 里的 DNS 名
+  string serial = 7;
+  bool parse_error = 8;            // 解析失败时置位，path 仍上报
+  string source_id = 9;            // 命中的服务端证书来源 id；空 = 内置/命令行 glob
+}
+
+// 主机基本信息（多数字段静态；IP 可能变化，故每个 batch 都带上、服务端只留最新）
+message IpAddress {
+  string addr = 1;      // "192.168.1.5"
+  uint32 prefix = 2;    // 24
+}
+
+message InterfaceInfo {
+  string name = 1;
+  repeated IpAddress addresses = 2;
+  bool loopback = 3;
+}
+
+message HostInfo {
+  string hostname = 1;
+  string os_name = 2;              // "macOS" / "Ubuntu" / "Debian GNU/Linux"
+  string os_version = 3;           // "15.0"
+  string long_os_version = 4;      // "MacOS 15.0.1 Sequoia"
+  string kernel_version = 5;
+  string arch = 6;                 // "aarch64" / "x86_64"
+  string cpu_brand = 7;
+  uint32 cpu_cores = 8;
+  uint64 total_memory_bytes = 9;
+  uint64 uptime_seconds = 10;
+  uint64 boot_time_unix_seconds = 11;
+  repeated InterfaceInfo interfaces = 12;
+  string agent_version = 13;
+  // 当前 node-agent 进程启动的 Unix 秒。控制台用它展示「本次部署时间」。
+  // 老 agent 不会填这个字段（默认 0），UI 把它当成 unknown 不显示。
+  uint64 agent_started_at_unix_seconds = 14;
+}
+
+// 时序数据：每 interval 秒上报一次，需要保留历史。
+// 快照类数据（主机信息 / 容器 / 进程）走 InventoryReport，不在本消息里，
+// 否则每 30 秒重复传输静态数据，存储量会失控。
+message TelemetryBatch {
+  string node_id = 1;
+  int64 ts_unix_nano = 2;
+  int32 interval_seconds = 3;
+  repeated Metric metrics = 4;
+  repeated NetworkInterface network = 8;
+  repeated DiskMount disks = 9;
+  bytes signature = 10;                  // node 私钥对整个 batch 的 ed25519 签名
+}
+
+// 快照数据：低频上报（默认 5 分钟或内容变化时），服务端只保留最新一份。
+message InventoryReport {
+  string node_id = 1;
+  int64 ts_unix_nano = 2;
+  HostInfo host_info = 3;
+  repeated Container containers = 4;
+  ProcessSnapshot processes = 5;
+  bytes signature = 6;                   // node 私钥对本报告（signature 置空后）的签名
+  repeated CertInfo certificates = 7;    // 本机可发现的证书（随快照低频上报）
+}
