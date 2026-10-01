@@ -100,7 +100,7 @@ jobs:
       # tag 推送才发布；手动触发只跑构建，确认矩阵没坏。
       - name: Upload to release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             zhiwei-${{ matrix.target }}.tar.gz
