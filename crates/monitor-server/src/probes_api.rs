@@ -38,7 +38,7 @@ pub async fn probe_config_handler(
         Err((code, msg)) => return err(code, msg),
     };
     if q.get("node_id").map(String::as_str) != Some(node_id.as_str()) {
-        return err(StatusCode::FORBIDDEN, "只能拉取本节点的探针配置");
+        return err(StatusCode::FORBIDDEN, "Can only fetch this node's probe config");
     }
 
     let probes = match state
@@ -116,7 +116,7 @@ pub async fn probe_results_ingest_handler(
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
     };
     if parsed.results.len() > 500 {
-        return err(StatusCode::BAD_REQUEST, "单批结果不能超过 500 条");
+return err(StatusCode::BAD_REQUEST, "Batch size cannot exceed 500");
     }
 
     let hostname = state
@@ -142,11 +142,11 @@ pub async fn probe_results_ingest_handler(
         let probe = match state.storage.probes().find_probe(&item.probe_id).await {
             Ok(Some(p)) => p,
             Ok(None) => {
-                debug!(probe_id = %item.probe_id, "上报了不存在的探针，已忽略");
+                debug!(probe_id = %item.probe_id, "Received result for non-existent probe, ignored");
                 continue;
             }
             Err(e) => {
-                warn!(error = %e, "查询探针失败");
+                warn!(error = %e, "Failed to query probes");
                 continue;
             }
         };
@@ -187,13 +187,13 @@ pub async fn probe_results_ingest_handler(
                 )
                 .await;
             }
-            Err(e) => warn!(error = %e, probe = %probe.name, "写入探针结果失败"),
+            Err(e) => warn!(error = %e, probe = %probe.name, "Failed to write probe results"),
         }
     }
 
     debug!(node_id = %node_id.as_str(), stored, "probe results stored");
     if stored == 0 && !parsed.results.is_empty() {
-        return err(StatusCode::BAD_REQUEST, "没有任何结果被接受");
+        return err(StatusCode::BAD_REQUEST, "No results were accepted");
     }
     StatusCode::NO_CONTENT.into_response()
 }
@@ -248,7 +248,7 @@ pub async fn services_timeline_handler(
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(to_ms - 24 * 3600 * 1000);
     if from_ms >= to_ms {
-        return err(StatusCode::BAD_REQUEST, "from 必须早于 to");
+        return err(StatusCode::BAD_REQUEST, "'from' must be earlier than 'to'");
     }
     let buckets = q
         .get("buckets")
@@ -398,7 +398,7 @@ pub async fn create_service_handler(
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
     };
     if b.name.trim().is_empty() {
-        return err(StatusCode::BAD_REQUEST, "服务名不能为空");
+        return err(StatusCode::BAD_REQUEST, "Service name cannot be empty");
     }
 
     let now = zhiwei_common::Timestamp::now().unix_nano();
@@ -483,7 +483,7 @@ pub async fn patch_service_handler(
                         .resolve_open_probe_alerts(&p.id, now)
                         .await
                     {
-                        warn!(error = %e, "关闭服务探针告警失败");
+                    warn!(error = %e, "Failed to close service probe alerts");
                     }
                 }
             }
@@ -518,11 +518,11 @@ pub async fn delete_service_handler(
                     .resolve_open_probe_alerts(&p.id, now)
                     .await
                 {
-                    warn!(error = %e, "关闭探针告警失败");
+                    warn!(error = %e, "Failed to close probe alerts");
                 }
             }
         }
-        Err(e) => warn!(error = %e, "读取探针失败"),
+        Err(e) => warn!(error = %e, "Failed to read probes"),
     }
 
     match state.storage.probes().delete_service(&id).await {
@@ -573,14 +573,14 @@ fn normalize_probe_parts(
     expect_json: &str,
 ) -> Result<(String, String), String> {
     if !["http", "tcp", "tls"].contains(&kind) {
-        return Err("kind 必须是 http/tcp/tls".into());
+        return Err("kind must be http/tcp/tls".into());
     }
     let target: serde_json::Value =
-        serde_json::from_str(target_json).map_err(|e| format!("target 不是合法 JSON: {e}"))?;
+        serde_json::from_str(target_json).map_err(|e| format!("target is not valid JSON: {e}"))?;
     let expect: serde_json::Value = if expect_json.trim().is_empty() {
         serde_json::json!({})
     } else {
-        serde_json::from_str(expect_json).map_err(|e| format!("expect 不是合法 JSON: {e}"))?
+        serde_json::from_str(expect_json).map_err(|e| format!("expect is not valid JSON: {e}"))?
     };
 
     // 必填字段：没有目标地址的探针永远只会失败，创建时就拦下来
@@ -588,17 +588,17 @@ fn normalize_probe_parts(
         "http" => {
             let url = target.get("url").and_then(|v| v.as_str()).unwrap_or("");
             if !url.starts_with("http://") && !url.starts_with("https://") {
-                return Err("http 探针的 target.url 必须以 http:// 或 https:// 开头".into());
+                return Err("HTTP probe: target.url must start with http:// or https://".into());
             }
         }
         "tcp" | "tls" => {
             let host = target.get("host").and_then(|v| v.as_str()).unwrap_or("");
             if host.trim().is_empty() {
-                return Err(format!("{kind} 探针的 target.host 不能为空"));
+                return Err(format!("{kind} probe: target.host cannot be empty"));
             }
             let port = target.get("port").and_then(|v| v.as_i64()).unwrap_or(0);
             if !(1..=65535).contains(&port) {
-                return Err(format!("{kind} 探针的 target.port 必须在 1-65535"));
+                return Err(format!("{kind} probe: target.port must be between 1-65535"));
             }
         }
         _ => {}
@@ -657,7 +657,7 @@ pub async fn create_probe_handler(
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
     };
     if b.name.trim().is_empty() {
-        return err(StatusCode::BAD_REQUEST, "探针名不能为空");
+        return err(StatusCode::BAD_REQUEST, "Probe name cannot be empty");
     }
     if state
         .storage
@@ -668,7 +668,7 @@ pub async fn create_probe_handler(
         .flatten()
         .is_none()
     {
-        return err(StatusCode::BAD_REQUEST, "service_id 不存在");
+        return err(StatusCode::BAD_REQUEST, "service_id not found");
     }
     let (target_json, expect_json) =
         match normalize_probe_parts(&b.kind, &b.target_json, &b.expect_json) {
@@ -800,7 +800,7 @@ pub async fn patch_probe_handler(
                 Err(e) => return err(StatusCode::BAD_REQUEST, e),
             }
         }
-        (None, Some(_)) => return err(StatusCode::BAD_REQUEST, "改 target 需要同时给 kind"),
+        (None, Some(_)) => return err(StatusCode::BAD_REQUEST, "Changing target requires providing kind at the same time"),
         _ => None,
     };
 
@@ -827,7 +827,7 @@ pub async fn patch_probe_handler(
                     .resolve_open_probe_alerts(&id, now)
                     .await
                 {
-                    warn!(error = %e, "关闭探针告警失败");
+                    warn!(error = %e, "Failed to close probe alerts");
                 }
             }
             StatusCode::NO_CONTENT.into_response()

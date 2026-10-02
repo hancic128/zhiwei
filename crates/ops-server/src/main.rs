@@ -67,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
     let pub_path = args.data_dir.join("ops.pub");
     let key = if key_path.exists() {
         let raw = tokio::fs::read(&key_path).await?;
-        KeyPair::from_bytes(&raw).map_err(|e| anyhow::anyhow!("读取 ops 私钥: {e}"))?
+        KeyPair::from_bytes(&raw).map_err(|e| anyhow::anyhow!("Failed to read ops private key: {e}"))?
     } else {
         let kp = KeyPair::generate();
         tokio::fs::write(&key_path, kp.to_bytes()).await?;
@@ -78,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
             perm.set_mode(0o600);
             tokio::fs::set_permissions(&key_path, perm).await?;
         }
-        tracing::warn!("已生成新的 ops 签名密钥 {:?}", key_path);
+        tracing::warn!("Generated new ops signing key at {:?}", key_path);
         kp
     };
 
@@ -88,12 +88,12 @@ async fn main() -> anyhow::Result<()> {
         base64::engine::general_purpose::STANDARD.encode(key.public_key().as_bytes())
     };
     tokio::fs::write(&pub_path, pub_b64.as_bytes()).await?;
-    tracing::info!(fingerprint = %&pub_b64[..16.min(pub_b64.len())], "ops 公钥已写入 {:?}", pub_path);
+    tracing::info!(fingerprint = %&pub_b64[..16.min(pub_b64.len())], "ops public key written to {:?}", pub_path);
 
     let db_path = args.data_dir.join("monitor.db");
     let storage = zhiwei_storage::Storage::open(&db_path)
         .await
-        .map_err(|e| anyhow::anyhow!("打开存储: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Failed to open storage: {e}"))?;
 
     let state = Arc::new(OpsState {
         storage,
@@ -108,7 +108,7 @@ async fn main() -> anyhow::Result<()> {
 
     let addr: SocketAddr = args.listen.parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!(%addr, "zhiwei-ops ready（仅回环，供 monitor 转发签发请求）");
+    tracing::info!(%addr, "zhiwei-ops ready (loopback only, for monitor to forward signing requests)");
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -152,21 +152,21 @@ fn validate_params(action: Action, params: &serde_json::Value) -> Result<(), Str
         Action::KillProcess => {
             let pid = params.get("pid").and_then(|v| v.as_i64()).unwrap_or(0);
             if pid <= 1 {
-                return Err("kill_process 需要 pid（正整数，且不允许 1）".into());
+                return Err("kill_process requires pid (positive integer, 1 not allowed)".into());
             }
             let signal = params
                 .get("signal")
                 .and_then(|v| v.as_str())
                 .unwrap_or("term");
             if !matches!(signal, "term" | "kill") {
-                return Err("signal 只能是 term（优雅）或 kill（强杀）".into());
+                return Err("signal must be term (graceful) or kill (forced)".into());
             }
             Ok(())
         }
         Action::RestartHost | Action::ShutdownHost => {
             // 无参数动作：带上参数说明调用方搞错了动作，直接拒绝
             if params.as_object().is_some_and(|o| !o.is_empty()) {
-                return Err("该动作不接受参数".into());
+                return Err("This action does not accept parameters".into());
             }
             Ok(())
         }
@@ -180,7 +180,7 @@ fn validate_params(action: Action, params: &serde_json::Value) -> Result<(), Str
                 .unwrap_or_default()
                 .trim();
             if name.is_empty() {
-                return Err("该动作需要 container（容器名或 ID）".into());
+                return Err("This action requires container (name or ID)".into());
             }
             // 容器名/ID 会拼进 docker API 路径，挡掉路径穿越与控制字符
             if name.len() > 128
@@ -188,7 +188,7 @@ fn validate_params(action: Action, params: &serde_json::Value) -> Result<(), Str
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
             {
-                return Err("container 只允许字母数字与 - _ .".into());
+                return Err("container allows only alphanumeric and - _ .".into());
             }
             Ok(())
         }
@@ -206,7 +206,7 @@ fn validate_params(action: Action, params: &serde_json::Value) -> Result<(), Str
             // 路径规则与证书来源配置共用同一份实现（绝对路径 / 无 .. / 无控制字符）
             zhiwei_common::certpath::normalize(path)
                 .map(|_| ())
-                .map_err(|msg| format!("scan_certs 需要合法路径：{msg}"))
+                .map_err(|msg| format!("scan_certs requires a valid path: {msg}"))
         }
         _ => Ok(()),
     }
@@ -216,7 +216,7 @@ async fn exec(State(state): State<Arc<OpsState>>, Json(req): Json<ExecRequest>) 
     let Some(action) = parse_action(&req.action) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": format!("未知动作 {}", req.action) })),
+            Json(serde_json::json!({ "error": format!("Unknown action {}", req.action) })),
         )
             .into_response();
     };
@@ -298,9 +298,9 @@ async fn exec(State(state): State<Arc<OpsState>>, Json(req): Json<ExecRequest>) 
         .audit(now, &actor, &req.node_id, &id, &req.action, &params_json)
         .await
     {
-        tracing::warn!(error = %e, "写审计失败");
+        tracing::warn!(error = %e, "Failed to write audit log");
     }
 
-    tracing::info!(%id, node = %req.node_id, action = %req.action, "已签发命令");
+    tracing::info!(%id, node = %req.node_id, action = %req.action, "Command issued");
     (StatusCode::CREATED, Json(ExecResponse { command_id: id })).into_response()
 }

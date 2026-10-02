@@ -151,7 +151,7 @@ fn warn_tls_handshake_once(
             .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
             .is_err()
     {
-        tracing::debug!(error = %err, %peer, "TLS handshake failed（同类告警已限流）");
+        tracing::debug!(error = %err, %peer, "TLS handshake failed (同类告警已限流)"); // already has context
         return;
     }
 
@@ -221,7 +221,7 @@ fn locate_ops_binary() -> Option<PathBuf> {
 /// - 找不到 `zhiwei-ops` → 给一句可操作的提示，不假装成功
 async fn ensure_ops_control_plane(data_dir: &Path, endpoint: &str) {
     if std::env::var("ZHIWEI_OPS_DISABLE").ok().as_deref() == Some("1") {
-        tracing::info!("ZHIWEI_OPS_DISABLE=1：不拉起 ops-server，命令通道不可用（数据平面照常）");
+        tracing::info!("ZHIWEI_OPS_DISABLE=1: not starting ops-server, command channel unavailable (data plane still running)");
         return;
     }
     let Some((host, port)) = endpoint_host_port(endpoint) else {
@@ -231,7 +231,7 @@ async fn ensure_ops_control_plane(data_dir: &Path, endpoint: &str) {
     // 外部可能已经在跑（entrypoint / dev.sh / 自建 unit）。给它一点重试窗口，
     // 别因为几毫秒的启动差把第二个 ops 也拉起来。
     if wait_for_port(&host, port, 8).await {
-        tracing::debug!(%endpoint, "ops-server 已在运行（命令通道可用）");
+        tracing::debug!(%endpoint, "ops-server already running (command channel available)");
         return;
     }
 
@@ -259,7 +259,7 @@ async fn ensure_ops_control_plane(data_dir: &Path, endpoint: &str) {
             tracing::info!(
                 bin = %bin.display(),
                 pid = child.id().unwrap_or(0),
-                "已拉起 ops-server（控制平面）；签名私钥只在它进程内"
+                "Started ops-server (control plane); signing key only in its process"
             );
             // 等它「就绪」再往下走，判据是端口能被连上，而不是 ops.pub 存在：
             // ops 是先开库跑迁移、后 bind，所以端口通了同时意味着
@@ -268,9 +268,9 @@ async fn ensure_ops_control_plane(data_dir: &Path, endpoint: &str) {
             //   ② 迁移已跑完——两个进程同时对同一个 SQLite 跑 `CREATE TABLE`
             //      会撞车（实测 monitor 直接起不来：`table nodes already exists`）。
             if wait_for_port(&host, port, 60).await {
-                tracing::info!(%endpoint, "ops-server 已就绪（命令通道可用）");
+                tracing::info!(%endpoint, "ops-server ready (command channel available)");
             } else {
-                tracing::warn!(%endpoint, "ops-server 9 秒内没起来，命令通道可能不可用");
+                tracing::warn!(%endpoint, "ops-server did not start within 9 seconds, command channel may be unavailable");
             }
             // 交给 tokio 的 SIGCHLD 收尸，这里不 wait（monitor 会一直跑）
             drop(child);
@@ -354,7 +354,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_default();
     if ops_public_key.is_empty() {
         tracing::warn!(
-            "未找到 {}；节点将无法验证命令签名。启动 zhiwei-ops 后会生成。",
+            "{} not found; nodes will not be able to verify command signatures. Will be generated after starting zhiwei-ops.",
             ops_pub_path.display()
         );
     }
@@ -405,7 +405,7 @@ async fn main() -> anyhow::Result<()> {
             match admin::validate_env_token("ZHIWEI_BOOTSTRAP_TOKEN", &raw) {
                 Ok(token) => {
                     // 刻意不打印值：它已经在部署面板里，日志不该留明文凭据。
-                    tracing::info!("入网令牌来自 ZHIWEI_BOOTSTRAP_TOKEN（长期有效，不随重启变化）");
+                    tracing::info!("Enrollment token from ZHIWEI_BOOTSTRAP_TOKEN (persistent, survives restarts)");
                     bootstrap_tokens.add_static(token);
                 }
                 Err(reason) => {
@@ -446,7 +446,7 @@ async fn main() -> anyhow::Result<()> {
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty());
     if let Some(u) = &node_base_url {
-        tracing::info!(%u, "入网命令将带 ZHIWEI_BASE_URL（节点走自建分发源）");
+        tracing::info!(%u, "Enrollment command will include ZHIWEI_BASE_URL (nodes use self-hosted distribution)");
     }
     let state = AppState {
         storage,
@@ -488,8 +488,8 @@ async fn main() -> anyhow::Result<()> {
                 let cutoff = zhiwei_common::Timestamp::now().unix_nano() - RETENTION_NS;
                 match state.storage.probes().cleanup_results(cutoff).await {
                     Ok(0) => {}
-                    Ok(n) => tracing::info!(removed = n, "清理过期探针结果"),
-                    Err(e) => tracing::warn!(error = %e, "清理探针结果失败"),
+                    Ok(n) => tracing::info!(removed = n, "Cleaned up expired probe results"),
+                    Err(e) => tracing::warn!(error = %e, "Failed to clean up probe results"),
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(6 * 60 * 60)).await;
             }
@@ -543,14 +543,14 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let server_cert = server_cert.expect("plain-http 关闭时服务端证书已生成");
+    let server_cert = server_cert.expect("server cert already generated when plain-http is off");
     let rustls_config = tls::build_server_config(
         &server_cert.cert_pem,
         &server_cert.key_pem,
         &server_cert.ca_cert_pem,
     )?;
     let acceptor = TlsAcceptor::from(Arc::new(rustls_config));
-    tracing::info!(%listen, "zhiwei-monitor ready (内置 TLS)");
+    tracing::info!(%listen, "zhiwei-monitor ready (built-in TLS)");
 
     // 同类失败在窗口内只打一条：托管平台的健康检查会每分钟戳一次，
     // 每次都打完整日志会把启动信息刷没，反而看不清真正的问题。
@@ -599,17 +599,12 @@ async fn main() -> anyhow::Result<()> {
 const INSTALL_NODE_SH: &str = include_str!("../../../scripts/install-node.sh");
 
 /// 内嵌的帮助页 markdown（理由同上）。
-const HELP_MD_ZH: &str = include_str!("../assets/help.md");
 const HELP_MD_EN: &str = include_str!("../assets/help.en.md");
 
-/// 帮助页内容。按 locale 提供 markdown，缺翻译时回落到默认（zh-CN）。
-/// 编译期把所有可用 locale 的 markdown 都内嵌进来，单镜像即可按 UI 语言切换；
-/// 翻译缺失就静默回落到默认 locale，避免缺页时出现「未翻译提示」。
+/// Help page content. Single binary serves all locales via the `Accept-Language` header.
+/// Unknown / missing locale falls back to en-US.
 fn load_help_markdown() -> crate::state::HelpContent {
-    crate::state::HelpContent::new([
-        ("zh-CN".to_string(), HELP_MD_ZH.to_string()),
-        ("en-US".to_string(), HELP_MD_EN.to_string()),
-    ])
+    crate::state::HelpContent::new([("en-US".to_string(), HELP_MD_EN.to_string())])
 }
 
 #[cfg(test)]
@@ -640,7 +635,7 @@ mod listen_tests {
         let list = ops_binary_candidates(Some(Path::new("/usr/local/bin/zhiwei-monitor")));
         assert!(
             list.contains(&std::path::PathBuf::from("/usr/local/bin/zhiwei-ops")),
-            "候选路径里应有与 monitor 同目录的 zhiwei-ops：{list:?}"
+            "Expected zhiwei-ops in the same dir as monitor in candidate paths: {list:?}"
         );
     }
 

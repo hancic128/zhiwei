@@ -178,7 +178,7 @@ async fn probe_http(target: &Value, expect: &Value) -> Outcome {
         Err(e) => {
             return Outcome::down(
                 "connect",
-                json!({ "target": url, "detail": format!("读取响应体失败: {e}") }),
+                json!({ "target": url, "detail": format!("Failed to read response body: {e}") }),
             )
         }
     };
@@ -302,7 +302,7 @@ async fn probe_tls(target: &Value, expect: &Value) -> Outcome {
     let connector = tokio_rustls::TlsConnector::from(Arc::new(cfg));
     let name = match rustls::pki_types::ServerName::try_from(sni.clone()) {
         Ok(n) => n,
-        Err(e) => return Outcome::down("tls", json!({ "detail": format!("非法 SNI {sni}: {e}") })),
+        Err(e) => return Outcome::down("tls", json!({ "detail": format!("Invalid SNI {sni}: {e}") })),
     };
     let tls_stream = match connector.connect(name, stream).await {
         Ok(s) => s,

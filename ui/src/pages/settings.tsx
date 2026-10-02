@@ -1318,7 +1318,6 @@ function UiSection() {
                 toast.push("success", t("settings.langSaved"));
               }}
             >
-              <option value="zh-CN">{t("settings.lang_zh-CN")}</option>
               <option value="en-US">{t("settings.lang_en-US")}</option>
             </Select>
           </div>

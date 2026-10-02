@@ -221,7 +221,7 @@ pub fn spawn(state: AppState) {
                             rows = stats.rows,
                             raw_deleted = stats.raw_deleted,
                             hourly_deleted = stats.hourly_deleted,
-                            "留存完成"
+                            "Retention done"
                         );
                     }
                     let _ = state
@@ -231,17 +231,17 @@ pub fn spawn(state: AppState) {
                         .await;
                 }
                 Err(e) => {
-                    warn!(error = %e, "留存失败");
+                    warn!(error = %e, "Retention failed");
                     let message = format!(
-                        "数据留存任务失败：{e}。原始数据会先堆着不删（不会丢），\
-                         但磁盘会继续涨——修好后这一条会自动关闭。"
+                        "Data retention task failed: {e}. Raw data is not deleted yet (not lost), \
+                         but disk usage will continue to grow — this alert closes automatically once fixed."
                     );
                     let _ = state
                         .storage
                         .alerts()
                         .open_platform_alert(
                             RETENTION_SOURCE_REF,
-                            "留存任务失败",
+                            "Retention task failed",
                             "critical",
                             &message,
                             now_ns,

@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.7",
   "type": "module",
-  "description": "知微（ZhiWei）控制台",
+  "description": "ZhiWei Console",
   "scripts": {
     "dev": "vite",
     "build": "node scripts/check-locales.mjs && tsc --noEmit && vite build",

@@ -97,17 +97,17 @@ impl SignedHeaders {
         let skew_ns = MAX_SKEW_SECONDS.saturating_mul(1_000_000_000);
         if (now - self.timestamp).abs() > skew_ns {
             return Err(crate::Error::Invalid(format!(
-                "请求时间戳超出 ±{MAX_SKEW_SECONDS}s 时间窗"
+                "Request timestamp outside ±{MAX_SKEW_SECONDS}s time window"
             )));
         }
 
         let sig_bytes = base64::engine::general_purpose::STANDARD
             .decode(self.signature.as_bytes())
-            .map_err(|e| crate::Error::Invalid(format!("签名不是合法 base64: {e}")))?;
+            .map_err(|e| crate::Error::Invalid(format!("Signature is not valid base64: {e}")))?;
 
         let preimage = canonical(method, path_and_query, self.timestamp, &self.nonce, body);
         KeyPair::verify(public_key, &preimage, &Signature(sig_bytes))
-            .map_err(|_| crate::Error::Invalid("签名校验失败".into()))
+            .map_err(|_| crate::Error::Invalid("Signature verification failed".into()))
     }
 }
 

@@ -1,63 +1,66 @@
-# 知微 API 参考
+# API Reference
 
-两套 API，鉴权方式不同：
+ZhiWei exposes two APIs with different authentication:
 
-| 面向 | 路径前缀 | 凭据 | 谁用 |
+| Audience | Path Prefix | Credential | Used by |
 | --- | --- | --- | --- |
-| 控制台 / 外部集成 | `/v1/*` | `Authorization: Bearer <admin token 或 AI token>` | 浏览器控制台、脚本、AI 客户端 |
-| 节点 | `/v1/enroll`、`/v1/telemetry`、`/v1/inventory` | bootstrap token（enroll）/ Ed25519 请求签名（其余） | node-agent |
+| Console / External | `/v1/*` | `Authorization: Bearer <admin token or AI token>` | Browser, scripts, AI clients |
+| Nodes | `/v1/enroll`, `/v1/telemetry`, `/v1/inventory` | bootstrap token (enroll) / Ed25519 request signing (rest) | node-agent |
 
-`admin.token` 是**单值**凭据（`<data-dir>/admin.token` 或 `ZHIWEI_ADMIN_TOKEN`）。
-AI token 是**多值、可撤销**的读凭据，用于 MCP 与外部 AI 客户端。
-详见 [§3 AI Token](#3-ai-token)。
+`admin.token` is a **single-value** credential (`<data-dir>/admin.token` or
+`ZHIWEI_ADMIN_TOKEN`). AI tokens are **multi-value and revocable** read-only
+credentials for MCP and external AI clients.
 
 ---
 
-## 1. 通用读端点
+## Read Endpoints
 
-全部要求 `Authorization: Bearer <admin token 或 AI token>`。
+All require `Authorization: Bearer <admin token or AI token>`.
 
-| 方法 | 路径 | 说明 |
+| Method | Path | Description |
 | --- | --- | --- |
-| GET | `/v1` | 总览：`{ service, version, authenticated, endpoints, nodes, telemetry_batches }` |
-| GET | `/v1/nodes` | 节点列表（含 `host_info`、最新一帧关键指标、`alias` 与 `tags`） |
-| GET | `/v1/nodes/:id/telemetry?limit=N` | 某节点最近的 telemetry 帧 |
-| GET | `/v1/nodes/:id/series?range=…` | 时间序列（降采样后） |
-| GET | `/v1/nodes/:id/containers` | 该节点最新容器快照 |
-| GET | `/v1/nodes/:id/processes` | 该节点最新进程快照 |
-| GET | `/v1/containers` | 全集群容器视图 |
-| GET | `/v1/certificates` | 证书清单 |
-| GET | `/v1/cert-sources` | 证书扫描来源（节点 + 路径） |
-| GET | `/v1/alerts` | 告警实例（活跃 + 历史） |
-| GET | `/v1/rules` | 告警规则 |
-| GET | `/v1/channels` | 通知渠道 |
-| GET | `/v1/services`、`/v1/probes` | 服务探活 |
-| GET | `/v1/todo` | 待办聚合（按紧急度排序） |
-| GET | `/v1/help` | 帮助页 markdown：`{ locale, body }` |
-| GET | `/healthz` | 健康检查（**不需要鉴权**） |
+| GET | `/v1` | Overview: `{ service, version, authenticated, endpoints, nodes, telemetry_batches }` |
+| GET | `/v1/nodes` | Node list (includes `host_info`, latest telemetry frame, `alias` and `tags`) |
+| GET | `/v1/nodes/:id/telemetry?limit=N` | Recent telemetry frames for a node |
+| GET | `/v1/nodes/:id/series?range=...` | Time series (downsampled) |
+| GET | `/v1/nodes/:id/containers` | Latest container snapshot for a node |
+| GET | `/v1/nodes/:id/processes` | Latest process snapshot for a node |
+| GET | `/v1/containers` | Cluster-wide container view |
+| GET | `/v1/certificates` | Certificate inventory |
+| GET | `/v1/cert-sources` | Certificate scan sources (nodes + paths) |
+| GET | `/v1/alerts` | Alert instances (active + historical) |
+| GET | `/v1/rules` | Alert rules |
+| GET | `/v1/channels` | Notification channels |
+| GET | `/v1/services`, `/v1/probes` | Service health probes |
+| GET | `/v1/todo` | Todo aggregation (sorted by urgency) |
+| GET | `/v1/help` | Help page markdown: `{ locale, body }` |
+| GET | `/healthz` | Health check (**no auth required**) |
 
-## 2. 写端点（仅接受 admin token）
+## Write Endpoints (admin token only)
 
-AI token **调不动**这些——调用会返回 401。
+AI tokens **cannot** call these — requests return 401.
 
-| 方法 | 路径 | 说明 |
+| Method | Path | Description |
 | --- | --- | --- |
-| POST | `/v1/admin/token` | 改控制台凭据，body `{ current, new }` |
-| POST | `/v1/ai-tokens` | 创建 AI token |
-| DELETE | `/v1/ai-tokens/:id` | 撤销 AI token |
-| POST | `/v1/enroll-tokens` | 创建一次性入网令牌 |
-| DELETE | `/v1/enroll-tokens/:id` | 撤销入网令牌 |
-| PATCH | `/v1/nodes/:id` | 改节点别名 / 标签，body `{ alias?, tags? }`；字段缺省＝不改，给空串 / 空数组＝清空。别名 ≤10 字符，标签 ≤10 个、单个 ≤24 字符，超限 400 |
-| DELETE | `/v1/nodes/:id` | 永久删除节点及其数据（命令历史一起清掉，`audit_log` 保留）。节点还有**未发出且没过期**的命令时返回 409；`?force=1` 会先把这些命令作废（`state='expired'`，`audit_log` 写一条 `outcome=cancelled`、actor=`admin`）再删。命令过期与否按签发时刻 + `ttl_seconds` 判（`ttl_seconds<=0`＝不过期），与节点侧一致 |
-| POST/PATCH/DELETE | `/v1/rules`、`/v1/channels`、`/v1/services`、`/v1/probes`、`/v1/cert-sources` | 各类配置增删改 |
-| POST | `/v1/exec` | 下发命令给节点。转 ops-server 签名不可用时返回 503（`ops-server 不可用：…`）；ops 明确拒绝动作 / 参数时把 ops 的 4xx 原样透传 |
+| POST | `/v1/admin/token` | Change console credential, body `{ current, new }` |
+| POST | `/v1/ai-tokens` | Create AI token |
+| DELETE | `/v1/ai-tokens/:id` | Revoke AI token |
+| POST | `/v1/enroll-tokens` | Create one-time enrollment token |
+| DELETE | `/v1/enroll-tokens/:id` | Revoke enrollment token |
+| PATCH | `/v1/nodes/:id` | Update node alias / tags, body `{ alias?, tags? }` |
+| DELETE | `/v1/nodes/:id` | Permanently delete node and its data |
+| POST/PATCH/DELETE | `/v1/rules`, `/v1/channels`, `/v1/services`, `/v1/probes`, `/v1/cert-sources` | CRUD for various configs |
+| POST | `/v1/exec` | Dispatch command to node |
 
-## 3. AI Token
+---
 
-AI token 是**只能读**的凭据，专给 MCP / 外部 AI 客户端用。
-和 admin token 完全隔离：它不能改任何配置，也不能自我复制。
+## AI Token
 
-### 创建
+AI tokens are **read-only** credentials for MCP / external AI clients.
+They are completely isolated from the admin token: they cannot modify
+configuration or create other tokens.
+
+### Create
 
 ```sh
 curl -X POST https://<monitor>/v1/ai-tokens \
@@ -66,7 +69,7 @@ curl -X POST https://<monitor>/v1/ai-tokens \
   -d '{"name": "claude-desktop-home"}'
 ```
 
-响应里 `token` 形如 `ait_<base64url>`，**仅此一次返回**：
+Response `token` is like `ait_<base64url>`, shown **only once**:
 
 ```json
 {
@@ -74,30 +77,31 @@ curl -X POST https://<monitor>/v1/ai-tokens \
   "name": "claude-desktop-home",
   "token": "ait_U-LXMwc2Hhf6-zSyXEQ5mXvRLCORlAoqfmNN1wuy0o8",
   "created_at_unix_nano": 1790038765833242000,
-  "warning": "明文 token 仅返回一次，请立即复制保存"
+  "warning": "Plaintext token shown once only — save it now"
 }
 ```
 
-### 列出 / 撤销
+### List / Revoke
 
 ```sh
 curl https://<monitor>/v1/ai-tokens -H "Authorization: Bearer <admin token>"
-
 curl -X DELETE https://<monitor>/v1/ai-tokens/ait-675cba \
   -H "Authorization: Bearer <admin token>"
 ```
 
-撤销后该 token **下一次请求**即返回 401。`last_used_at_unix_nano` 用于审计。
+Revocation takes effect on the **next request**. `last_used_at_unix_nano` for auditing.
 
-## 4. 入网令牌
+---
 
-运行时生成的**一次性** bootstrap token，配合 `install-node.sh` 使用。
+## Enrollment Token
 
-| 方法 | 路径 | body / 说明 |
+A one-time bootstrap token generated at runtime, used with `install-node.sh`.
+
+| Method | Path | Body / Description |
 | --- | --- | --- |
-| GET | `/v1/enroll-tokens` | 列出未过期令牌元信息（**不含明文**） |
-| POST | `/v1/enroll-tokens` | `{ ttl_secs?, label? }` → 返回 `enroll_command` |
-| DELETE | `/v1/enroll-tokens/:id` | 撤销 |
+| GET | `/v1/enroll-tokens` | List non-expired token metadata (no plaintext) |
+| POST | `/v1/enroll-tokens` | `{ ttl_secs?, label? }` → returns `enroll_command` |
+| DELETE | `/v1/enroll-tokens/:id` | Revoke |
 
 ```sh
 curl -X POST https://<monitor>/v1/enroll-tokens \
@@ -106,11 +110,13 @@ curl -X POST https://<monitor>/v1/enroll-tokens \
   -d '{"ttl_secs": 86400, "label": "prod-web-01"}'
 ```
 
-`enroll_command` 里的 monitor URL 由后端按 `X-Forwarded-Proto` + `Host` 推断。
+Monitor URL in `enroll_command` is inferred from `X-Forwarded-Proto` + `Host`.
 
-## 5. MCP Server（给 AI 客户端）
+---
 
-MCP 走 **SSE transport**，端点：
+## MCP Server (for AI clients)
+
+MCP uses **SSE transport**:
 
 ```
 POST https://<monitor>/mcp/sse
@@ -118,38 +124,39 @@ Authorization: Bearer <AI token>
 Content-Type: application/json
 ```
 
-响应是 `text/event-stream`，每个事件一条 JSON-RPC 2.0 消息：
+Response is `text/event-stream`, each event a JSON-RPC 2.0 message:
 
 ```
 event: message
 data: {"jsonrpc":"2.0","id":1,"result":{...}}
 ```
 
-协议版本 `2024-11-05`。支持 `initialize` / `notifications/initialized` /
-`ping` / `tools/list` / `tools/call`。**不支持** `resources/*`、`prompts/*`。
+Protocol version `2024-11-05`. Supports `initialize` / `notifications/initialized` /
+`ping` / `tools/list` / `tools/call`. Does **not** support `resources/*` / `prompts/*`.
 
-> `admin token` 调 MCP 会被拒绝（403）——必须用 AI token。
-> 这是刻意的：MCP 是常驻集成，应该用可单独撤销的凭据。
+> Using `admin token` with MCP returns 403 — must use AI token.
+> This is intentional: MCP is a persistent integration and should use
+> independently revocable credentials.
 
-### 工具列表
+### Tool List
 
-| 工具 | 参数 | 底层端点 |
+| Tool | Parameters | Underlying Endpoint |
 | --- | --- | --- |
 | `list_nodes` | — | `GET /v1/nodes` |
-| `get_node` | `node_id` | `GET /v1/nodes` 后按 id 过滤（后端无单节点端点） |
-| `get_telemetry` | `node_id`, `limit?`（默认 100） | `GET /v1/nodes/:id/telemetry` |
-| `list_alerts` | — | `GET /v1/alerts`（服务端固定窗口） |
+| `get_node` | `node_id` | `GET /v1/nodes` (filtered by id) |
+| `get_telemetry` | `node_id`, `limit?` (default 100) | `GET /v1/nodes/:id/telemetry` |
+| `list_alerts` | — | `GET /v1/alerts` |
 | `list_certs` | — | `GET /v1/cert-sources` |
 | `list_containers` | `node_id` | `GET /v1/nodes/:id/containers` |
 | `list_processes` | `node_id`, `sort?`, `limit?` | `GET /v1/nodes/:id/processes` |
 
-**范围边界**（DESIGN.md D8）：破坏性操作（`reboot` / `shutdown` /
-`kill_process` / `container_action` / `renew_cert`）**不**暴露给 MCP。
-MCP 只到「读 + 轻管理」中的读，manage 类等对应后端端点落地后再补。
+Destructive operations (`reboot` / `shutdown` / `kill_process` / `container_action` /
+`renew_cert`) are **not** exposed to MCP. MCP is read-only; management
+operations go through the console or `POST /v1/exec`.
 
-### 客户端配置示例
+### Client Configuration Example
 
-Claude Desktop（`claude_desktop_config.json`）：
+Claude Desktop (`claude_desktop_config.json`):
 
 ```json
 {
@@ -164,23 +171,25 @@ Claude Desktop（`claude_desktop_config.json`）：
 }
 ```
 
-### 错误约定
+### Error Conventions
 
-| 情况 | 行为 |
+| Condition | Behavior |
 | --- | --- |
-| 未带 / 错 token | HTTP 401，JSON `{ error }` |
-| 用 admin token | HTTP 403，提示改用 AI token |
-| JSON 解析失败 | JSON-RPC `-32700` |
-| 未知 method | JSON-RPC `-32601` |
-| 参数缺失 | JSON-RPC `-32602` |
-| 工具内部错误 | `result.isError = true` + 错误文本 |
+| Missing / wrong token | HTTP 401, JSON `{ error }` |
+| Using admin token | HTTP 403, hint to use AI token |
+| JSON parse failure | JSON-RPC `-32700` |
+| Unknown method | JSON-RPC `-32601` |
+| Missing parameters | JSON-RPC `-32602` |
+| Tool internal error | `result.isError = true` + error text |
 
-## 6. 节点侧端点
+---
 
-| 方法 | 路径 | 凭据 |
+## Node-Side Endpoints
+
+| Method | Path | Credential |
 | --- | --- | --- |
 | POST | `/v1/enroll` | `Authorization: Bearer <bootstrap token>` + protobuf |
-| POST | `/v1/telemetry` | Ed25519 请求签名 |
-| POST | `/v1/inventory` | Ed25519 请求签名 |
+| POST | `/v1/telemetry` | Ed25519 request signing |
+| POST | `/v1/inventory` | Ed25519 request signing |
 
-签名校验：`crates/common/src/auth.rs`（时间窗 ±300s + nonce 防重放）。
+Signature validation: `crates/common/src/auth.rs` (time window ±300s + nonce anti-replay).

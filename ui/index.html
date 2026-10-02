@@ -3,12 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>知微 · 控制台</title>
-    <meta name="description" content="见微知著，守正待时 —— 知微多主机可观测平台" />
+    <title>ZhiWei · Console</title>
+    <meta name="description" content="Know the subtle, await the right moment — ZhiWei multi-host observability" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <!--
-      首帧应用主题色与明暗，避免刷新闪烁（规范 03：偏好持久化 + 首帧恢复）。
-      这段脚本必须先于任何 CSS / JS 执行。
+      Apply theme and color scheme on first frame to avoid flash (spec 03: persist prefs + first-frame restore).
+      This script must run before any CSS / JS.
     -->
     <script>
       (function () {
@@ -27,7 +27,7 @@
           if (scheme === "dark") root.classList.add("dark");
           if (locale) root.setAttribute("lang", locale);
         } catch (e) {
-          /* localStorage 不可用时用默认值 */
+          /* localStorage unavailable — use defaults */
         }
       })();
     </script>

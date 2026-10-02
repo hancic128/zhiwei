@@ -1,60 +1,52 @@
-# 部署指南
+# Deployment Guide
 
-知微的 monitor-server（数据平面）可以部署到自建主机，也可以部署到托管平台
-（Render / Railway / Northflank 等）。两者的差别只有一个：**TLS 由谁终结**——
-自建时由 monitor 自己终结（默认），托管平台上由边缘终结（加 `--plain-http`）。
-节点身份由 Ed25519 请求签名承担，不依赖传输层，所以两种形态的安全模型一致。
+This guide covers deploying ZhiWei's monitor-server to self-hosted servers or
+managed platforms (Render / Railway / Northflank). The only difference between
+the two: **who terminates TLS** — monitor terminates it itself (default) on
+self-hosted; edge terminates it on managed platforms (`--plain-http`).
+Node identity relies on Ed25519 request signing, not the transport layer, so
+security is equivalent in both cases.
 
 ---
 
-## 1. 本地 / 自建主机
+## Self-Hosted / On-Premises
 
-### 直接跑二进制
+### Binary
 
 ```sh
 cargo build --release --bin zhiwei-monitor --bin zhiwei-ops
 ./target/release/zhiwei-monitor --data-dir /var/lib/zhiwei --listen 127.0.0.1:8443
 ```
 
-`zhiwei-monitor` 启动时会看一眼 `ops_endpoint`（默认 `http://127.0.0.1:8444/exec`）：
-该端口上没有进程、而**与它同目录**有 `zhiwei-ops` 时，会自动把控制平面拉起来
-（预编译包把两个二进制放在一起；路径可用 `ZHIWEI_OPS_BIN` 覆盖）。所以上面这条命令
-控制台里的写操作（删容器 / 拉日志 / 重启主机）直接可用——只想知道为什么以前不能，
-见[「命令通道」](#命令通道ops-server-与-monitor-同容器运行)。只想跑数据平面就设
-`ZHIWEI_OPS_DISABLE=1`。
+`zhiwei-monitor` checks `ops_endpoint` (default `http://127.0.0.1:8444/exec`):
+if nothing is listening on that port and `zhiwei-ops` exists in the same directory,
+the control plane starts automatically. Use `ZHIWEI_OPS_DISABLE=1` to run only
+the data plane.
 
-首次启动会：
+First startup:
 
-1. 在 `<data-dir>/ca/` 生成自签名 root CA（10 年）——**这是全集群的信任根**
-2. 签发 monitor server 证书（90 天，带 SAN：localhost / 127.0.0.1 / ::1）
-3. 创建 SQLite 数据库 `<data-dir>/monitor.db`（WAL）
-4. 打印一次性 bootstrap token（10 分钟有效）——节点入网用
+1. Generates self-signed root CA in `<data-dir>/ca/` (10-year validity)
+2. Issues monitor server certificate (90-day, CA-signed, SAN: localhost / 127.0.0.1 / ::1)
+3. Creates SQLite database `<data-dir>/monitor.db` (WAL mode)
+4. Prints a one-time bootstrap token in logs (10-minute TTL)
 
 ### Docker
 
 ```sh
 docker build -t zhiwei-monitor .
-
 docker run -d --name zhiwei-monitor \
   -p 8443:8443 \
   -v zhiwei-data:/var/lib/zhiwei \
   zhiwei-monitor
 ```
 
-查看 bootstrap token：
+View bootstrap token:
 
 ```sh
 docker logs zhiwei-monitor | grep 'BOOTSTRAP TOKEN'
 ```
 
-国内网络构建慢时可以走镜像：
-
-```sh
-docker build --build-arg CARGO_MIRROR=https://rsproxy.cn/index/ -t zhiwei-monitor .
-```
-
-托管平台（边缘终止 TLS）上要以明文 HTTP 监听，把 `PORT` 和 `ZHIWEI_PLAIN_HTTP`
-一起注入即可：
+For managed platforms (edge terminates TLS), run with plain HTTP:
 
 ```sh
 docker run -d --name zhiwei-monitor \
@@ -63,462 +55,182 @@ docker run -d --name zhiwei-monitor \
   zhiwei-monitor
 ```
 
-镜像的 entrypoint 会在同一个容器里先起 `zhiwei-ops`（控制平面）再起 monitor
-（数据平面），两者共用数据目录。想只跑数据平面就加 `ZHIWEI_OPS_DISABLE=1`；
-等公钥的超时可用 `ZHIWEI_OPS_WAIT=<秒>` 调（默认 5）。细节见本文
-[「命令通道：ops-server 与 monitor 同容器运行」](#命令通道ops-server-与-monitor-同容器运行)。
+The image entrypoint starts `zhiwei-ops` first, then `exec zhiwei-monitor`,
+sharing the data directory. Use `ZHIWEI_OPS_DISABLE=1` for data-plane-only.
 
-### 架构（Apple Silicon / ARM 机器必读）
+### Platform Architecture Note (Apple Silicon)
 
-若在 Apple Silicon（M 系列）上开发，`docker build` 默认产出 **linux/arm64** 镜像，
-而 Render / Railway / Northflank 的运行节点是 **amd64**。直接推上去会起不来，
-必须显式指定目标平台：
+On Apple Silicon, `docker build` produces **linux/arm64** by default, but
+Render / Railway / Northflank run on **amd64**. Build for the target platform:
 
 ```sh
 docker build --platform linux/amd64 -t zhiwei-monitor .
 ```
 
-镜像大小参考：约 105 MB（arm64 / 无 apt 依赖）。
-镜像内已包含控制台（`ui/dist` 由 node 阶段构建后拷入，`ZHIWEI_UI_DIR=/app/ui/dist`），
-启动后直接访问根路径即可看到页面，不需要额外部署前端。
-
-> 控制台凭据（admin token）有三个来源，详见下面的
-> [「控制台凭据从哪来」](#控制台凭据从哪来zhiwei_admin_token)。自建且挂了持久卷时，
-> 首启会生成一次并打印 `[ADMIN TOKEN] <token>`，之后也可以
-> `cat /var/lib/zhiwei/admin.token` 读回。托管平台建议直接用
-> `ZHIWEI_ADMIN_TOKEN` 环境变量固定下来——免费层既没有 Shell 也挂不了卷，
-> 只靠日志的话每次冷启动都会换一个新 token。
-
-> **改 Dockerfile 时注意**：workspace 的每个成员都必须在依赖桩层被 COPY 到，
-> 漏一个会在构建镜像时报 `failed to load manifest for workspace member`——
-> 本地 `cargo build` 测不出来（本地整棵树都在）。改完跑
-> `scripts/check-dockerfile-crates.sh` 校验。
-
 ---
 
-## 2. 配置项
+## Managed Platforms (Render / Railway / Northflank)
 
-| 来源 | 键 | 说明 |
-| --- | --- | --- |
-| 环境变量 | `PORT` | PaaS 注入。**没有显式配置 listen 时**，绑定 `0.0.0.0:$PORT` |
-| 环境变量 | `ZHIWEI_DATA_DIR` | 数据目录（覆盖配置文件） |
-| 环境变量 | `ZHIWEI_LISTEN` | 监听地址（覆盖配置文件与 `PORT`） |
-| 环境变量 | `RUST_LOG` | 日志级别，默认 `info,zhiwei=debug` |
-| 命令行 | `--config` | 配置文件路径，默认 `config/monitor.toml` |
-| 命令行 | `--data-dir` | 同 `ZHIWEI_DATA_DIR` |
-| 命令行 | `--listen` | 同 `ZHIWEI_LISTEN` |
-| 配置文件 | `data_dir` / `listen` / `server_cert_cn` | 见 `config/monitor.toml.example` |
-| 命令行 / 环境变量 | `--plain-http` / `ZHIWEI_PLAIN_HTTP` | 明文 HTTP 监听，TLS 交给前置边缘（托管平台用）；自建不要开 |
-| 环境变量 | `ZHIWEI_NODE_BASE_URL` | 节点二进制的自建分发源。设了它，控制台生成的入网命令会自动带 `ZHIWEI_BASE_URL`，节点不再从 GitHub 拉包（国内 / 隔离网络用，见第 9 节） |
-
-优先级：命令行 > 环境变量 > 配置文件 > 默认值。
-
-### 控制台凭据从哪来（`ZHIWEI_ADMIN_TOKEN`）
-
-控制台登录用的 admin token 有三个来源，优先级从高到低：
-
-| 来源 | 何时用 | 重启后 |
-| --- | --- | --- |
-| `ZHIWEI_ADMIN_TOKEN` 环境变量 | 托管平台（尤其免费层） | **不变**，且不写盘 |
-| `<data-dir>/admin.token` 文件 | 自建 / 有持久卷 | 不变 |
-| 都没有时随机生成 | 首启 | 无持久卷时会重新生成 |
-
-托管平台的免费层既没有 Shell、也挂不了持久 Disk，所以「首启生成后去
-`cat <data-dir>/admin.token`」这条路走不通，而且**不挂盘时每次冷启动都会换
-一个新 token**，旧的就登录不上了。把 `ZHIWEI_ADMIN_TOKEN` 设成一个固定值
-（或在 Render 面板里用 `generateValue`）就能稳定下来——凭据在部署面板里，
-不需要进容器。
-
-日志里仍然会打印 `[ADMIN TOKEN] <token>`，但**只在随机生成时打印**：环境变量
-来源不打印（避免明文凭据留在日志系统里），也不写盘。
-
-> **两个 token 环境变量都有 16 字符下限。** 短于这个长度的值会被**拒绝并忽略**
-> （打一条 ERROR，然后退回文件 / 随机生成），而不是警告一下就照用——它们都是
-> 长期有效、又暴露在公网边缘后面的秘密，短了就是可以被暴力猜解的。建议直接用
-> ≥32 字符的随机串。
-
-> 控制台凭据只保护**浏览器读接口**。节点走 Ed25519 请求签名，与该 token 无关，
-> 所以换 token 不会影响已入网的节点。
-
-### 入网令牌从哪来（`ZHIWEI_BOOTSTRAP_TOKEN`）
-
-节点首次接入要用一个 bootstrap token。同样有两个来源：
-
-| 来源 | 有效期 | 何时用 |
-| --- | --- | --- |
-| `ZHIWEI_BOOTSTRAP_TOKEN` 环境变量 | **长期有效**（删掉变量并重启即撤销） | 托管平台，尤其免费层 |
-| 启动时随机生成，打印 `[BOOTSTRAP TOKEN]` 到日志 | **10 分钟** | 自建 / 本地开发 |
-
-默认那条路在托管平台上很难用：token 只在**进程启动那一刻**打印到日志里，
-10 分钟后就失效，而且**每次重启都换一个新的**。免费层既没有 Shell 去看文件，
-又会在闲置时缩容重启，等于每次加节点都要去蹲日志抢一个 10 分钟窗口。
-
-设了 `ZHIWEI_BOOTSTRAP_TOKEN` 之后就**不再生成一次性 token**，加节点随时可做：
-
-```sh
-ZHIWEI_MONITOR_URL=https://<你的-app>.onrender.com \
-ZHIWEI_BOOTSTRAP_TOKEN=<你设的那个值> \
-zhiwei-node --state-dir /var/lib/zhiwei-node
-```
-
-> ⚠️ 长期有效的入网令牌等于一把「随便谁拿到都能注册节点」的钥匙。请用足够随机的值
-> （**下限 16 字符，建议 ≥32**；短于下限会被拒绝并忽略，或直接用 Render 的
-> `generateValue`），并且**本机不要提交进仓库**。
-> 一个节点入网后就不再需要它了，所以入网完成后删掉这个环境变量、重启，是更稳的做法。
-
----
-
-## 3. 持久化（**必须**）
-
-`<data-dir>` 里有两样东西**丢了就麻烦**：
-
-| 路径 | 内容 | 丢失后果 |
-| --- | --- | --- |
-| `ca/ca.key.pem` | CA 私钥 | **所有已入网节点全部失效，必须重新 enroll** |
-| `monitor.db` | 节点清单与 telemetry | 历史数据全丢 |
-| `monitor.crt.pem` / `monitor.key.pem` | server 证书 | 可重新签发，节点不受影响 |
-
-因此托管平台上**必须挂持久卷**，并让 `ZHIWEI_DATA_DIR` 指向它：
-
-| 平台 | 持久化方式 | 挂载点 |
-| --- | --- | --- |
-| Render | Disk（付费） | 例如 `/var/lib/zhiwei` |
-| Railway | Volume | 例如 `/var/lib/zhiwei` |
-| Northflank | Volume | 例如 `/var/lib/zhiwei` |
-
-⚠️ 不挂卷的话：每次重新部署都会生成**新的 CA**，所有节点全部掉线。
-
----
-
-## 4. 托管平台的部署形态（**已实装**）
-
-主流 PaaS 的 Web Service 都在**边缘终止 TLS**，且不会把客户端证书转发进容器：
+Most PaaS platforms terminate TLS at the edge and don't forward client
+certificates to containers:
 
 ```
-node ──HTTPS──> PaaS 边缘（解开 TLS）──明文 HTTP──> 容器
+node ──HTTPS──> PaaS edge (TLS terminated) ──plain HTTP──> container
 ```
 
-所以节点身份**不能靠 mTLS 客户端证书**，否则到平台就失效。知微的做法是
-「**签名而非凭据**」：
+Therefore, node identity **cannot rely on mTLS client certificates**.
+ZhiWei uses **Ed25519 request signing** instead:
 
-1. 节点 enroll 时提交自己的 Ed25519 签名公钥（不再提交 CSR），monitor 存库
-2. 此后每个请求（telemetry / inventory / 拉命令 / 交回执）都带一组签名头：
-   `x-zhiwei-node` / `x-zhiwei-timestamp` / `x-zhiwei-nonce` / `x-zhiwei-signature`，
-   签名覆盖「方法 + 路径(含 query) + 时间戳 + nonce + 请求体」
-3. monitor 校验签名 + 时间窗（±300 秒）+ nonce 未重放（见 `crates/common/src/auth.rs`）
-4. 命令通道双向签名：ops 签命令、节点验签；节点签回执、monitor 验签
+1. Node submits Ed25519 public key at enrollment (not a CSR)
+2. All subsequent requests carry signature headers: `x-zhiwei-node` /
+   `x-zhiwei-timestamp` / `x-zhiwei-nonce` / `x-zhiwei-signature`
+3. Monitor validates signature + time window (±300s) + non-replayed nonce
+4. Command channel uses bidirectional signing: ops signs commands, nodes sign responses
 
-于是：
-
-| 场景 | 部署方式 | 节点连接地址 |
+| Scenario | Deployment | Node connects to |
 | --- | --- | --- |
-| 自建主机 / 内网 | 默认（monitor 自己终结 TLS，不要求客户端证书） | `https://monitor.example.com` |
-| Render / Railway / Northflank | 加 `--plain-http`（或 `ZHIWEI_PLAIN_HTTP=1`），TLS 由边缘终结 | 平台签发的 `https://<app>.onrender.com` |
+| Self-hosted | Default (monitor terminates TLS) | `https://monitor.example.com` |
+| Render / Railway / Northflank | `--plain-http` or `ZHIWEI_PLAIN_HTTP=1` | Platform-issued `https://<app>.onrender.com` |
 
-明文 HTTP 不影响鉴权强度：身份来自签名，不来自传输层；边缘仍提供 HTTPS，
-节点到边缘这一段依旧是加密的。
+### Auto-Detection (v0.1.0+)
 
-#### 自动检测（v0.1.0+）
+Without explicit `--plain-http`, monitor auto-detects managed platforms:
 
-不传 `--plain-http` 也不设 `ZHIWEI_PLAIN_HTTP` 时，monitor 会按以下环境变量
-自动判断并默认开启明文 HTTP：
-
-| 平台 | 触发变量 | 是否还会注入 `PORT` |
+| Platform | Trigger Variable | Injects `PORT` |
 | --- | --- | --- |
-| Render | `RENDER=true` | 会 |
-| Railway | 任意 `RAILWAY_*`（`RAILWAY_ENVIRONMENT_NAME` 等） | 会 |
-| Heroku | `DYNO` | 会 |
-| Northflank | **没有可靠标记** | **不会** |
+| Render | `RENDER=true` | Yes |
+| Railway | Any `RAILWAY_*` variable | Yes |
+| Heroku | `DYNO` | Yes |
+| Northflank | No reliable marker | No |
 
-显式传 `ZHIWEI_PLAIN_HTTP=0` 总是覆盖自动判断（自建主机想保留 TLS 本地终结时用）。
-
-**自动检测只是便利，不是保证。** 平台换一套内部约定它就会失效，所以托管平台
-一律建议**显式配**这两个变量，别赌自动判断：
-
-| 环境变量 | 值 | 作用 |
-| --- | --- | --- |
-| `ZHIWEI_PLAIN_HTTP` | `1` | 关掉本地 TLS，交给边缘终结 |
-| `ZHIWEI_LISTEN` | `0.0.0.0:<容器端口>` | 绑所有网卡；只绑回环的话边缘够不着 |
-
-`ZHIWEI_LISTEN` 也可以换成设 `PORT=<容器端口>`——检测到 `PORT` 时会自动绑
-`0.0.0.0:<PORT>`。**Render / Railway / Heroku 会替你注入 `PORT`，Northflank 不会**，
-所以在 Northflank 上这两个变量都得自己加。
-
-#### Northflank 实战（踩过的坑）
-
-Northflank 既不注入 `PORT`、也没有可用的环境变量前缀，于是两件事都走了自建默认值：
-
-1. 监听落到 `127.0.0.1:8443`，边缘从容器外连不进来 → 健康检查失败 / 502
-2. `plain_http` 判为 false，容器按 TLS 处理握手，而边缘转发来的是明文
-   → `TLS handshake failed ... InvalidContentType`
-
-它的日志长这样。注意 `paas_auto_detected=true` 只表示「你没显式配」，**不代表判对了**：
+Always **explicitly configure** these two for managed platforms:
 
 ```
-INFO zhiwei_monitor: starting zhiwei-monitor listen=127.0.0.1:8443
-     plain_http=false paas_auto_detected=true
+ZHIWEI_PLAIN_HTTP=1
+ZHIWEI_LISTEN=0.0.0.0:<container port>
 ```
 
-**做法**：Service → Environment 加两条，然后重新部署：
+### Northflank Gotcha
+
+Northflank doesn't inject `PORT`. Without configuration, the server binds
+`127.0.0.1:8443` (edge can't reach it) and treats plain HTTP as TLS
+handshake. Set:
 
 ```
 ZHIWEI_PLAIN_HTTP=1
 ZHIWEI_LISTEN=0.0.0.0:8443
 ```
 
-端口要和 Northflank 服务里配的 Port、以及镜像的 `EXPOSE 8443` 一致。改完日志里
-应该是 `listen=0.0.0.0:8443 plain_http=true`，且不再有回环告警。
-
-> v0.1.0+ 起，monitor 发现绑的是回环地址会主动打一条 WARN——就是为了让这个坑
-> 在启动日志里一眼可见，而不是等健康检查失败了再去猜。
-
-**改环境变量后必须重新部署。** 环境变量是注入到容器进程里的，改完不重启等于没改。
-判断有没有生效，看启动那行：
-
-```
-starting zhiwei-monitor ... listen=0.0.0.0:8443 plain_http=true   ← 对了
-starting zhiwei-monitor ... listen=127.0.0.1:8443 plain_http=false
-                             paas_auto_detected=true              ← 变量没生效
-```
-
-`paas_auto_detected=true` 只说明「`ZHIWEI_PLAIN_HTTP` 不存在」，不代表判对了。
-另外 `ZHIWEI_PLAIN_HTTP` 只接受 `1/0/true/false/yes/no/on/off`，别填 `auto`。
-
-配错时的另一条线索是健康检查每 60 秒戳一次 TLS 端口：
-
-```
-WARN TLS 握手失败：对方发的是明文 HTTP，而本进程按 TLS 处理。
-     部署在托管平台（边缘已终结 TLS）后面时，请设 ZHIWEI_PLAIN_HTTP=1 并重新部署
-```
-
-v0.1.0+ 起这条会带上下一步动作，并且**同类告警限流为每分钟一条**（其余降到 DEBUG），
-免得把启动信息刷掉。
-
-#### Northflank 上「部署成功但没有域名」
-
-Northflank 只在**端口被标为 Public** 时才分配域名，格式是
-`[port-name]--[service-name]--[random].code.run`。而且**只有 HTTP / HTTP2
-协议的端口才能公开**——TCP / UDP 要另外买 L4 负载均衡器，拿不到这种域名。
-
-检查顺序：**Run → Networking** 看端口列表
-
-1. 没有 8443 这一条 → 点 **Detect ports**（Northflank 会扫镜像的 `EXPOSE`）
-2. 有 8443 但 Protocol 是 TCP → 改成 **HTTP**
-3. Protocol 对了但还是没域名 → 把 **Accessibility 改成 Public**（默认是 Private）
-
-端口配置改了**不用重启**服务，保存后域名立刻出现。详情见 Northflank 官方文档
-[Configure ports](https://northflank.com/docs/v1/application/network/configure-ports)。
-
-> 这里有个容易踩的坑：**`EXPOSE` 的写法决定默认可见性**。
-> `EXPOSE 8443` 会被当成 HTTP 且默认 public；写成 `EXPOSE 8443/tcp` 就变成
-> TCP + private，域名永远出不来。本仓库的 Dockerfile 用的是前者，别改。
-
-> 没配自动检测时的症状：Render 把明文 HTTP 转发给容器，容器却按 TLS 处理握手，
-> 日志里出现 `TLS handshake failed error=received corrupt message of type
-> InvalidContentType`——边缘发的 `GET /healthz` 被容器当成 ClientHello 解析。
-> 修法就是打开明文 HTTP（`ZHIWEI_PLAIN_HTTP=1`）。
-
-### 命令通道：ops-server 与 monitor 同容器运行
-
-平台部署只有**一个 Web Service**（`zhiwei-monitor`），没有第二个进程的位置；
-而控制台里「看容器日志 / 文件日志、杀进程、重启主机、续签证书」都要经
-ops-server 签名才能下发。镜像的 entrypoint 因此在同一个容器里先起
-`zhiwei-ops`、再 `exec zhiwei-monitor`（见 `scripts/docker-entrypoint.sh`），
-两个进程共用 `ZHIWEI_DATA_DIR`：
-
-- 两个进程仍然**各自独立**：签名私钥只在 `zhiwei-ops` 进程内（`ops.key`，0600），
-  monitor 只读 `ops.pub` 下发给节点做 TOFU；monitor 被攻陷也伪造不了命令。
-- entrypoint 会等 `ops.pub` 落盘（默认最多 5 秒，`ZHIWEI_OPS_WAIT` 可调）再放行
-  monitor；即使等超时也照常启动 monitor——它在缓存为空时会按需再读一次盘，
-  新节点 enroll 时照样能拿到公钥。
-- `ZHIWEI_OPS_DISABLE=1` 可以退回「只跑数据平面」（telemetry + 探活 + 证书扫描）：
-  此时命令通道不可用，控制台里的日志 / 杀进程 / 重启会明确报
-  「命令通道未启用」。
-
-> **挂持久卷**：`ops.key` 和 `monitor.db` 都在数据目录里。不挂卷时每次冷启动
-> 都会换一个签名密钥，已经入网、pin 了旧公钥的节点会拒绝新命令（表观是
-> 「命令一直没回执」）。数据目录挂上卷，`ops.key` 就稳定了。
->
-> Northflank / Render 上若用**面板里的 Command 字段**覆盖了 entrypoint，
-> ops-server 就不会被拉起——那种情况下要么删掉覆盖，要么自己把
-> `zhiwei-ops &` 加进自定义启动命令里。
-
-### 只跑数据平面（不启 ops-server）
-
-`ZHIWEI_OPS_DISABLE=1` 时 entrypoint 不拉 ops-server，monitor 读不到
-`ops.pub`，enroll 时不下发 `ops_public_key`，节点 `state.ops_public_key`
-一直是 `None` —— 节点日志里会出现：
-
-```
-WARN zhiwei_node::control: 未持有 ops 公钥，控制通道不会拉取命令（安全侧默认拒绝）
-```
-
-这是**设计上的安全默认**：拿不到 ops 公钥 = 没法验签命令 = 不可能执行任何
-来自 monitor 的「杀进程 / 重启主机 / 停容器」之类的写操作。只想要
-telemetry + 探活 + 证书扫描时，这条 WARN 可以安全忽略；此时控制台里的
-日志 / 杀进程 / 重启会报「ops-server 不可用：连不上 …：该地址上没有进程在监听」。
-
-> **已经误入这个状态的节点怎么恢复**：ops 公钥只在 enroll 响应里下发一次
-> （`EnrollResponse.ops_public_key`），telemetry 不带、也没有管理接口能补发——
-> 节点自己不会好。先把 ops-server 跑起来（确认数据目录里 `ops.pub` 已落盘），
-> 然后二选一：
-> - **代价最小**：在节点上把 monitor 的 `ops.pub` 拷成节点状态目录的 `ops.pub`
->   （它是公开值），重启节点即可。拉命令的验签用节点自己的 `signing.key`，
->   身份不变，控制台里不会多出机器。
-> - **干净重装**：给节点加 `--reinstall` 重新入网（会换 `node_id`，旧记录要手动删）。
-
-### 历史备选：拆成两个 Service（未采用）
-
-起一个独立的 `zhiwei-ops` Service，让它的 `ops.pub` 通过共享卷 / 外部存储
-（KMS / Secrets Manager / S3）传给 monitor。这条路**未实装**，而且要注意
-`zhiwei-ops` 的 `/exec` 默认只绑回环、没有自己的鉴权——跨机暴露等于把
-「签发任意命令」的能力交给网络对端。要拆 Service 得先给 ops 加一层
-调用方鉴权，别只是把监听地址改成 `0.0.0.0`。
-
-### 节点侧的 CA pinning（踩过一次的坑）
-
-节点对 monitor 的 TLS 校验有两条路：
-
-| 部署 | 节点信任根 | 来源 |
-| --- | --- | --- |
-| 自建（monitor 自己终结 TLS） | **pin monitor 的本地 CA** | enroll 响应下发 `ca_cert_pem`，节点存成 `<state>/ca.crt.pem` |
-| 托管平台（边缘终结 TLS） | **系统根** | enroll **不下发** CA（本地 CA 与边缘的正经证书无关） |
-
-规则是「**本进程终结 TLS 才下发本地 CA**」（`routes::enroll_ca_pem`）。这条曾经
-没做到过：monitor 在托管平台上照样把自己的本地 CA 下发给节点，节点把它当唯一
-信任根，于是**enroll 成功、之后每个请求都 TLS 校验失败**——失败出现在 enroll
-之后，很容易误判成网络问题。
-
-两个补救开关（`zhiwei-node`）：
-
-- `--monitor-ca <path>`：用指定的 CA 覆盖 enroll 下发的那个（自建但用的是别的
-  证书时用）
-- `--monitor-ca -`：**强制不 pin、走系统根**。给「曾经对着自建 monitor 入网过、
-  机器上留着旧 CA，现在改指向托管平台」的节点用——省得删掉 `node.id` 重新入网
-
-> 自建部署若想额外加一层防御，可以让前置反代做 mTLS——但那是可选项，
-> 不是节点入网的必要条件。
-
-### 历史备选（未采用）
-
-**TCP 穿透**（容器自己终结 TLS、平台暴露裸 TCP）曾作为备选：Railway / Northflank
-支持，但 **Render 不支持公开裸 TCP**，且节点连不上平台自动签发的 HTTPS 证书。
-已放弃。
+Then verify in startup logs: `listen=0.0.0.0:8443 plain_http=true`.
+Also ensure the port is protocol **HTTP** (not TCP) and **Public** in
+Northflank's port settings.
 
 ---
 
-## 5. 节点部署
+## Configuration Reference
 
-node-agent 需要读取宿主机的 CPU / 内存 / 磁盘 / 网络，**不适合容器化**，
-建议以二进制 + systemd 部署在每台被监控主机上：
+| Source | Key | Description |
+| --- | --- | --- |
+| Env | `PORT` | PaaS injection. Binds `0.0.0.0:$PORT` when no explicit listen is configured |
+| Env | `ZHIWEI_DATA_DIR` | Data directory (overrides config file) |
+| Env | `ZHIWEI_LISTEN` | Listen address (overrides config and `PORT`) |
+| Env | `ZHIWEI_PLAIN_HTTP` | Plain HTTP mode for edge-terminated TLS |
+| Env | `ZHIWEI_ADMIN_TOKEN` | Console credential (min 16 chars) |
+| Env | `ZHIWEI_BOOTSTRAP_TOKEN` | Long-lived enrollment token (min 16 chars) |
+| Env | `ZHIWEI_OPS_DISABLE` | Disable ops-server (data-plane only) |
+| Env | `RUST_LOG` | Log level, default `info,zhiwei=debug` |
+| CLI | `--config` | Config file path, default `config/monitor.toml` |
+| CLI | `--data-dir` | Same as `ZHIWEI_DATA_DIR` |
+| CLI | `--listen` | Same as `ZHIWEI_LISTEN` |
+| CLI | `--plain-http` | Same as `ZHIWEI_PLAIN_HTTP` |
 
-### 装二进制（一行命令）
+Priority: CLI > env > config file > defaults.
 
-打好 tag（如 `v0.1.0`）后，release 工作流会为六个平台产出预编译包
-（linux x86_64/aarch64 × musl/gnu、macOS arm64/x86_64）。安装脚本自动识别
-系统与架构、下载、校验 SHA256、装到 `/usr/local/bin`：
+---
+
+## Persistence (Required)
+
+`<data-dir>` contains:
+
+| Path | Content | Loss consequence |
+| --- | --- | --- |
+| `ca/ca.key.pem` | CA private key | All enrolled nodes invalidated, must re-enroll |
+| `monitor.db` | Node list + telemetry | All history lost |
+| `ops.key` | Ops signing key | Commands rejected until ops restarts with new key |
+
+**Always mount a persistent volume** on managed platforms:
+
+| Platform | Method | Mount point |
+| --- | --- | --- |
+| Render | Disk (paid) | e.g. `/var/lib/zhiwei` |
+| Railway | Volume | e.g. `/var/lib/zhiwei` |
+| Northflank | Volume | e.g. `/var/lib/zhiwei` |
+
+Without a volume: every redeploy generates a new CA, all nodes go offline.
+
+---
+
+## Node Deployment
+
+The node agent reads host CPU / memory / disk / network, **not suitable for
+containerization**. Deploy as a binary + systemd on each host.
+
+### Install Binary
+
+After a tag is pushed, release workflow produces pre-built packages for
+Linux (x86_64/aarch64 × musl/gnu) and macOS (arm64/x86_64).
+The install script auto-detects OS and architecture, verifies SHA256:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/hancic128/zhiwei/main/scripts/install.sh | sh
 ```
 
-Linux 默认装 musl 静态版（不挑 glibc 版本，老发行版也能跑）。常用开关：
+Default installs `zhiwei-node`; use `-s -- --bin monitor` to install monitor.
+
+**China / isolated networks**: set `ZHIWEI_BASE_URL` to your own mirror:
 
 ```sh
-# 装 monitor 而不是 node-agent（会连带装 zhiwei-ops，命令通道的控制平面）
-... | sh -s -- --bin monitor
-
-# 指定版本 / 目录 / 用动态链接版
-... | sh -s -- --version 0.1.0 --dir ~/.local/bin --libc gnu
-
-# 走自建制品仓库（国内加速，每次发版由 release.yml 自动同步）
-ZHIWEI_BASE_URL=https://artifacts.hancic.site/releases/hancic128/zhiwei ... | sh
+curl -fsSL https://raw.githubusercontent.com/hancic128/zhiwei/main/scripts/install.sh \
+  | ZHIWEI_BASE_URL=https://artifacts.hancic.site/releases/hancic128/zhiwei sh
 ```
 
-> **仓库现在是私有的**：匿名 `curl` 拿不到 raw 文件和 release 资产。开源前想用这条
-> 命令，要么把仓库设为 public，要么 `export GITHUB_TOKEN=<PAT>` 后重跑
-> （脚本会把 token 带上请求）。
-
-不想用预编译包的话，本地编也一样：
+### Enroll
 
 ```sh
-cargo build --release --bin zhiwei-node
-install -m 0755 target/release/zhiwei-node /usr/local/bin/
-```
-
-### 入网
-
-```sh
-# 首次：入网
 ZHIWEI_MONITOR_URL=https://monitor.example.com \
-ZHIWEI_BOOTSTRAP_TOKEN=<入网令牌> \
-zhiwei-node --state-dir /var/lib/zhiwei-node --interval 30
-
-# 之后：重启免 enroll（状态已落盘）
+ZHIWEI_BOOTSTRAP_TOKEN=<enrollment token> \
 zhiwei-node --state-dir /var/lib/zhiwei-node --interval 30
 ```
 
-> 想让节点在 SSH 退出、服务器重启后都持续上报？用 `install-node-service.sh`
-> 自动装 systemd unit / launchd plist，**只需要传一个 token**：
->
-> ```sh
-> curl -fsSL https://raw.githubusercontent.com/hancic128/zhiwei/main/scripts/install-node-service.sh \
->   | sudo sh -s -- --token zhi-bt-xxxxxxxx
-> ```
->
-> 卸载：`curl -fsSL ... | sudo sh -s -- uninstall`
+After first enrollment, subsequent starts skip enrollment (state persisted).
 
-> 同样也可以用独立脚本 `uninstall-node-service.sh`，效果一致但可单独下载：
->
-> ```sh
-> curl -fsSL https://raw.githubusercontent.com/hancic128/zhiwei/main/scripts/uninstall-node-service.sh \
->   | sudo sh -s -- --purge --remove-binary
-> ```
->
-> `--purge` 连 state-dir 一起删（节点身份永久失效，要重新 enroll），`--remove-binary` 顺带 rm 二进制。
+To set up as a systemd/launchd service (auto-restart on boot), use the
+install script:
 
-入网令牌怎么来见上面的
-[「入网令牌从哪来」](#入网令牌从哪来zhiwei_bootstrap_token)——托管平台用
-`ZHIWEI_BOOTSTRAP_TOKEN`，自建可以抢启动日志里那个 10 分钟的一次性 token。
+```sh
+curl -fsSL https://raw.githubusercontent.com/hancic128/zhiwei/main/scripts/install-node-service.sh \
+  | sudo sh -s -- --token zhi-bt-xxxxxxxx
+```
 
-节点本地状态：
+Node local state:
 
-| 文件 | 内容 | 权限 |
+| File | Content | Notes |
 | --- | --- | --- |
-| `signing.key` | Ed25519 签名私钥（32 B） | 0600 |
-| `node.id` | monitor 分配的节点 ID | — |
-| `ops.pub` | ops 控制平面公钥（enroll 时 TOFU 存下） | — |
-| `ca.crt.pem` | monitor CA 证书（**仅自建部署**下会有这个文件；托管平台走系统根，见第 4 节） | — |
+| `signing.key` | Ed25519 signing private key | 0600 permissions |
+| `node.id` | Monitor-assigned node ID | — |
+| `ops.pub` | Ops control-plane public key | TOFU on enroll |
+| `ca.crt.pem` | Monitor CA certificate | Self-hosted only |
 
 ---
 
-## 6. 上线前检查清单
+## Enrollment via Console
 
-- [ ] `<data-dir>` 已挂持久卷，且 `ZHIWEI_DATA_DIR` 指向它
-- [ ] **CA 私钥已备份**（丢了就得重 enroll 全部节点）
-- [ ] 镜像按 `--platform linux/amd64` 构建（Apple Silicon 上默认是 arm64）
-- [ ] 托管平台部署已显式设 `ZHIWEI_PLAIN_HTTP=1`（别赌自动检测，Northflank 上它不生效）
-- [ ] 托管平台已设 `ZHIWEI_LISTEN=0.0.0.0:<端口>`（或让平台注入 `PORT`），启动日志无回环告警
-- [ ] Northflank：端口标为 **HTTP + Public**，确认 `*.code.run` 域名已分配
-- [ ] 控制台凭据已就位：自建看首启日志的 `[ADMIN TOKEN]`，
-      托管平台（尤其没有 Shell 的免费层）用 `ZHIWEI_ADMIN_TOKEN` 固定
-- [ ] 已确认节点能连到 monitor 的地址（含防火墙 / 安全组）
-- [ ] `RUST_LOG` 已按需调整，避免生产环境刷 debug 日志
-- [ ] 固定入网令牌 ≥16 字符（建议 ≥32）；节点入网后删掉变量并重启更稳
+On managed platforms where you don't have repo access, enroll nodes through
+the console:
 
----
-
-## 8. 节点入网（托管平台，不用下载代码）
-
-早期文档里出现过 `./scripts/dev.sh start` 这类命令——那是**本地开发**用的。
-部署到 Render / Northflank 之后，用户手上没有仓库代码，也不该去翻构建日志。
-正确的入网路径是**在控制台里生成一条命令**：
-
-### 8.1 生成入网命令
-
-1. 打开控制台 →「设置 → 入网令牌」→「新建入网令牌」
-2. 选 TTL（1 小时 / 24 小时 / 7 天，默认 24 小时），可选填一个 label（例如 `prod-web-01`）
-3. 点「创建」，弹窗会给出整段**可直接复制**的命令：
+1. Settings → Enrollment Tokens → New Token
+2. Choose TTL (1h / 24h / 7d), optional label
+3. Copy the provided command
 
 ```sh
 curl -sSL https://<your-monitor>/install-node.sh \
@@ -527,52 +239,21 @@ curl -sSL https://<your-monitor>/install-node.sh \
     bash -s
 ```
 
-其中 `<your-monitor>` 由后端从请求的 `X-Forwarded-Proto` + `Host` 推断——
-托管平台边缘会注入这两个头，所以生成出来的就是平台签发的 HTTPS 域名，
-不需要在部署面板里额外配置。
-
-> 命令里的 token 是**一次性凭据**：TTL 到期后自动失效。
-> 也可以在「入网令牌」列表里手动撤销，撤销立即生效。
-
-### 8.2 在目标机器上执行
-
-要求 **root**（脚本要写 `/usr/local/bin` 和 systemd unit / launchd plist）：
+On the target machine (requires root):
 
 ```sh
 curl -sSL https://<your-monitor>/install-node.sh | sudo -E bash -s
 ```
 
-> 国内机器或出网受限环境，另见[第 9 节「国内 / 隔离网络部署」](#9-国内--隔离网络部署)——
-> 需要额外带 `ZHIWEI_BASE_URL` 把下载换到自建源。
-
-脚本做的事：
-
-1. 从 GitHub Release 下载 `zhiwei-<target>.tar.gz`（内含 `zhiwei-node` 与 `VERSION`）；
-   设了 `ZHIWEI_BASE_URL` 则改从自建源下载
-2. 校验 `.sha256`（有就校验，没有就跳过）
-3. 装二进制到 `/usr/local/bin/zhiwei-node`
-4. 写 `/etc/zhiwei-node.env`（mode `0600`，含 `ZHIWEI_MONITOR_URL` + `ZHIWEI_BOOTSTRAP_TOKEN`）
-5. 装常驻服务并设开机自启：
-   - Linux：`/etc/systemd/system/zhiwei-node.service`，`systemctl enable --now`
-   - macOS：`/Library/LaunchDaemons/com.zhiwei.node.plist`，`launchctl bootstrap system`
-     （用 LaunchDaemon 而不是 LaunchAgent：脚本本来就要求 root，daemon 不依赖
-     「有人登录桌面」也开机自启。plist 是 0644，**不内嵌令牌**——它先 `source`
-     那个 0600 的 env 文件，再 exec 二进制，等价于 systemd 的 `EnvironmentFile`）
-6. 节点随后出现在控制台「节点」页
-
-支持 Linux（`x86_64` / `aarch64`，systemd）与 macOS（`arm64` / `x86_64`，launchd）。
-
-卸载：
+### Upgrade (preserves identity)
 
 ```sh
-curl -sSL https://<your-monitor>/install-node.sh | sudo bash -s -- --uninstall
+curl -sSL https://<your-monitor>/install-node.sh | sudo bash -s -- --upgrade
 ```
 
-保留 `/var/lib/zhiwei-node`（节点的签名私钥与 `node.id`）——
-重装不会换身份，也就不会在控制台里多出一个「幽灵节点」。
-要连数据一起清理，手动 `rm -rf /var/lib/zhiwei-node`。
+Upgrades binary only; state-dir identity and config are untouched.
 
-#### 干净重装（换身份，或补回缺失的 `ops.pub`）
+### Reinstall (new identity)
 
 ```sh
 curl -sSL https://<your-monitor>/install-node.sh | \
@@ -581,174 +262,45 @@ curl -sSL https://<your-monitor>/install-node.sh | \
   sudo -E bash -s -- --reinstall
 ```
 
-`--reinstall` 先停服务，再删掉已装二进制、env 文件，以及状态目录里的
-`node.id` / `signing.key` / `ops.pub` / `ca.crt.pem`，然后完整装一份并重新入网。
-**凡本次要重新入网的场景都走这条清理路径**——`--reinstall`、换了 monitor、
-本机还没有身份——所以不会留下「新身份 + 旧二进制 / 旧 env」的混合态。
-
-> 清理动作排在**下载并校验完新包之后**：下载失败时一个旧文件都不会动，
-> 节点不会因为一次网络抖动被清成半成品。
-
-⚠️ 重新入网会分配**新的 node_id**：控制台里旧记录不会自动消失，确认新节点上报
-正常后手动删掉它（历史 / 别名 / 标签都留在旧记录上）。想保留身份就别加这个参数。
-
-#### 升级（保留身份）
+### Uninstall
 
 ```sh
-curl -sSL https://<your-monitor>/install-node.sh | sudo bash -s -- --upgrade
+curl -sSL https://<your-monitor>/install-node.sh | sudo bash -s -- --uninstall
 ```
-
-`--upgrade` 只做两件事：装最新版二进制、把服务配置（unit / plist）刷新到当前模板
-（内容没变就不覆盖），然后重启服务。**不动** `state-dir` 里的身份、不重写
-`/etc/zhiwei-node.env`、不重新入网，所以**不需要 monitor URL 与入网令牌**——
-拿得到入网命令就能升级，令牌过期了也能升级。
-
-- 想升到指定版本（不追 latest）：`ZHIWEI_VERSION=0.1.6`
-- 装的时候带了 `ZHIWEI_BASE_URL`（国内自建源），它会被记进 env 文件，
-  升级时自动沿用，不用每次回忆那个地址
-- 服务配置模板里有加固项（`ProtectSystem` / `ProtectHome` / `NoNewPrivileges` …），
-  升级是**老节点吃到模板修正**的路径：模板一变，`--upgrade` 就会把 unit 换掉并重启
-
-> `--upgrade` / `--reinstall` / `--uninstall` 三个动作互斥，一次只能给一个。
-
-### 8.3 长期入网令牌（可选）
-
-如果不想每次生成一次性命令（例如内网里批量铺节点），可以设环境变量
-`ZHIWEI_BOOTSTRAP_TOKEN=<一个 >=16 字符的随机串>`：
-
-- 它在**整个进程生命周期内长期有效**（重启也不变，因为来自环境变量）
-- 在「入网令牌」列表里会标成 `长期`
-- **撤销方式**：删掉环境变量并重新部署
-
-> 一次性令牌和长期令牌共用同一个 `BootstrapTokens` 存储，
-> 但一次性令牌只活在内存里，重启即失效——这也是为什么清单里建议
-> 托管平台用一次性令牌：泄漏窗口更小。
-
-### 8.4 排查
-
-| 现象 | 原因 | 处理 |
-| --- | --- | --- |
-| 命令执行后 404 | release 还没产出该平台资产 | 确认 GitHub Release 里有 `zhiwei-<target>.tar.gz` |
-| `install-node.sh` 下载到 HTML | 反代把脚本路径也喂给了 SPA 兜底 | 确认 `/install-node.sh` 是 monitor 在服务（不是 CDN 覆盖） |
-| 节点没出现在控制台 | token 过期 / 已被撤销 / 网络不通 | 看 `/var/log/syslog` 里的 `zhiwei-node` 日志 |
-| 卸载后重装多出一个节点 | 手动删过 `/var/lib/zhiwei-node` | 那等于换身份，属预期；不删数据目录则不会 |
-| `/root/...` 下的证书扫不到 | 老 unit 的 `ProtectHome=true` 把 `/root` 挂成空目录（`/root/nginx-certs/*.pem` 是内置扫描位置之一） | 本机重跑 `--upgrade` 把 unit 换成 `ProtectHome=read-only` 再重启；`journalctl -u zhiwei-node` 里能看到扫描结果是空 |
 
 ---
 
-## 9. 国内 / 隔离网络部署
+## Pre-Launch Checklist
 
-默认形态有两个隐含依赖，国内机器（或任何出网受限的机器）都不满足：
+- [ ] `<data-dir>` has a persistent volume; `ZHIWEI_DATA_DIR` points to it
+- [ ] CA private key backed up (loss requires re-enrolling all nodes)
+- [ ] Image built with `--platform linux/amd64` (Apple Silicon defaults to arm64)
+- [ ] Managed platform: `ZHIWEI_PLAIN_HTTP=1` explicitly set
+- [ ] Managed platform: `ZHIWEI_LISTEN=0.0.0.0:<port>` (or platform injects `PORT`)
+- [ ] Northflank: port set to **HTTP** + **Public**, `*.code.run` domain assigned
+- [ ] Console credential in place (self-hosted: check startup logs; managed: set `ZHIWEI_ADMIN_TOKEN`)
+- [ ] Node can reach monitor address (check firewall / security group)
+- [ ] `RUST_LOG` adjusted for production (avoid debug spam)
+- [ ] Bootstrap token ≥ 16 chars (≥ 32 recommended); delete variable and restart after enrollment
 
-| 依赖 | 默认值 | 国内实际体验 |
-| --- | --- | --- |
-| monitor 地址 | 托管平台域名（如 `zhiwei.onrender.com`） | 连不上 |
-| 二进制下载 | `github.com/.../releases/latest/download/...` | 数十 KB/s 到超时 |
+---
 
-两处都可以换掉，**不需要改代码**，靠环境变量：
+## China / Isolated Network Deployment
 
-1. **monitor 自建在国内主机**（Render / Northflank 那套是给公网用户用的）
-2. **下载源换成自建制品仓库**（`ZHIWEI_BASE_URL`）
+Two defaults that don't work in China:
 
-### 9.1 步骤一：在国内主机起 monitor
-
-任意一台国内 Linux 都能跑（SQLite，无外部依赖）。注意公网部署要给它一个域名，
-否则节点侧拿 HTTPS 会失败：
-
-```sh
-# 在国内主机 A 上
-curl -fsSL https://raw.githubusercontent.com/hancic128/zhiwei/main/scripts/install.sh \
-  | ZHIWEI_BIN=monitor \
-    ZHIWEI_BASE_URL=https://artifacts.hancic.site/releases/hancic128/zhiwei \
-    sh -s -- --version 0.1.0-alpha.2
-```
-
-> `install.sh` 在目标目录不可写时会自己 `sudo`，不需要手工加。
-> `ZHIWEI_BASE_URL` 同样适用（国内直连，不然 GitHub 拉二进制会很慢）。
-
-详细参数（数据目录、监听地址、admin token）见第 2 节。跑起来后控制台入口是
-`http://<A>:8081`（或 `ZHIWEI_LISTEN` 指定的地址）。
-
-> **国内机器起 monitor 的两个前提**：① 有公网 IP 或内网可达；② 走 HTTPS 需自备证书，
-> 或者用前置 nginx 终结 TLS（`ZHIWEI_PLAIN_HTTP=1` + 反代）。
-> 节点侧对 monitor 的地址只做 `https://` 前缀校验，不做 CA pinning（见第 4 节末），
-> 所以换成任何可信域名都行。
-
-### 9.2 步骤二：把自建下载源配在 monitor 上（推荐）
-
-`install-node.sh` 支持 `ZHIWEI_BASE_URL`（与 `install.sh` 同一套语义），把节点
-二进制的下载从 GitHub 换到自建仓库。
-
-**在 monitor 上设一次 `ZHIWEI_NODE_BASE_URL`**，之后控制台生成的每条入网命令
-都会自动带上这一行——执行者不用记得加：
-
-```sh
-# monitor 侧（9.1 那台）
-ZHIWEI_NODE_BASE_URL=https://artifacts.hancic.site/releases/hancic128/zhiwei
-```
-
-配好后控制台生成的命令长这样（多了一行，其余不变）：
-
-```sh
-curl -sSL https://zhiwei.<国内域名>/install-node.sh \
-  | ZHIWEI_MONITOR_URL=https://zhiwei.<国内域名> \
-    ZHIWEI_BOOTSTRAP_TOKEN=zhi-bt-xxxxxxxx \
-    ZHIWEI_BASE_URL=https://artifacts.hancic.site/releases/hancic128/zhiwei \
-    sudo -E bash -s
-```
-
-不用这个变量的场合（临时 / 单机）也可以手工加：
-
-```sh
-curl -sSL https://zhiwei.<国内域名>/install-node.sh \
-  | ZHIWEI_BASE_URL=https://artifacts.hancic.site/releases/hancic128/zhiwei \
-    ZHIWEI_MONITOR_URL=https://zhiwei.<国内域名> \
-    ZHIWEI_BOOTSTRAP_TOKEN=zhi-bt-xxxxxxxx \
-    sudo -E bash -s
-```
-
-| 变量 | 作用 |
+| Default | Workaround |
 | --- | --- |
-| `ZHIWEI_MONITOR_URL` | 入网目标，控制台生成时已经填好（国内 monitor 的域名） |
-| `ZHIWEI_BOOTSTRAP_TOKEN` | 一次性入网凭据，控制台生成时已经填好 |
-| `ZHIWEI_BASE_URL` | 二进制下载源。monitor 设了 `ZHIWEI_NODE_BASE_URL` 就自动带上；否则手工加 |
-| `ZHIWEI_VERSION` | 可选，指定版本（如 `0.1.0-alpha.2`）；不设则取 `latest/` |
+| Monitor address: platform domain | Run monitor on a China-hosted server |
+| Binary download: GitHub Releases | Set `ZHIWEI_BASE_URL` to your own mirror |
 
-自建源的目录形状必须与 GitHub Release 一致：
+1. **Run monitor in China**: any Linux server, SQLite has no external dependencies.
+   Use `ZHIWEI_PLAIN_HTTP=1` if behind an nginx reverse proxy.
+2. **Set `ZHIWEI_NODE_BASE_URL` on monitor**: every enrollment command generated
+   by the console will auto-include `ZHIWEI_BASE_URL` — operators don't need to add it manually.
 
+Binary source directory layout must match GitHub Release:
 ```
-<ZHIWEI_BASE_URL>/latest/<asset>            # 或
+<ZHIWEI_BASE_URL>/latest/<asset>
 <ZHIWEI_BASE_URL>/v<version>/<asset>
 ```
-
-`hancic-artifacts` 由 zhiwei 的 release 工作流在每次打 tag 时自动同步，形状天然对齐。
-
-> **改了 `install-node.sh` 必须重新构建 monitor**：脚本是编译期内嵌进二进制的
-> （`include_str!`），`GET /install-node.sh` 吐的永远是构建时那一份。
-> 单一来源在仓库根的 `scripts/install-node.sh`，不存在副本漂移。
-
-### 9.3 步骤三（可选）：长期令牌
-
-内网批量铺节点时，不想每次去控制台点生成，就设长期令牌：
-
-```sh
-# monitor 侧
-ZHIWEI_BOOTSTRAP_TOKEN=<>=32 字符随机串>
-
-# 节点侧
-curl -sSL https://zhiwei.<国内域名>/install-node.sh \
-  | ZHIWEI_BASE_URL=... \
-    ZHIWEI_MONITOR_URL=https://zhiwei.<国内域名> \
-    ZHIWEI_BOOTSTRAP_TOKEN=<同一个串> \
-    sudo -E bash -s
-```
-
-### 9.4 国内部署排查
-
-| 现象 | 原因 | 处理 |
-| --- | --- | --- |
-| `curl: (7) Failed to connect` 到 monitor | monitor 只在境外 | 按 9.1 在国内起一个 |
-| 下载卡住 / 数十 KB/s | 走了 GitHub Releases | 带上 `ZHIWEI_BASE_URL`（9.2） |
-| `下载失败: .../v1.2.3/...` | 自建源没同步该 tag | 确认 release 工作流的 artifacts job 成功，或去掉 `ZHIWEI_VERSION` 用 `latest` |
-| 节点能连 monitor 但控制台看不到 | 国内 monitor 的 `ZHIWEI_LISTEN` 绑了回环 | 见第 2 节，托管/公网场景要 `0.0.0.0:<port>` |
-| 入网命令里的域名是境外域名 | 生成命令时访问的是境外 monitor | 在国内 monitor 的控制台里重新生成 |

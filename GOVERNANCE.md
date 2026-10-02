@@ -48,8 +48,8 @@ operates under a **benevolent dictator** model with a clear vision and scope.
 ## Issue Handling
 
 Issues are closed without action if they:
-- Don't align with [positioning](./docs/POSITIONING.md)
-- Request features excluded in "明确不做"
+- Don't align with the project's goals (single operator managing multiple machines)
+- Request out-of-scope features (multi-user, HA, dashboards, etc.)
 - Are duplicates or lack sufficient detail
 
 This is not unfriendly - it's how a single-maintainer project stays focused.

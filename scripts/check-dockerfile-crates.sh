@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 #
-# 校验 Dockerfile 的「依赖桩层」覆盖了 workspace 的全部成员。
+# Verify the Dockerfile's "dependency stub" layer covers all workspace members.
 #
-# 为什么要这个校验：cargo 解析 workspace 时要求 [workspace] members 里的每个
-# 目录都存在。Dockerfile 为了做依赖缓存只逐个 COPY 各 crate 的 Cargo.toml，
-# 漏一个就会在 **构建镜像时** 才报错：
+# Why this check exists: cargo resolves the workspace and requires every
+# [workspace] member directory to exist. The Dockerfile only COPYs each crate's
+# Cargo.toml for dependency caching. Missing one causes an error at **image build time**:
 #
 #   error: failed to load manifest for workspace member `/src/crates/ops-server`
 #
-# 这类错误本地 cargo build 完全测不出来（本地整棵树都在），只有部署才现形，
-# 所以用脚本卡在本地。新增 crate 时改完 Dockerfile 先跑它。
+# This error is invisible locally (all files exist), only surfaces on deploy.
+# Run this after adding a crate and modifying the Dockerfile.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -22,7 +22,7 @@ members="$(awk '
 ' Cargo.toml | tr -d ' ",' | grep -v '^$' || true)"
 
 if [ -z "$members" ]; then
-  echo "错误：没能从 Cargo.toml 解析出 [workspace] members" >&2
+  echo "Error: failed to parse [workspace] members from Cargo.toml" >&2
   exit 1
 fi
 
@@ -34,11 +34,11 @@ for m in $members; do
 done
 
 if [ ${#missing_copy[@]} -gt 0 ] || [ ${#missing_stub[@]} -gt 0 ]; then
-  echo "Dockerfile 与 workspace 成员不一致：" >&2
-  [ ${#missing_copy[@]} -gt 0 ] && printf '  缺 COPY  %s/Cargo.toml\n' "${missing_copy[@]}" >&2
-  [ ${#missing_stub[@]} -gt 0 ] && printf '  缺桩目录 %s/src\n' "${missing_stub[@]}" >&2
-  echo "  （漏掉会导致部署时报 failed to load manifest for workspace member）" >&2
+  echo "Dockerfile / workspace member mismatch:" >&2
+  [ ${#missing_copy[@]} -gt 0 ] && printf '  Missing COPY  %s/Cargo.toml\n' "${missing_copy[@]}" >&2
+  [ ${#missing_stub[@]} -gt 0 ] && printf '  Missing stub %s/src\n' "${missing_stub[@]}" >&2
+  echo "  (missing stubs cause 'failed to load manifest for workspace member' at deploy)" >&2
   exit 1
 fi
 
-echo "OK Dockerfile 覆盖全部 $(echo "$members" | wc -l | tr -d ' ') 个 workspace 成员"
+echo "OK Dockerfile covers all $(echo "$members" | wc -l | tr -d ' ') workspace members"

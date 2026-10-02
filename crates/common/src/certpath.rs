@@ -18,19 +18,19 @@ pub const MAX_PATH_LEN: usize = 512;
 pub fn normalize(raw: &str) -> Result<String, String> {
     let p = raw.trim();
     if p.is_empty() {
-        return Err("路径不能为空".into());
+        return Err("Path cannot be empty".into());
     }
     if p.len() > MAX_PATH_LEN {
-        return Err(format!("路径过长（上限 {MAX_PATH_LEN} 字符）"));
+        return Err(format!("Path too long (max {MAX_PATH_LEN} characters)"));
     }
     if !p.starts_with('/') {
-        return Err("路径必须是绝对路径（以 / 开头）".into());
+        return Err("Path must be absolute (must start with /)".into());
     }
     if p.chars().any(|c| c.is_control()) {
-        return Err("路径不能包含控制字符".into());
+        return Err("Path cannot contain control characters".into());
     }
     if p.split('/').any(|seg| seg == "..") {
-        return Err("路径不能包含 ..".into());
+        return Err("Path cannot contain ..".into());
     }
     // 目录写法统一去掉尾部斜杠（根目录除外）
     let trimmed = p.trim_end_matches('/');

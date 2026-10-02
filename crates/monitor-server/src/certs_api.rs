@@ -43,7 +43,7 @@ pub async fn cert_config_handler(
         Err((code, msg)) => return err(code, msg),
     };
     if q.get("node_id").map(String::as_str) != Some(node_id.as_str()) {
-        return err(StatusCode::FORBIDDEN, "只能拉取本节点的证书配置");
+        return err(StatusCode::FORBIDDEN, "Can only fetch this node's certificate config");
     }
 
     let sources = match state
@@ -240,7 +240,7 @@ pub async fn create_cert_source_handler(
         let node = zhiwei_common::NodeId::from_string(node_id.clone());
         match state.storage.nodes().find_by_id(&node).await {
             Ok(Some(_)) => {}
-            Ok(None) => return err(StatusCode::NOT_FOUND, "节点未入网"),
+            Ok(None) => return err(StatusCode::NOT_FOUND, "Node not enrolled"),
             Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("lookup: {e}")),
         }
     }
@@ -263,7 +263,7 @@ pub async fn create_cert_source_handler(
             // 同一节点同一路径唯一（用户重复添加时给一句人话）
             let msg = e.to_string();
             return if msg.contains("UNIQUE") {
-                err(StatusCode::CONFLICT, "该节点下已经有相同的证书路径")
+                err(StatusCode::CONFLICT, "A certificate source with this path already exists on this node")
             } else {
                 err(StatusCode::INTERNAL_SERVER_ERROR, format!("create: {msg}"))
             };
@@ -317,7 +317,7 @@ pub async fn patch_cert_source_handler(
     };
     let existing = match state.storage.cert_sources().find(&id).await {
         Ok(Some(s)) => s,
-        Ok(None) => return err(StatusCode::NOT_FOUND, "证书来源不存在"),
+        Ok(None) => return err(StatusCode::NOT_FOUND, "Certificate source not found"),
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("lookup: {e}")),
     };
 
@@ -340,7 +340,7 @@ pub async fn patch_cert_source_handler(
             let node = zhiwei_common::NodeId::from_string(node_id.clone());
             match state.storage.nodes().find_by_id(&node).await {
                 Ok(Some(_)) => {}
-                Ok(None) => return err(StatusCode::NOT_FOUND, "节点未入网"),
+                Ok(None) => return err(StatusCode::NOT_FOUND, "Node not enrolled"),
                 Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("lookup: {e}")),
             }
         }
@@ -349,7 +349,7 @@ pub async fn patch_cert_source_handler(
     if let Err(e) = state.storage.cert_sources().update(&id, &patch, now).await {
         let msg = e.to_string();
         return if msg.contains("UNIQUE") {
-            err(StatusCode::CONFLICT, "该节点下已经有相同的证书路径")
+            err(StatusCode::CONFLICT, "A certificate source with this path already exists on this node")
         } else {
             err(StatusCode::INTERNAL_SERVER_ERROR, format!("update: {msg}"))
         };
@@ -435,12 +435,12 @@ pub async fn test_cert_source_handler(
     };
     let node_id = b.node_id.trim().to_string();
     if node_id.is_empty() {
-        return err(StatusCode::BAD_REQUEST, "需要选择节点");
+return err(StatusCode::BAD_REQUEST, "Must select a node");
     }
     let node = zhiwei_common::NodeId::from_string(node_id.clone());
     match state.storage.nodes().find_by_id(&node).await {
         Ok(Some(_)) => {}
-        Ok(None) => return err(StatusCode::NOT_FOUND, "节点未入网"),
+        Ok(None) => return err(StatusCode::NOT_FOUND, "Node not enrolled"),
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("lookup: {e}")),
     }
     let path = match zhiwei_common::certpath::normalize(&b.path) {
@@ -466,7 +466,7 @@ pub async fn test_cert_source_handler(
         ),
         Err(OpsSignError::Unavailable(detail)) => err(
             StatusCode::SERVICE_UNAVAILABLE,
-            format!("ops-server 不可用：{detail}"),
+            format!("ops-server unavailable: {detail}"),
         ),
     }
 }
@@ -484,7 +484,7 @@ async fn refresh_node_inventory(state: &AppState, node_id: &str) {
         "actor": "console",
     });
     if let Err(e) = sign_command(state, &payload).await {
-        warn!(%node_id, error = %e.message(), "触发快照重采失败（配置已保存，等下一轮周期采集）");
+        warn!(%node_id, error = %e.message(), "Triggering snapshot refresh failed (config saved, next cycle will retry)");
     }
 }
 

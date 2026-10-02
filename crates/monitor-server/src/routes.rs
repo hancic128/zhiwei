@@ -189,7 +189,7 @@ pub(crate) async fn verify_node(
             .map(|s| s.to_string())
     };
 
-    let unauthorized = || (StatusCode::UNAUTHORIZED, "节点签名校验失败".to_string());
+    let unauthorized = || (StatusCode::UNAUTHORIZED, "Node signature verification failed".to_string());
 
     let node_id_str = get(zhiwei_common::auth::HEADER_NODE).ok_or_else(unauthorized)?;
     let ts: i64 = get(zhiwei_common::auth::HEADER_TIMESTAMP)
@@ -3088,7 +3088,7 @@ async fn command_result_handler(
             );
         }
         if zhiwei_common::KeyPair::verify(&node_pub, &preimage, &sig).is_err() {
-            return err(StatusCode::UNAUTHORIZED, "回执签名校验失败");
+            return err(StatusCode::UNAUTHORIZED, "Receipt signature verification failed");
         }
     }
 
@@ -3296,7 +3296,7 @@ async fn command_detail_handler(
     }
     let row = match state.storage.commands().find(&id).await {
         Ok(Some(r)) => r,
-        Ok(None) => return err(StatusCode::NOT_FOUND, "命令不存在"),
+        Ok(None) => return err(StatusCode::NOT_FOUND, "Command not found"),
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("lookup: {e}")),
     };
     let hostname = state
@@ -3610,9 +3610,9 @@ mod bootstrap_token_tests {
 /// 鉴权：admin token 或 AI token 都可读（AI 客户端如果要做 onboarding 也用得到）。
 /// 没找到 help 文件时返回空 body，UI 端展示占位文案。
 ///
-/// 语言选择（按优先级）：URL 上的 `?locale=zh-CN|en-US` → `Accept-Language`
-/// 头 → 默认 locale（zh-CN）。请求里无 / 未知的 locale 一律静默回落，不会
-/// 抛错；翻译真缺时也是 200，body 是默认 locale 的 markdown。
+/// Language selection (by priority): `?locale=` URL param → `Accept-Language`
+/// header → default locale (en-US). Unknown locales fall back silently;
+/// missing translations return 200 with the default locale's markdown.
 ///
 /// 正文里的 `{{BASE_URL}}` 会换成**控制台当前的访问地址**（scheme + host，
 /// 与 enroll 命令同源），用户照帮助页复制命令就能直接跑，不必手改示例域名。
@@ -3660,11 +3660,10 @@ fn parse_accept_language(value: &str) -> Option<String> {
         if tag.is_empty() {
             continue;
         }
-        // 把 `en` 这种简化标签补成 zh-CN / en-US 等完整形式（控制台目前只
-        // 承认这两个具体 locale；其他写法都会被下面的 contains_key 回落）。
+        // Normalize `en` to `en-US`. Unknown locales fall through to the caller,
+        // which falls back to en-US.
         let lowered = tag.to_ascii_lowercase();
         let normalized: &str = match lowered.as_str() {
-            "zh" | "zh-cn" | "zh-hans" | "zh-hans-cn" => "zh-CN",
             "en" | "en-us" | "en-uk" | "en-gb" => "en-US",
             other => other,
         };
@@ -3717,16 +3716,12 @@ mod help_locale_tests {
 
     #[test]
     fn help_content_picks_locale_and_falls_back() {
-        let h = HelpContent::new([
-            ("zh-CN".to_string(), "中文".to_string()),
-            ("en-US".to_string(), "english".to_string()),
-        ]);
-        assert_eq!(h.snapshot_for(Some("zh-CN")).body, "中文");
-        assert_eq!(h.snapshot_for(Some("en-US")).body, "english");
-        // 未知 locale 回落默认。
-        assert_eq!(h.snapshot_for(Some("fr-FR")).body, "中文");
-        // 不传 locale = 默认 locale（第一个 = zh-CN）。
-        assert_eq!(h.snapshot_for(None).body, "中文");
+        let h = HelpContent::new([("en-US".to_string(), "english content".to_string())]);
+        // Unknown locale falls back to en-US.
+        assert_eq!(h.snapshot_for(Some("zh-CN")).body, "english content");
+        assert_eq!(h.snapshot_for(Some("fr-FR")).body, "english content");
+        // No locale = default locale (en-US).
+        assert_eq!(h.snapshot_for(None).body, "english content");
     }
 }
 

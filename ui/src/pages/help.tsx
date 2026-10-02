@@ -72,7 +72,7 @@ export function HelpPage() {
   const { t, i18n } = useTranslation();
 
   const locale = React.useMemo(
-    () => i18n.language || "zh-CN",
+    () => i18n.language || "en-US",
     [i18n.language],
   );
 

@@ -76,7 +76,7 @@ When deploying ZhiWei, we recommend:
 
 ## Security Model
 
-See [README.md](./README.md#安全模型) for details on:
+See [README.md](./README.md) for details on:
 - Ed25519 request signing vs mTLS
 - Bidirectional command signing
 - Time window and nonce replay protection

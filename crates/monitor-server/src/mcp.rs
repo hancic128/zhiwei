@@ -50,7 +50,7 @@ fn tools_list() -> Value {
         "tools": [
             tool_def(
                 "list_nodes",
-                "列出集群所有节点，含 hostname / last_seen / 关键 latest 指标。",
+                "List all nodes in the cluster with hostname, last_seen, and key latest metrics.",
                 json!({
                     "type": "object",
                     "properties": {},
@@ -59,7 +59,7 @@ fn tools_list() -> Value {
             ),
             tool_def(
                 "get_node",
-                "获取单节点详情：host_info（操作系统/内核/CPU/内存）+ 最新指标。不存在则报错。",
+                "Get single node details: host_info (OS/kernel/CPU/memory) and latest metrics. Returns error if not found.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -71,7 +71,7 @@ fn tools_list() -> Value {
             ),
             tool_def(
                 "get_telemetry",
-                "获取某节点的最新 telemetry 帧（CPU / 内存 / 磁盘 / 网络）。",
+                "Get latest telemetry frame for a node (CPU/memory/disk/network).",
                 json!({
                     "type": "object",
                     "properties": {
@@ -84,7 +84,7 @@ fn tools_list() -> Value {
             ),
             tool_def(
                 "list_alerts",
-                "列出告警：全部活跃 + 最近 50 条已解决（服务端固定窗口，不支持翻页）。",
+                "List active alerts and the last 50 resolved alerts (fixed 50-item window, no pagination).",
                 json!({
                     "type": "object",
                     "properties": {},
@@ -93,7 +93,7 @@ fn tools_list() -> Value {
             ),
             tool_def(
                 "list_certs",
-                "列出证书扫描来源（控制台配置的「节点 + 路径」），不含证书内容。",
+                "List certificate scan sources (node + path configured in console), without certificate content.",
                 json!({
                     "type": "object",
                     "properties": {},
@@ -102,7 +102,7 @@ fn tools_list() -> Value {
             ),
             tool_def(
                 "list_containers",
-                "列出某节点的最新容器快照（需节点已上报 inventory）。",
+                "List latest container snapshot for a node (requires inventory reported by node).",
                 json!({
                     "type": "object",
                     "properties": {
@@ -114,7 +114,7 @@ fn tools_list() -> Value {
             ),
             tool_def(
                 "list_processes",
-                "列出某节点的最新进程快照 TopN（需节点已上报 inventory）。",
+                "List latest process snapshot TopN for a node (requires inventory reported by node).",
                 json!({
                     "type": "object",
                     "properties": {

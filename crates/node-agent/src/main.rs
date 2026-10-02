@@ -385,7 +385,7 @@ async fn enroll_post(monitor: &str, token: &str, body: &[u8]) -> anyhow::Result<
     let (status, resp) = t.enroll(token, body).await?;
     if status != 200 {
         anyhow::bail!(
-            "enroll 失败 HTTP {status}: {}",
+            "enroll failed HTTP {status}: {}",
             String::from_utf8_lossy(&resp)
                 .chars()
                 .take(200)
@@ -405,7 +405,7 @@ async fn collect_and_send(monitor: &str, state: &NodeState, node_id: &str) -> an
         .await?;
     if status != 204 {
         anyhow::bail!(
-            "telemetry 返回 {status}: {}",
+            "telemetry returned {status}: {}",
             String::from_utf8_lossy(&body)
         );
     }
@@ -789,7 +789,7 @@ async fn send_inventory(
         .await?;
     if status != 204 {
         anyhow::bail!(
-            "inventory 返回 {status}: {}",
+            "inventory returned {status}: {}",
             String::from_utf8_lossy(&body)
         );
     }
@@ -890,7 +890,7 @@ mod tests {
     #[test]
     fn alias_and_tags_read_from_env() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("ZHIWEI_NODE_ALIAS", "北京入口");
+        std::env::set_var("ZHIWEI_NODE_ALIAS", "Beijing Entry");
         std::env::set_var("ZHIWEI_NODE_TAGS", "prod bj");
         let a = Args::try_parse_from(["zhiwei-node", "--monitor", "http://x"]).unwrap();
         assert_eq!(a.alias, "北京入口");

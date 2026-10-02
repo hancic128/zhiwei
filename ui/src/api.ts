@@ -1225,7 +1225,7 @@ export const aiTokens = {
 // ---------- 帮助页 markdown ----------
 
 export const help = {
-  /** 按 UI 当前 locale 拉对应翻译；后端识别不到时静默回落 zh-CN。 */
+  /** Fetch help page markdown for the given locale; falls back to en-US. */
   fetch: (locale: string) =>
     request<{ locale: string; body: string }>(
       `/v1/help?locale=${encodeURIComponent(locale)}`,

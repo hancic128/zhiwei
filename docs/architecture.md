@@ -6,42 +6,37 @@
 
 ZhiWei follows a **hub-and-spoke** model:
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        zhiwei-monitor                            │
-│                        (Data Plane)                              │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐ │
-│  │   Web UI    │  │   REST API  │  │   Certificate Store     │ │
-│  │  (Static)   │  │   (JSON)    │  │   (SQLite)              │ │
-│  └─────────────┘  └─────────────┘  └─────────────────────────┘ │
-│                            │                                    │
-│  ┌─────────────────────────┴─────────────────────────────────┐ │
-│  │              Ed25519 Request Signature Auth               │ │
-│  └───────────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────────┘
-         ▲                                          ▲
-         │ Ed25519 Signed Requests                   │
-         │ (every 30s telemetry, 5min inventory)    │
-         │                                          │
-┌────────┴────────┐                    ┌────────────┴────────────┐
-│  zhiwei-node   │                    │      zhiwei-node        │
-│  (Host A)      │                    │      (Host B)          │
-│                │                    │                         │
-│  ┌───────────┐ │                    │  ┌───────────┐         │
-│  │ Collector │ │                    │  │ Collector │         │
-│  │ - CPU     │ │                    │  │ - CPU     │         │
-│  │ - Memory  │ │                    │  │ - Memory  │         │
-│  │ - Disk    │ │                    │  │ - Disk    │         │
-│  │ - Network │ │                    │  │ - Network │         │
-│  │ - Process │ │                    │  │ - Process │         │
-│  └───────────┘ │                    │  └───────────┘         │
-│  ┌───────────┐ │                    │  ┌───────────┐         │
-│  │  Probes   │ │                    │  │  Probes   │         │
-│  │ - HTTP    │ │                    │  │ - HTTP    │         │
-│  │ - TCP     │ │                    │  │ - TCP     │         │
-│  │ - TLS     │ │                    │  │ - TLS     │         │
-│  └───────────┘ │                    │  └───────────┘         │
-└────────────────┘                    └─────────────────────────┘
+```mermaid
+graph TB
+    subgraph Monitor["zhiwei-monitor (Data Plane)"]
+        UI["Web UI<br/>(Static)"]
+        API["REST API<br/>(JSON)"]
+        Store["Certificate Store<br/>(SQLite)"]
+        UI --> API
+        UI --> Store
+        API --> Store
+        Auth["Ed25519 Request Signature Auth"]
+        API --> Auth
+        Store --> Auth
+    end
+
+    subgraph NodeA["zhiwei-node (Host A)"]
+        C1["Collector<br/>CPU · Memory<br/>Disk · Network<br/>Process"]
+        P1["Probes<br/>HTTP · TCP · TLS"]
+        S1["Signer"]
+        C1 --> S1
+        P1 --> S1
+        S1 -->|Ed25519 Signed Requests<br/>every 30s telemetry| Monitor
+    end
+
+    subgraph NodeB["zhiwei-node (Host B)"]
+        C2["Collector<br/>CPU · Memory<br/>Disk · Network<br/>Process"]
+        P2["Probes<br/>HTTP · TCP · TLS"]
+        S2["Signer"]
+        C2 --> S2
+        P2 --> S2
+        S2 -->|Ed25519 Signed Requests<br/>every 30s telemetry| Monitor
+    end
 ```
 
 ## Components
@@ -89,29 +84,37 @@ Handles remote command execution. Responsibilities:
 
 Nodes authenticate using Ed25519 digital signatures, not TLS client certificates.
 
-**Enrollment Flow**:
-```
-1. Node generates Ed25519 keypair
-2. Node sends: { bootstrap_token, public_key } to /v1/enroll
-3. Monitor validates token, stores public_key as node identity
-4. Monitor returns: { node_id, ops_public_key }
-5. Node stores: node_id, ops_public_key
+```mermaid
+sequenceDiagram
+    participant Node
+    participant Monitor
+
+    Note over Node: Generate Ed25519 keypair
+    Node->>Monitor: POST /v1/enroll<br/>{ bootstrap_token, public_key }
+    Note over Monitor: Validate token
+    Monitor->>Monitor: Store public_key as node identity
+    Monitor->>Node: { node_id, ops_public_key }
+    Note over Node: Store node_id and ops_public_key
 ```
 
-**Request Signing**:
-```
-Every request includes:
-- X-ZhiWei-Timestamp: Unix timestamp (within ±300s window)
-- X-ZhiWei-Nonce: Random unique value (anti-replay)
-- X-ZhiWei-Signature: Ed25519 signature of {method,path,timestamp,nonce,body}
+**Request Signing** — every request includes:
+- `X-ZhiWei-Timestamp`: Unix timestamp (within ±300s window)
+- `X-ZhiWei-Nonce`: Random unique value (anti-replay)
+- `X-ZhiWei-Signature`: Ed25519 signature of `{method, path, timestamp, nonce, body}`
 
-Monitor validates:
-1. Timestamp within ±300s
-2. Nonce not seen before (stored in SQLite)
-3. Signature valid for registered node_id
-```
+Monitor validates: (1) timestamp within ±300s, (2) nonce not seen before, (3) signature valid for registered node_id.
 
 ### Why Not mTLS?
+
+```mermaid
+graph LR
+    A["node"] -->|"HTTPS"| B["PaaS Edge<br/>TLS terminated"]
+    B -->|"plain HTTP"| C["container<br/>monitor"]
+
+    Note over A,B: Traditional mTLS requires edge<br/>to forward client certificates
+    Note over B,C: Edge terminates TLS — certificates lost
+    Note over C: mTLS breaks here
+```
 
 Traditional mTLS requires the TLS terminator to forward client certificates.
 This breaks on platforms that terminate TLS at the edge (Render, Railway, etc.).
@@ -123,22 +126,19 @@ Ed25519 signing works regardless of TLS termination point because:
 
 ### Command Channel (Bidirectional Signing)
 
-```
-┌──────────┐                    ┌──────────┐
-│  Ops     │                    │  Monitor │
-│  Server  │                    │          │
-└────┬─────┘                    └────┬─────┘
-     │  1. Sign command with ops private key
-     │─────────────────────────────>│
-     │  2. Node validates signature
-     │     using stored ops public key
-     │     │
-     │     v
-     │  3. Execute command
-     │  4. Sign response with node private key
-     │<─────────────────────────────│
-     │  5. Monitor validates response
-         using stored node public key
+```mermaid
+sequenceDiagram
+    participant Ops as Ops Server
+    participant Monitor
+    participant Node
+
+    Ops->>Ops: Sign command with ops private key
+    Ops->>Node: Signed command
+    Note over Node: Validate signature<br/>using stored ops public key
+    Node->>Node: Execute command
+    Node->>Node: Sign response with node private key
+    Node->>Monitor: Signed response
+    Note over Monitor: Validate signature<br/>using stored node public key
 ```
 
 This creates a **closed loop**:
@@ -149,35 +149,27 @@ This creates a **closed loop**:
 
 ### Telemetry Collection
 
-```
-[sysinfo] ──> [Collector] ──> [Signer] ──> HTTPS POST /v1/telemetry
-                                                       │
-                                                       v
-                                              [Monitor: validate]
-                                                       │
-                                                       v
-                                              [SQLite: insert]
-                                                       │
-                                                       v
-                                              [WebSocket/Polling]
-                                                       │
-                                                       v
-                                                     [UI]
+```mermaid
+flowchart LR
+    A["sysinfo"] --> B["Collector"]
+    B --> C["Signer"]
+    C -->|"HTTPS POST /v1/telemetry"| D["Monitor<br/>Validate"]
+    D --> E["SQLite<br/>Insert"]
+    E --> F["WebSocket / Polling"]
+    F --> G["UI"]
 ```
 
 ### Alert Evaluation
 
-```
-[Telemetry Insert] ──> [Alert Rules Engine]
-                               │
-                               ├── [Check thresholds]
-                               │
-                               ├── [Check probe status]
-                               │
-                               └── [Check certificate expiry]
-                                       │
-                                       v
-                              [Webhook: notify]
+```mermaid
+flowchart LR
+    A["Telemetry Insert"] --> B["Alert Rules Engine"]
+    B --> C["Check thresholds"]
+    B --> D["Check probe status"]
+    B --> E["Check cert expiry"]
+    C --> F["Webhook<br/>Notify"]
+    D --> F
+    E --> F
 ```
 
 ## Security Model
@@ -206,9 +198,3 @@ ZhiWei is designed for single-operator scenarios, not enterprise scale.
 **Limits**:
 - Tested with ~20 nodes
 - Designed for personal use, not enterprise
-
-## Future Considerations
-
-- [ ] Time-series compression (RLE encoding)
-- [ ] Incremental inventory updates
-- [ ] Plugin system for custom collectors
