@@ -222,11 +222,11 @@ export function FloatingControls() {
             type="button"
             className={cn(subButton, "relative")}
             aria-label={t("action.language")}
-            onClick={() => prefs.setLocale("en-US")}
+            onClick={() => prefs.setLocale(prefs.locale === "en-US" ? "zh-CN" : "en-US")}
           >
             <Globe className="w-5 h-5" aria-hidden="true" />
             <span className="absolute -bottom-1 -right-1 w-5 h-5 rounded-full bg-brand-600 text-white text-[10px] font-bold flex items-center justify-center">
-              EN
+              {prefs.locale === "en-US" ? "EN" : "中"}
             </span>
           </button>
 

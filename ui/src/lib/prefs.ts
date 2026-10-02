@@ -19,7 +19,7 @@ export const THEMES = [
 export type Theme = (typeof THEMES)[number];
 
 export type ColorScheme = "light" | "dark";
-export type Locale = "en-US";
+export type Locale = "en-US" | "zh-CN";
 
 export const KEYS = {
   theme: "theme",
@@ -63,7 +63,7 @@ export function loadColorScheme(): ColorScheme {
 
 export function loadLocale(): Locale {
   const v = read(KEYS.locale);
-  if (v === "en-US") return v;
+  if (v === "en-US" || v === "zh-CN") return v;
   return "en-US";
 }
 
