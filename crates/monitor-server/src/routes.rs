@@ -4460,9 +4460,9 @@ mod channel_patch_tests {
         let merged = merge_channel_patch(feishu.clone(), &body(r#"{"secret":""}"#)).unwrap();
         assert!(validate(&merged).is_ok(), "{:?}", validate(&merged));
 
-        // 清空接收 ID → 按飞书的必填规则报出来
+        // Clear receive ID -> Feishu validation should report it
         let merged = merge_channel_patch(feishu, &body(r#"{"receive_id":""}"#)).unwrap();
         let msg = validate(&merged).unwrap_err();
-        assert!(msg.contains("接收 ID"), "{msg}");
+        assert!(msg.contains("receive ID"), "{msg}");
     }
 }

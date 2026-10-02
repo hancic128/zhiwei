@@ -1,11 +1,11 @@
-//! 节点 → monitor 的 HTTP 客户端。
+//! HTTP client from node to monitor.
 //!
-//! 两种传输都支持：
-//!   - `https://`：自建部署，用 rustls；可 pin monitor 的 CA，也可跳过校验（首次 enroll）
-//!   - `http://`：置于托管平台边缘之后（边缘已终止 TLS）
+//! Both transports are supported:
+//!   - `https://`: self-hosted deployment, uses rustls; can pin monitor's CA, or skip verification (first-time enroll)
+//!   - `http://`: placed behind a managed platform edge (edge already terminates TLS)
 //!
-//! 身份不再靠客户端证书，而是每次请求带一组 Ed25519 签名头
-//! （见 zhiwei_common::auth）。这让节点能部署到任何 HTTP 环境。
+//! Identity is no longer based on client certificates, but on a set of Ed25519 signing headers
+//! sent with each request (see zhiwei_common::auth). This allows nodes to be deployed to any HTTP environment.
 
 use std::sync::Arc;
 
@@ -23,22 +23,22 @@ pub struct HttpTransport {
     #[allow(dead_code)]
     tls: bool,
     connector: Option<TlsConnector>,
-    /// 请求行与 Host 头里用的 authority（含端口时带端口）
+    /// Authority used in request line and Host header (includes port when present)
     authority: String,
 }
 
 impl HttpTransport {
-    /// `base` 形如 `https://127.0.0.1:8443` 或 `http://monitor.example.com`
+    /// `base` format: `https://127.0.0.1:8443` or `http://monitor.example.com`
     ///
-    /// `ca_pem`：自建部署时用于 pin monitor 的 CA；托管平台（正经证书）传 None 走系统根。
-    /// `skip_verify`：仅首次 enroll 需要（此时还没有 CA 可 pin）。
+    /// `ca_pem`: Used to pin monitor's CA for self-hosted deployments; pass None to use system roots for managed platforms (standard certificates).
+    /// `skip_verify`: Only needed for first-time enroll (when there's no CA to pin yet).
     pub fn new(base: &str, ca_pem: Option<&str>, skip_verify: bool) -> anyhow::Result<Self> {
         let (tls, rest) = if let Some(r) = base.strip_prefix("https://") {
             (true, r)
         } else if let Some(r) = base.strip_prefix("http://") {
             (false, r)
         } else {
-            bail!("monitor 地址必须以 http:// 或 https:// 开头");
+            bail!("monitor address must start with http:// or https://");
         };
         let rest = rest.trim_end_matches('/');
         let authority = rest.to_string();
@@ -66,7 +66,7 @@ impl HttpTransport {
         })
     }
 
-    /// 发一次带签名的请求，返回 (状态码, 响应体)
+    /// Send a single signed request, returns (status code, response body)
     pub async fn request(
         &self,
         method: &str,
@@ -86,7 +86,7 @@ impl HttpTransport {
         .await
     }
 
-    /// 同上，但用 `application/json`（探针配置 / 结果这类 JSON 载荷）
+    /// Same as above, but uses `application/json` (for JSON payloads like probe config/results)
     pub async fn request_json(
         &self,
         method: &str,
@@ -126,8 +126,8 @@ impl HttpTransport {
             .await
     }
 
-    /// 首次 enroll：还没有签名身份，凭一次性 bootstrap token 自证。
-    /// 此时也没有 CA 可 pin（`new(.., skip_verify = true)`）。
+    /// First-time enroll: no signed identity yet, self-certify with a one-time bootstrap token.
+    /// Also no CA to pin yet (`new(.., skip_verify = true)`).
     pub async fn enroll(&self, token: &str, body: &[u8]) -> anyhow::Result<(u16, Vec<u8>)> {
         self.send(
             "POST",
@@ -139,7 +139,7 @@ impl HttpTransport {
         .await
     }
 
-    /// 底层发送：`headers` 是除 Host / Content-Length / Content-Type 之外的附加头
+    /// Low-level send: `headers` are additional headers beyond Host/Content-Length/Content-Type
     async fn send(
         &self,
         method: &str,
@@ -150,11 +150,11 @@ impl HttpTransport {
     ) -> anyhow::Result<(u16, Vec<u8>)> {
         let stream = tokio::net::TcpStream::connect((self.host.as_str(), self.port))
             .await
-            .with_context(|| format!("连接 {}:{}", self.host, self.port))?;
+            .with_context(|| format!("connect {}:{}", self.host, self.port))?;
 
         let mut io: Box<dyn IoStream> = if let Some(connector) = &self.connector {
             let server_name =
-                ServerName::try_from(self.host.clone()).context("非法 server name")?;
+                ServerName::try_from(self.host.clone()).context("invalid server name")?;
             Box::new(connector.connect(server_name, stream).await?)
         } else {
             Box::new(stream)
@@ -182,17 +182,17 @@ impl HttpTransport {
     }
 }
 
-/// 读 HTTP/1.1 响应,按 framing 拆出 body。
+/// Read HTTP/1.1 response, extract body according to framing.
 ///
-/// 支持三种 framing(按 RFC 7230 优先级):
-///   1. `Transfer-Encoding: chunked` —— chunked 解码
-///   2. `Content-Length: N`           —— 读定长
-///   3. 都没有(`Connection: close`)   —— 读到 EOF
+/// Supports three framings (per RFC 7230 priority):
+///   1. `Transfer-Encoding: chunked` -- chunked decoding
+///   2. `Content-Length: N`          -- fixed-length read
+///   3. Neither (`Connection: close`) -- read until EOF
 ///
-/// 历史上这里只用 `read_to_end` + 按 `\r\n\r\n` 切 header,把整段 body 喂给
-/// `serde_json` —— 这条路径在 Render / Cloudflare 这类「HTTP/1.1 + close
-/// 时强制 chunked」的边缘后面会爆炸,body 被 `<hex>\r\n...\r\n0\r\n\r\n`
-/// 污染,JSON 解析报 `trailing characters at line 1 column 2`(2026-09-21)。
+/// Historically this only used `read_to_end` + split by `\r\n\r\n` for headers, feeding the entire
+/// body to `serde_json` -- this path explodes behind edges like Render/Cloudflare that "force chunked"
+/// on HTTP/1.1 + close, polluting the body with `<hex>\r\n...\r\n0\r\n\r\n`,
+/// causing JSON parse errors like `trailing characters at line 1 column 2` (2026-09-21).
 pub(crate) async fn read_response<R>(io: &mut R) -> anyhow::Result<(u16, Vec<u8>)>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -201,36 +201,36 @@ where
 
     let mut br = BufReader::new(io);
 
-    // ---- 状态行 ----
+    // ---- status line ----
     let mut status_line = Vec::new();
     br.read_until(b'\n', &mut status_line).await?;
     if status_line.is_empty() {
-        anyhow::bail!("响应:状态行缺失(对端立即关闭?)");
+        anyhow::bail!("response: status line missing (peer closed immediately?)");
     }
     let status_line_str = std::str::from_utf8(&status_line)
-        .map_err(|e| anyhow::anyhow!("响应:状态行非 UTF-8: {e}"))?
+        .map_err(|e| anyhow::anyhow!("response: status line not UTF-8: {e}"))?
         .trim_end_matches(|c| c == '\r' || c == '\n');
     let mut parts = status_line_str.split_whitespace();
-    let _version = parts.next().context("响应:状态行为空")?;
+    let _version = parts.next().context("response: status line empty")?;
     let status: u16 = parts
         .next()
         .and_then(|s| s.parse().ok())
-        .with_context(|| format!("响应:无法解析状态码: {status_line_str:?}"))?;
+        .with_context(|| format!("response: unable to parse status code: {status_line_str:?}"))?;
 
-    // ---- header 列表(直到空行)----
+    // ---- header list (until empty line) ----
     let mut transfer_encoding: Option<String> = None;
     let mut content_length: Option<usize> = None;
     loop {
         let mut line = Vec::new();
         let n = br.read_until(b'\n', &mut line).await?;
         if n == 0 {
-            anyhow::bail!("响应:header 中途 EOF");
+            anyhow::bail!("response: header mid-stream EOF");
         }
         if line == b"\r\n" || line == b"\n" {
             break;
         }
         let s = std::str::from_utf8(&line)
-            .map_err(|e| anyhow::anyhow!("响应:header 非 UTF-8: {e}"))?
+            .map_err(|e| anyhow::anyhow!("response: header not UTF-8: {e}"))?
             .trim_end_matches(|c| c == '\r' || c == '\n');
         let Some((k, v)) = s.split_once(':') else {
             continue;
@@ -257,10 +257,10 @@ where
         let mut body = vec![0u8; len];
         br.read_exact(&mut body)
             .await
-            .with_context(|| format!("响应:读 Content-Length={len} 字节失败"))?;
+            .with_context(|| format!("response: failed to read {len} Content-Length bytes"))?;
         body
     } else {
-        // close-delimited:RFC 允许无 framing 信息,读到 EOF(对端按 Connection: close 关连接)
+        // close-delimited: RFC allows no framing info, read until EOF (peer closed connection with Connection: close)
         let mut body = Vec::new();
         br.read_to_end(&mut body).await?;
         body
@@ -269,10 +269,10 @@ where
     Ok((status, body))
 }
 
-/// 解码 chunked transfer-encoding(RFC 7230 §4.1)。
+/// Decode chunked transfer-encoding (RFC 7230 sec 4.1).
 ///
-/// chunk = size-line CRLF data CRLF,size-line = 1*HEX [ ";" ext ]。
-/// 终止 chunk = "0" CRLF *( trailer CRLF ) CRLF。
+/// chunk = size-line CRLF data CRLF, size-line = 1*HEX [ ";" ext ].
+/// Terminating chunk = "0" CRLF *( trailer CRLF ) CRLF.
 pub(crate) async fn decode_chunked_body<R>(
     br: &mut tokio::io::BufReader<R>,
 ) -> anyhow::Result<Vec<u8>>
@@ -287,24 +287,24 @@ where
         let mut size_line = Vec::new();
         let n = br.read_until(b'\n', &mut size_line).await?;
         if n == 0 {
-            anyhow::bail!("chunked:期望 size 行,先收到 EOF");
+            anyhow::bail!("chunked: expected size line, got EOF");
         }
         let size_str = std::str::from_utf8(&size_line)
-            .map_err(|e| anyhow::anyhow!("chunked:size 行非 UTF-8: {e}"))?
+            .map_err(|e| anyhow::anyhow!("chunked: size line not UTF-8: {e}"))?
             .trim_end_matches(|c| c == '\r' || c == '\n');
         let size_hex = size_str.split(';').next().unwrap_or("").trim();
         let size = usize::from_str_radix(size_hex, 16)
-            .map_err(|e| anyhow::anyhow!("chunked:无法解析 size {size_hex:?}: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("chunked: unable to parse size {size_hex:?}: {e}"))?;
 
         if size == 0 {
-            // 终止 chunk:后面跟 0 个或多个 trailer(每行 CRLF),最后空行 CRLF 收尾
+            // terminating chunk: followed by 0 or more trailers (each CRLF), final empty line CRLF ends
             loop {
                 let mut trailer = Vec::new();
                 let n = br.read_until(b'\n', &mut trailer).await?;
                 if n == 0 || trailer == b"\r\n" || trailer == b"\n" {
                     break;
                 }
-                // 非终止 trailer:继续读
+                // non-terminating trailer: continue reading
             }
             return Ok(out);
         }
@@ -313,22 +313,22 @@ where
         let mut chunk = vec![0u8; size];
         br.read_exact(&mut chunk)
             .await
-            .map_err(|e| anyhow::anyhow!("chunked:读 {size} 字节 data 失败: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("chunked: failed to read {size} bytes of data: {e}"))?;
         out.extend_from_slice(&chunk);
 
-        // data 后的 CRLF
+        // CRLF after data
         let mut crlf = [0u8; 2];
         br.read_exact(&mut crlf).await?;
         if &crlf != b"\r\n" {
             anyhow::bail!(
-                "chunked:data 后期望 CRLF,实际 {:?}",
+                "chunked: after data expected CRLF, got {:?}",
                 std::str::from_utf8(&crlf).unwrap_or("<bin>")
             );
         }
     }
 }
 
-/// 让 TlsStream 与 TcpStream 能共用一个 trait object
+/// Allows TlsStream and TcpStream to share a trait object
 pub(crate) trait IoStream:
     tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send
 {
@@ -350,12 +350,12 @@ pub(crate) fn build_client_config(
     if let Some(pem) = ca_pem {
         for c in rustls_pemfile::certs(&mut pem.as_bytes())
             .collect::<Result<Vec<_>, _>>()
-            .context("解析 monitor CA")?
+            .context("parsing monitor CA")?
         {
-            roots.add(c).context("加入 root store")?;
+            roots.add(c).context("adding to root store")?;
         }
     } else {
-        // 托管平台：正经证书，用系统根
+        // Managed platform: standard certificates, use system roots
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     }
     Ok(ClientConfig::builder()
@@ -405,8 +405,8 @@ impl rustls::client::danger::ServerCertVerifier for NoVerify {
 mod tests {
     use super::*;
 
-    /// 把字节流喂给被测代码:实现 `AsyncRead`,把 `inner` 用完就返回 EOF。
-    /// 绕开 TCP listener / duplex 的 race,专心测 framing 解码。
+    /// Feed a byte stream to the code under test: implement `AsyncRead`, return EOF when `inner` is exhausted.
+    /// Avoid TCP listener/duplex race, focus on testing framing decoding.
     struct PreloadedStream {
         inner: Vec<u8>,
         pos: usize,
@@ -444,15 +444,15 @@ mod tests {
         }
     }
 
-    /// 把字节流喂给 `read_response`,拿到 (status, body)。
+    /// Feed byte stream to `read_response`, get (status, body).
     async fn read_from_payload(payload: &'static [u8]) -> (u16, Vec<u8>) {
         let mut s = PreloadedStream::from_static(payload);
         read_response(&mut s).await.unwrap()
     }
 
-    /// 历史上 send() 在 chunked 响应上炸 —— body 是 `2\r\nok\r\n0\r\n\r\n`,
-    /// 原实现直接喂给调用方,JSON 解析报 `trailing characters at line 1 column 2`。
-    /// 修后应得到干净 body `ok`。
+    /// Historically send() blew up on chunked responses -- body was `2\r\nok\r\n0\r\n\r\n`,
+    /// original implementation fed it directly to caller, JSON parse reported `trailing characters at line 1 column 2`.
+    /// After fix, should get clean body `ok`.
     #[tokio::test]
     async fn decodes_chunked_single_chunk() {
         let (status, body) = read_from_payload(
@@ -475,7 +475,7 @@ mod tests {
 
     #[tokio::test]
     async fn decodes_chunked_with_extension() {
-        // RFC 7230 §4.1.1:chunk size 后可带 `;ext=val`
+        // RFC 7230 sec 4.1.1: chunk size may be followed by `;ext=val`
         let (status, body) = read_from_payload(
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5;foo=bar\r\nhello\r\n0\r\n\r\n",
         )
@@ -486,7 +486,7 @@ mod tests {
 
     #[tokio::test]
     async fn decodes_chunked_with_trailers() {
-        // 终止 chunk 后允许 trailer(常见于云厂商给签名 / trace id)
+        // After terminating chunk, trailers are allowed (common with cloud providers for signatures/trace IDs)
         let (status, body) = read_from_payload(
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\nX-Trace-Id: abc\r\n\r\n",
         )
@@ -516,7 +516,7 @@ mod tests {
 
     #[tokio::test]
     async fn decodes_close_delimited_no_body() {
-        // 204 No Content:无 framing,Connection: close
+        // 204 No Content: no framing, Connection: close
         let (status, body) =
             read_from_payload(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n").await;
         assert_eq!(status, 204);
@@ -525,7 +525,7 @@ mod tests {
 
     #[tokio::test]
     async fn decodes_close_delimited_with_body() {
-        // 自定义文本响应,无 Content-Length 也无 chunked —— 历史上由 EOF 终止
+        // Custom text response, no Content-Length and no chunked -- historically terminated by EOF
         let (status, body) = read_from_payload(
             b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nhello",
         )
@@ -534,9 +534,9 @@ mod tests {
         assert_eq!(body, b"hello");
     }
 
-    /// 关键回归:`/v1/probe-config` 与 `/v1/cert-config` 在 Render 边缘返回的真实
-    /// 形态 —— HTTP/1.1 + close + JSON + chunked。修后 body 必须是合法 JSON,
-    /// `serde_json::from_slice::<Value>` 不能失败。
+    /// Key regression: actual shape returned by Render edge for `/v1/probe-config` and `/v1/cert-config` --
+    /// HTTP/1.1 + close + JSON + chunked. After fix, body must be valid JSON,
+    /// `serde_json::from_slice::<Value>` must not fail.
     #[tokio::test]
     async fn probe_config_json_response_parses_as_json() {
         let body = r#"{"node_id":"abc","probes":[{"id":"p1","service":"s1","name":"n","kind":"tcp","target":{"host":"127.0.0.1","port":80},"expect":{},"interval_seconds":60,"timeout_ms":1000}]}"#;
@@ -549,7 +549,7 @@ mod tests {
         let (status, resp_body) = read_response(&mut s).await.unwrap();
         assert_eq!(status, 200);
         let v: serde_json::Value =
-            serde_json::from_slice(&resp_body).expect("chunked JSON 必须能解析");
+            serde_json::from_slice(&resp_body).expect("chunked JSON must be parseable");
         assert_eq!(v["node_id"], "abc");
         assert_eq!(v["probes"].as_array().unwrap().len(), 1);
     }

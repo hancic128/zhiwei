@@ -168,7 +168,7 @@ fn slack_escape(raw: &str) -> String {
 }
 
 /// 卡片底部来源行（正文与标题都给了信息，这里只标来源）
-const CARD_SOURCE: &str = "zhiwei 节点监控";
+const CARD_SOURCE: &str = "zhiwei monitor";
 
 /// 飞书消息卡片（`msg_type: interactive` 的 `content`）。
 ///
@@ -449,7 +449,7 @@ async fn notify(state: &AppState, rule: &AlertRule, facts: &AlertFacts, now: i64
 /// - `slack`：Incoming Webhook 地址，地址本身即凭据；
 /// - `bluebird`：青鸟（bluebird）通知网关的**通用来源**地址 `…/hooks/<来源 ID>`
 ///   加一枚 Token——把告警交给它去并发分发到 Bark / 飞书 / 企业微信等，zhiwei 不再自己接；
-/// - `webhook`：自己的接收端，可选一个 Token 做鉴权。
+/// - `webhook`：自己的接收端，optional a Token 做鉴权。
 pub const CHANNEL_KINDS: &[&str] = &["feishu", "slack", "bluebird", "webhook"];
 
 /// 飞书的 receive_id_type 白名单（与 open.feishu.cn 的 im/v1/messages 一致）。
@@ -479,7 +479,7 @@ pub fn validate_channel(
 ) -> Result<(), String> {
     if !CHANNEL_KINDS.contains(&kind) {
         return Err(format!(
-            "不支持的通知类型 {}（可选：{}）",
+            "unsupported notify channel type {} (supported: {})",
             kind,
             CHANNEL_KINDS.join(" / ")
         ));
@@ -487,17 +487,17 @@ pub fn validate_channel(
     match kind {
         "feishu" => {
             if app_id.trim().is_empty() {
-                return Err("飞书需要填写 App ID".into());
+                return Err("Feishu: App ID is required".into());
             }
             if secret.trim().is_empty() {
-                return Err("飞书需要填写 App Secret".into());
+                return Err("Feishu: App Secret is required".into());
             }
             if receive_id.trim().is_empty() {
-                return Err("飞书需要填写接收 ID（群 chat_id / 用户 open_id 等）".into());
+                return Err("Feishu: receive ID is required (chat_id / user open_id)".into());
             }
             if !FEISHU_RECEIVE_ID_TYPES.contains(&receive_id_type) {
                 return Err(format!(
-                    "未知的飞书接收 ID 类型 {}（可选：{}）",
+                    "unknown Feishu receive ID type {}（supported：{}）",
                     receive_id_type,
                     FEISHU_RECEIVE_ID_TYPES.join(" / ")
                 ));
@@ -510,20 +510,20 @@ pub fn validate_channel(
             }
             Ok(())
         }
-        // 青鸟的通用来源是 fail-closed 的：没配 Token 一律 401，
-        // 所以这里把 Token 也当成必填，免得提示到投递失败里才暴露
+        // Bluebird source is fail-closed: no token always 401,
+        // so treat token as required to avoid exposing error only at delivery time
         "bluebird" => {
             if url.trim().is_empty() {
-                return Err("青鸟需要填写通用来源地址（…/hooks/<来源 ID>）".into());
+                return Err("Bluebird: source URL is required (.../hooks/<source_id>)".into());
             }
             if secret.trim().is_empty() {
-                return Err("青鸟需要填写 Token（通用来源的访问令牌）".into());
+                return Err("Bluebird: access token is required".into());
             }
             Ok(())
         }
         _ => {
             if url.trim().is_empty() {
-                return Err("通用 webhook 需要填写 URL".into());
+                return Err("generic webhook: URL is required".into());
             }
             Ok(())
         }
@@ -1638,16 +1638,16 @@ fn body_detail(body: &[u8]) -> String {
     }
 }
 
-/// 已知错误码 → 排查方向。只覆盖飞书：它的错误码光看数字没法动手，
-/// 而 Slack / 自建接收端出错多半就是地址不对，HTTP 状态已经说明问题。
+/// Known error codes -> troubleshooting hints. Only covers Feishu since its error codes are opaque.
+/// Slack / self-hosted webhooks: if something's wrong, the HTTP status already tells you.
 fn channel_hint(code: i64) -> &'static str {
     match code {
-        10003 => "：App ID / App Secret 不完整或不合法",
-        10014 => "：App ID 或 App Secret 不正确",
-        230001 => "：接收 ID 无效——核对接收 ID 与类型是否匹配（群是 oc_ 开头的 chat_id）",
-        99992402 => "：接收 ID 类型不合法，可选 chat_id / open_id / user_id / union_id / email",
-        99991672 => "：应用权限不足，请到开发者后台开通 im:message:send_as_bot 并发布版本",
-        11232 => "：触发飞书限流（同一应用 50 次/秒）",
+        10003 => ": App ID / App Secret is incomplete or invalid",
+        10014 => ": App ID or App Secret is incorrect",
+        230001 => ": receive ID is invalid — check if ID type matches (group uses oc_ prefix chat_id)",
+        99992402 => ": receive ID type is invalid, optional chat_id / open_id / user_id / union_id / email",
+        99991672 => ": app lacks permission — go to developer console and enable im:message:send_as_bot, then publish",
+        11232 => ": Feishu rate limit hit (50 req/s per app)",
         _ => "",
     }
 }
@@ -1685,7 +1685,7 @@ pub async fn seed_default_rules(state: &AppState) -> anyhow::Result<()> {
             "warning",
         ),
         (
-            "磁盘使用率过高",
+            "Disk usage high",
             "host.disk.usage",
             "gt",
             85.0,
@@ -1841,7 +1841,7 @@ mod tests {
     fn rule(severity: &str) -> AlertRule {
         AlertRule {
             id: 1,
-            name: "磁盘使用率过高".into(),
+            name: "Disk usage high".into(),
             metric: "host.disk.usage".into(),
             op: "gt".into(),
             threshold: 85.0,
@@ -1853,18 +1853,18 @@ mod tests {
         }
     }
 
-    /// 一条指标告警的事实（形状与 `evaluate` 里的调用点一致）
+    /// Test helper: create alert facts matching the test rule
     fn facts(firing: bool) -> AlertFacts {
         AlertFacts {
             node: "shark-9".into(),
             firing,
             fields: vec![
-                ("节点", "shark-9".into()),
-                ("指标", "磁盘使用率".into()),
-                ("当前值", "91.0%".into()),
-                ("阈值", "> 85%".into()),
+                ("Node", "shark-9".into()),
+                ("Metric", "Disk usage".into()),
+                ("Value", "91.0%".into()),
+                ("Threshold", "> 85%".into()),
             ],
-            detail: "磁盘使用率 >85%（当前 91.0%）".into(),
+            detail: "Disk usage >85% (current 91.0%)".into(),
         }
     }
 
@@ -1875,24 +1875,24 @@ mod tests {
         assert_eq!(v["severity"], "warning");
         assert_eq!(v["hostname"], "shark-9");
         assert_eq!(v["at_unix_nano"], 42);
-        assert_eq!(v["title"], "🟠 警告 · 磁盘使用率过高（shark-9）");
-        assert!(v["text"].as_str().unwrap().contains("（shark-9）"));
-        assert!(v["text"].as_str().unwrap().contains("磁盘使用率"));
-        // `body` 是青鸟那类接收端的正文约定字段，`text` 是既有自建接收端认的，两个都要有
+        assert_eq!(v["title"], "🟠 Warning · Disk usage high (shark-9)");
+        assert!(v["text"].as_str().unwrap().contains("(shark-9)"));
+        assert!(v["text"].as_str().unwrap().contains("Disk usage"));
+        // `body` is the contract field for receivers like Bluebird, `text` is what self-hosted receivers expect
         assert_eq!(v["body"], v["text"]);
-        // 分栏与配色一并给出，接收端不必再自己解析 title
-        assert_eq!(v["fields"][0]["label"], "节点");
+        // fields and color included, receiver doesn't need to parse title
+        assert_eq!(v["fields"][0]["label"], "Node");
         assert_eq!(v["fields"][0]["value"], "shark-9");
         assert_eq!(v["level"], "warning");
         assert_eq!(v["color"], "#d93f0b");
     }
 
-    /// 恢复通知不能长成「又告警一次」：文案换「已恢复」，级别与配色跟着变
+    /// Recovery notification should not look like "another alert": copy changes to "Recovered", level and color follow
     #[test]
     fn recovery_notifications_say_recovered() {
         let body = channel_body("webhook", &rule("warning"), &facts(false), 0);
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(v["title"], "✅ 已恢复 · 磁盘使用率过高（shark-9）");
+        assert_eq!(v["title"], "✅ Resolved · Disk usage high (shark-9)");
         assert_eq!(v["level"], "resolved");
         assert_eq!(v["color"], "#2da44e");
     }
@@ -1908,19 +1908,19 @@ mod tests {
             8,
         ))
         .unwrap();
-        assert_eq!(v["title"], "🔴 严重 · 磁盘使用率过高（shark-9）");
-        assert_eq!(v["body"], "磁盘使用率 >85%（当前 91.0%）");
+        assert_eq!(v["title"], "🔴 Critical · Disk usage high (shark-9)");
+        assert_eq!(v["body"], "Disk usage >85% (current 91.0%)");
         assert_eq!(v["event"], "critical");
-        assert_eq!(v["fields"][2]["label"], "当前值");
+        assert_eq!(v["fields"][2]["label"], "Value");
         assert_eq!(v["at_unix_nano"], 8);
 
         // 正文里不该再重复一遍标题行：青鸟会把 title 当卡片头、body 当正文
         let body = v["body"].as_str().unwrap();
-        assert!(!body.contains("严重"), "{body}");
-        assert!(!body.contains("磁盘使用率过高"), "{body}");
+        assert!(!body.contains("Critical"), "{body}");
+        assert!(!body.contains("Disk usage high"), "{body}");
     }
 
-    /// 飞书换成消息卡片，标题栏按「严重 / 警告 / 已恢复」三档上色
+    /// Feishu uses colored cards, title bar colored by "Critical / Warning / Recovered" three levels
     #[test]
     fn feishu_channel_sends_colored_card() {
         let card = |severity: &str, firing: bool| -> serde_json::Value {
@@ -1932,7 +1932,7 @@ mod tests {
         assert_eq!(critical["header"]["template"], "red");
         assert_eq!(
             critical["header"]["title"]["content"],
-            "🔴 严重 · 磁盘使用率过高（shark-9）"
+            "🔴 Critical · Disk usage high (shark-9)"
         );
 
         assert_eq!(card("warning", true)["header"]["template"], "orange");
@@ -1941,12 +1941,12 @@ mod tests {
         assert_eq!(recovered["header"]["template"], "green");
         assert_eq!(
             recovered["header"]["title"]["content"],
-            "✅ 已恢复 · 磁盘使用率过高（shark-9）"
+            "✅ Resolved · Disk usage high (shark-9)"
         );
     }
 
-    /// 走 im/v1/messages 时卡片要塞进 `content` 字符串，且**不能**再包一层 `card`
-    /// （自定义机器人的壳，加了飞书直接回 9499）
+    /// When sending via im/v1/messages, card must be wrapped in `content` string, and must NOT wrap in another `card`
+    /// (custom bot wrapper — Feishu returns 9499 if present)
     #[test]
     fn feishu_message_wraps_bare_card_into_content() {
         let card = channel_body("feishu", &rule("warning"), &facts(true), 0);
@@ -1980,16 +1980,16 @@ mod tests {
         let elements = v["elements"].as_array().unwrap();
         let fields = elements[0]["fields"].as_array().unwrap();
         assert_eq!(fields.len(), 4);
-        assert_eq!(fields[0]["text"]["content"], "**节点**\nshark-9");
-        assert_eq!(fields[2]["text"]["content"], "**当前值**\n91.0%");
-        // 阈值里的 `>` 是正常内容，不能被转义吃掉（曾经把「> 85%」变成「 85%」）
-        assert_eq!(fields[3]["text"]["content"], "**阈值**\n> 85%");
-        // 正文走 plain_text：探针失败原因这类内容不可控，不能当 lark_md 解析
+        assert_eq!(fields[0]["text"]["content"], "**Node**\nshark-9");
+        assert_eq!(fields[2]["text"]["content"], "**Value**\n91.0%");
+        // Threshold's `>` is normal content, must not be escaped (once became " 85%")
+        assert_eq!(fields[3]["text"]["content"], "**Threshold**\n> 85%");
+        // Body uses plain_text: probe failure reasons are uncontrolled, must not be parsed as lark_md
         assert_eq!(elements[2]["text"]["tag"], "plain_text");
     }
 
-    /// 别名没有字符校验（routes::normalize_alias 只 trim + 限长），塞进 lark_md
-    /// 会真的 @所有人——动态值里能开启标签的 `<` 必须中和
+    /// Alias has no character validation (routes::normalize_alias only trims + limits length),
+    /// injecting into lark_md would @mention everyone — `<` that can open tags must be neutralized
     #[test]
     fn feishu_card_neutralizes_markup_in_alias() {
         let mut f = facts(true);
@@ -2015,28 +2015,27 @@ mod tests {
         let slack: serde_json::Value =
             serde_json::from_str(&channel_body("slack", &rule("warning"), &facts(true), 0))
                 .unwrap();
-        assert!(slack["text"].as_str().unwrap().starts_with("🟠 警告 ·"));
-        assert!(slack["text"].as_str().unwrap().contains("（shark-9）"));
-        // 侧栏配色按级别
+        assert!(slack["text"].as_str().unwrap().starts_with("🟠 Warning ·"));
+        assert!(slack["text"].as_str().unwrap().contains("(shark-9)"));
+        // Sidebar color by level
         assert_eq!(slack["attachments"][0]["color"], "#d93f0b");
 
         let blocks = slack["blocks"].as_array().unwrap();
         assert_eq!(blocks[0]["type"], "header");
         assert_eq!(
             blocks[0]["text"]["text"],
-            "🟠 警告 · 磁盘使用率过高（shark-9）"
+            "🟠 Warning · Disk usage high (shark-9)"
         );
         let fields = blocks[1]["fields"].as_array().unwrap();
         assert_eq!(fields.len(), 4);
-        assert_eq!(fields[0]["text"], "*节点*\nshark-9");
-        // 正文与来源
-        assert_eq!(blocks[2]["text"]["text"], "磁盘使用率 >85%（当前 91.0%）");
-        assert_eq!(blocks[3]["elements"][0]["text"], "zhiwei 节点监控");
+        assert_eq!(fields[0]["text"], "*Node*\nshark-9");
+        // body and source
+        assert_eq!(blocks[2]["text"]["text"], "Disk usage >85% (current 91.0%)");
+        assert_eq!(blocks[3]["elements"][0]["text"], "zhiwei monitor");
     }
 
-    /// Slack 的 mrkdwn 会把 `<@U123>` / `<!channel>` 解析成真的 @，
-    /// 而节点别名是没有字符校验的用户输入——凡是要按 mrkdwn 渲染的位置都必须中和。
-    /// （header 只收 plain_text，不作解析，保持原样反而更好读。）
+    /// Slack's mrkdwn parses `<@U123>` / `<!channel>` as real @ mentions,
+    /// but node aliases are user input without character validation — must neutralize.
     #[test]
     fn slack_card_neutralizes_markup_in_alias() {
         let mut f = facts(true);
@@ -2056,10 +2055,10 @@ mod tests {
         assert_eq!(slack["blocks"][0]["text"]["type"], "plain_text");
     }
 
-    /// 每种渠道要填的字段不同，缺哪个都要在保存前就说清楚
+    /// Each channel type has different required fields — must validate before save
     #[test]
     fn channel_params_are_validated_per_kind() {
-        // 飞书：App ID / App Secret / 接收 ID 缺一不可，类型要在白名单里
+        // Feishu: App ID / App Secret / receive ID are all required, type must be in whitelist
         assert!(validate_channel("feishu", "", "s", "cli_x", "oc_1", "chat_id").is_ok());
         assert!(validate_channel("feishu", "", "s", "", "oc_1", "chat_id")
             .unwrap_err()
@@ -2071,23 +2070,23 @@ mod tests {
         );
         assert!(validate_channel("feishu", "", "s", "cli_x", "", "chat_id")
             .unwrap_err()
-            .contains("接收 ID"));
+            .contains("receive ID"));
         assert!(
             validate_channel("feishu", "", "s", "cli_x", "oc_1", "chat-id")
                 .unwrap_err()
-                .contains("接收 ID 类型")
+                .contains("receive ID type")
         );
-        // 飞书不需要 url，缺了也放行（地址由 receive_id 决定）
+        // Feishu doesn't need URL (address determined by receive_id)
         assert!(validate_channel("feishu", "", "s", "cli_x", "oc_1", "chat_id").is_ok());
 
-        // Slack / 通用 webhook：必须要地址；webhook 的 Token 可选
+        // Slack / generic webhook: URL required; webhook token optional
         assert!(validate_channel("slack", "", "", "", "", "").is_err());
         assert!(validate_channel("slack", "https://hooks.slack.com/x", "", "", "", "").is_ok());
         assert!(validate_channel("webhook", "", "", "", "", "").is_err());
         assert!(validate_channel("webhook", "http://10.0.0.1/hook", "", "", "", "").is_ok());
         assert!(validate_channel("webhook", "http://10.0.0.1/hook", "tok", "", "", "").is_ok());
 
-        // 青鸟：地址和 Token 都必填（通用来源没 Token 一律 401，早说早好）
+        // Bluebird: URL and Token both required (no token = 401, fail fast)
         assert!(validate_channel("bluebird", "", "", "", "", "").is_err());
         assert!(validate_channel(
             "bluebird",
@@ -2098,7 +2097,7 @@ mod tests {
             ""
         )
         .unwrap_err()
-        .contains("Token"));
+        .contains("access token"));
         assert!(validate_channel(
             "bluebird",
             "https://bb.example.com/hooks/zhiwei",
@@ -2109,11 +2108,11 @@ mod tests {
         )
         .is_ok());
 
-        // 下线的类型不能再进来（钉钉等）
+        // Deprecated types should be rejected
         for kind in ["dingtalk", "bark", "wecom", "wechat"] {
             assert!(
                 validate_channel(kind, "https://x/y", "", "", "", "").is_err(),
-                "{kind} 不该被接受"
+                "{kind} should be rejected"
             );
         }
     }
@@ -2129,26 +2128,26 @@ mod tests {
         assert_eq!(ch.receive_id, "oc_1");
     }
 
-    /// 未知 kind 按 webhook 处理：老库里可能存着历史值，不能因此丢通知
+    /// Unknown kind falls back to webhook: old DB may have historical values, must not lose notifications
     #[test]
     fn unknown_kind_falls_back_to_webhook() {
         let body = channel_body("something-new", &rule("warning"), &facts(true), 7);
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(v["rule"], "磁盘使用率过高");
+        assert_eq!(v["rule"], "Disk usage high");
     }
 
-    /// 投递失败的原因得从 body 里挖：飞书把错误码放这里（HTTP 还是 200），
-    /// 只看状态就会把失败当成功
+    /// Delivery failure reasons are extracted from body: Feishu puts error code in body (HTTP may still be 200),
+    /// so只看状态就会把失败当成功
     #[test]
     fn delivery_errors_surface_channel_codes() {
-        // 成功形态都不算失败：飞书 code=0、Slack 纯文本 "ok"
+        // Success states are not failures: Feishu code=0, Slack plain "ok"
         assert_eq!(body_error(br#"{"code":0,"msg":"success"}"#), None);
         assert_eq!(body_error(br#"{"errcode":0,"errmsg":"ok"}"#), None);
         assert_eq!(body_error(b"ok"), None);
 
         let bad_secret = body_error(br#"{"code":10014,"msg":"app secret invalid"}"#).unwrap();
         assert!(bad_secret.contains("10014"), "{bad_secret}");
-        assert!(bad_secret.contains("App ID 或 App Secret"), "{bad_secret}");
+        assert!(bad_secret.contains("App ID or App Secret"), "{bad_secret}");
 
         let bad_receive = body_error(br#"{"code":230001,"msg":"receive_id invalid"}"#).unwrap();
         assert!(bad_receive.contains("chat_id"), "{bad_receive}");
@@ -2205,12 +2204,12 @@ mod tests {
     }
 
     /// 标题行所有渠道共用一份文案：推送只显示标题时（手机通知栏 / Bark / IM 折叠态）
-    /// 也要能看出「哪台机器、多严重、什么事」
+    /// Must also be able to tell "which machine, how severe, what happened"
     #[test]
     fn title_line_is_shared_across_channels() {
         let r = rule("critical");
         let f = facts(true);
-        let title = "🔴 严重 · 磁盘使用率过高（shark-9）";
+        let title = "🔴 Critical · Disk usage high (shark-9)";
         assert_eq!(title_line(&r, &f), title);
 
         let webhook: serde_json::Value =
@@ -2230,9 +2229,9 @@ mod tests {
     /// 告警文案里的人话指标名：认识的要带中文名与单位，不认识的保留原名不崩
     #[test]
     fn metric_label_humanizes_known_metrics() {
-        assert_eq!(metric_label("host.disk.usage"), ("磁盘使用率", "%"));
-        assert_eq!(metric_label("host.mem.usage"), ("内存使用率", "%"));
-        assert_eq!(metric_label("host.cpu.usage"), ("CPU 使用率", "%"));
+        assert_eq!(metric_label("host.disk.usage"), ("Disk Usage", "%"));
+        assert_eq!(metric_label("host.mem.usage"), ("Memory Usage", "%"));
+        assert_eq!(metric_label("host.cpu.usage"), ("CPU Usage", "%"));
         assert_eq!(metric_label("some.new.metric"), ("some.new.metric", ""));
     }
 

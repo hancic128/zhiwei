@@ -123,7 +123,7 @@ pub async fn run_loop(monitor: String, state: Arc<NodeState>, node_id: String) {
                 state = outcome.state,
                 latency_ms = outcome.latency_ms,
                 error = %outcome.error,
-                "探针执行完成"
+                "Probe execution completed"
             );
             results.push(serde_json::json!({
                 "probe_id": spec.id,
@@ -166,12 +166,12 @@ async fn fetch_specs(
         .await?;
     if status != 200 {
         anyhow::bail!(
-            "拉取探针配置返回 {status}: {}",
+            "probe config returned {status}: {}",
             String::from_utf8_lossy(&raw)
         );
     }
 
-    let v: Value = serde_json::from_slice(&raw).context("解析探针配置失败")?;
+    let v: Value = serde_json::from_slice(&raw).context("failed to parse probe config")?;
     let list = v
         .get("probes")
         .and_then(|p| p.as_array())
@@ -225,7 +225,7 @@ async fn post_results(
         .await?;
     if status != 204 {
         anyhow::bail!(
-            "上报探针结果返回 {status}: {}",
+            "probe results returned {status}: {}",
             String::from_utf8_lossy(&raw)
         );
     }
@@ -237,14 +237,14 @@ async fn execute(spec: &ProbeSpec) -> Outcome {
     match spec.kind.as_str() {
         "http" => tokio::time::timeout(timeout, probe_http(spec))
             .await
-            .unwrap_or_else(|_| Outcome::down("检查超时")),
+            .unwrap_or_else(|_| Outcome::down("check timeout")),
         "tcp" => tokio::time::timeout(timeout, probe_tcp(spec))
             .await
-            .unwrap_or_else(|_| Outcome::down("检查超时")),
+            .unwrap_or_else(|_| Outcome::down("check timeout")),
         "tls" => tokio::time::timeout(timeout, probe_tls(spec))
             .await
-            .unwrap_or_else(|_| Outcome::down("检查超时")),
-        other => Outcome::down(format!("不支持的探针类型 {other}")),
+            .unwrap_or_else(|_| Outcome::down("check timeout")),
+        other => Outcome::down(format!("unsupported probe type {other}")),
     }
 }
 
@@ -266,7 +266,7 @@ fn latency_verdict(spec: &ProbeSpec, latency_ms: f64, status_code: Option<i64>) 
         return Some(Outcome::degraded(
             Some(latency_ms),
             status_code,
-            format!("延迟 {latency_ms:.0}ms 超过阈值 {max:.0}ms"),
+            format!("latency {latency_ms:.0}ms exceeds threshold {max:.0}ms"),
         ));
     }
     None
@@ -316,7 +316,7 @@ async fn probe_http(spec: &ProbeSpec) -> Outcome {
             state: "down",
             latency_ms: Some(latency_ms),
             status_code,
-            error: format!("状态码 {status} 不符合期望"),
+            error: format!("status code {status} does not match expected"),
         };
     }
 
@@ -326,7 +326,7 @@ async fn probe_http(spec: &ProbeSpec) -> Outcome {
                 return Outcome::degraded(
                     Some(latency_ms),
                     status_code,
-                    format!("响应体不含 {needle:?}"),
+                    format!("response body does not contain {needle:?}"),
                 );
             }
         }
@@ -365,13 +365,13 @@ async fn fetch_http(
 
     let stream = tokio::net::TcpStream::connect((host.as_str(), port))
         .await
-        .with_context(|| format!("连接 {host}:{port}"))?;
+        .with_context(|| format!("connect {host}:{port}"))?;
 
     let io: Box<dyn crate::http::IoStream> = if tls {
         let cfg = build_client_config(None, !tls_verify)?;
         let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(cfg));
         let name =
-            rustls::pki_types::ServerName::try_from(host.clone()).context("非法 server name")?;
+            rustls::pki_types::ServerName::try_from(host.clone()).context("invalid server name")?;
         Box::new(connector.connect(name, stream).await?)
     } else {
         Box::new(stream)
@@ -420,7 +420,7 @@ async fn probe_tcp(spec: &ProbeSpec) -> Outcome {
     let started = Instant::now();
     let mut stream = match tokio::net::TcpStream::connect((host.as_str(), port)).await {
         Ok(s) => s,
-        Err(e) => return Outcome::down(format!("连接 {host}:{port} 失败: {e}")),
+        Err(e) => return Outcome::down(format!("connect {host}:{port} failed: {e}")),
     };
 
     // 可选 banner 校验：读一小段（拿不到也不算失败）
@@ -434,7 +434,7 @@ async fn probe_tcp(spec: &ProbeSpec) -> Outcome {
         let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
         let banner = String::from_utf8_lossy(&buf[..read]).to_string();
         if read > 0 && !banner.contains(needle) {
-            return Outcome::degraded(Some(latency_ms), None, format!("banner 不含 {needle:?}"));
+            return Outcome::degraded(Some(latency_ms), None, format!("banner does not contain {needle:?}"));
         }
     }
 
@@ -468,20 +468,20 @@ async fn probe_tls(spec: &ProbeSpec) -> Outcome {
     let started = Instant::now();
     let stream = match tokio::net::TcpStream::connect((host.as_str(), port)).await {
         Ok(s) => s,
-        Err(e) => return Outcome::down(format!("连接 {host}:{port} 失败: {e}")),
+        Err(e) => return Outcome::down(format!("connect {host}:{port} failed: {e}")),
     };
     let cfg = match build_client_config(None, !verify) {
         Ok(c) => c,
-        Err(e) => return Outcome::down(format!("TLS 配置失败: {e}")),
+        Err(e) => return Outcome::down(format!("TLS config failed: {e}")),
     };
     let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(cfg));
     let name = match rustls::pki_types::ServerName::try_from(sni.clone()) {
         Ok(n) => n,
-        Err(e) => return Outcome::down(format!("非法 SNI {sni}: {e}")),
+        Err(e) => return Outcome::down(format!("invalid SNI {sni}: {e}")),
     };
     let tls_stream = match connector.connect(name, stream).await {
         Ok(s) => s,
-        Err(e) => return Outcome::down(format!("TLS 握手失败: {e}")),
+        Err(e) => return Outcome::down(format!("TLS handshake failed: {e}")),
     };
     let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
 
@@ -505,7 +505,7 @@ async fn probe_tls(spec: &ProbeSpec) -> Outcome {
                 state: "down",
                 latency_ms: Some(latency_ms),
                 status_code: None,
-                error: format!("证书已过期 {days} 天"),
+                error: format!("cert expired {days} days"),
             };
         }
         let min_days = spec
@@ -517,7 +517,7 @@ async fn probe_tls(spec: &ProbeSpec) -> Outcome {
             return Outcome::degraded(
                 Some(latency_ms),
                 None,
-                format!("证书剩余 {days} 天，少于阈值 {min_days} 天"),
+                format!("cert has {days} days remaining, below threshold {min_days} days"),
             );
         }
     }

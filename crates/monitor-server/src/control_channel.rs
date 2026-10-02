@@ -161,6 +161,6 @@ mod tests {
         polls.note("a", 333);
         assert_eq!(polls.last("a"), Some(333));
         assert_eq!(polls.last("b"), Some(222));
-        assert_eq!(polls.last("没有这台机器"), None);
+        assert_eq!(polls.last("no such host"), None);
     }
 }
