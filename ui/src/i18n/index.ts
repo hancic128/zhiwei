@@ -31,12 +31,8 @@ i18n.on("languageChanged", syncDocumentMeta);
 if (i18n.isInitialized) syncDocumentMeta();
 
 export function switchLocale(locale: Locale) {
-  console.log('[i18n] switchLocale called:', locale);
   persist.locale(locale);
-  console.log('[i18n] persisted, calling changeLanguage');
-  void i18n.changeLanguage(locale).then(() => {
-    console.log('[i18n] changeLanguage completed, current:', i18n.language);
-  });
+  void i18n.changeLanguage(locale);
 }
 
 export default i18n;
