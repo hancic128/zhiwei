@@ -1,11 +1,13 @@
 import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
 import enUS from "../../locales/en-US/common.json";
+import zhCN from "../../locales/zh-CN/common.json";
 import { loadLocale, persist, type Locale } from "@/lib/prefs";
 
 void i18n.use(initReactI18next).init({
   resources: {
     "en-US": { common: enUS },
+    "zh-CN": { common: zhCN },
   },
   lng: loadLocale(),
   fallbackLng: "en-US",
