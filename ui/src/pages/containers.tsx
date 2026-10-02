@@ -2,7 +2,7 @@ import * as React from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { Box, FileText, RefreshCw } from "lucide-react";
+import { Box, RefreshCw } from "lucide-react";
 import {
   containerBucket,
   containerTone,
@@ -13,7 +13,6 @@ import {
   type ContainerInfo,
 } from "@/api";
 import { ContainerActions } from "@/components/container-actions";
-import { LogFetchDialog } from "@/components/log-fetch-dialog";
 import { StatCards, type StatCard } from "@/components/stat-cards";
 import { Badge, DotBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -82,7 +81,6 @@ export function Containers() {
   const [sortDir, setSortDir] = React.useState<SortDir>("asc");
   const [page, setPage] = React.useState(1);
   const [pageSize, setPageSize] = React.useState(10);
-  const [fileLogsOpen, setFileLogsOpen] = React.useState(false);
 
   // 概览卡片会带 ?state=failed 进来，这里按 query 初始化筛选
   const [filter, setFilter] = React.useState<Filter>(() => {
@@ -312,16 +310,6 @@ export function Containers() {
               onChange={(e) => setQ(e.target.value)}
               aria-label={t("action.search")}
             />
-            <Tooltip content={t("containers.fileLogs")}>
-              <Button
-                variant="ghost"
-                size="icon"
-                aria-label={t("containers.fileLogs")}
-                onClick={() => setFileLogsOpen(true)}
-              >
-                <FileText className="w-4 h-4" aria-hidden="true" />
-              </Button>
-            </Tooltip>
             <Tooltip content={t("action.refresh")}>
               <Button
                 variant="ghost"
@@ -531,12 +519,6 @@ export function Containers() {
           </>
         )}
       </TableShell>
-
-      <LogFetchDialog
-        open={fileLogsOpen}
-        onClose={() => setFileLogsOpen(false)}
-        defaultSource="file"
-      />
     </>
   );
 }

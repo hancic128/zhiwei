@@ -486,12 +486,9 @@ export function Services() {
                       </div>
                       {/* 「服务」列已去掉：所属服务降到探针名下的一行小字，
                           既不再占一整列，又能让搜索服务名有可见的依据。 */}
-                      <div className="text-xs text-ink-400 truncate max-w-[220px]">
-                        {r.service_name}
-                        {!r.service_enabled
-                          ? ` · ${t("services.serviceDisabled")}`
-                          : ""}
-                        {!p.enabled ? ` · ${t("services.disabled")}` : ""}
+                      <div className="text-xs text-ink-400 truncate max-w-[220px] flex items-center gap-1">
+                        <span className="truncate">{r.service_name}</span>
+                        <DotBadge tone="neutral">{t("services.enabled")}</DotBadge>
                       </div>
                     </Td>
                     <Td className="hidden sm:table-cell">
