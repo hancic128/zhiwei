@@ -71,12 +71,27 @@ cmd_start() {
     [ -n "$USE_TLS" ] || tls_flag=(--plain-http)
     nohup "$MONITOR_BIN" --data-dir "$DATA_DIR" --listen "$LISTEN" \
       "${tls_flag[@]}" >"$MONITOR_LOG" 2>&1 &
-    sleep 2
+    sleep 3
     if [ -n "$USE_TLS" ]; then
       say "monitor started → $(url) (built-in TLS, server cert only)"
     else
       say "monitor started → $(url) (plain HTTP, TLS at edge)"
     fi
+  fi
+
+  # Print tokens after monitor starts
+  if [ -f "$TOKEN_FILE" ]; then
+    echo
+    say "Admin token (stored at $TOKEN_FILE):"
+    cat "$TOKEN_FILE"
+    echo
+  fi
+
+  local bt_token
+  bt_token="$(grep -o 'zhi-bt-[a-f0-9]*' "$MONITOR_LOG" 2>/dev/null | tail -1 || true)"
+  if [ -n "$bt_token" ]; then
+    say "Bootstrap token: $bt_token (valid 10 minutes)"
+    echo
   fi
 
   # Check if docker is available before starting node
@@ -93,11 +108,9 @@ cmd_start() {
   if pgrep -f 'zhiwei-node --state-dir' >/dev/null 2>&1; then
     say "node already running"
   else
-    local token
-    token="$(grep -o 'zhi-bt-[a-f0-9]*' "$MONITOR_LOG" | tail -1 || true)"
-    [ -n "$token" ] || die "No bootstrap token in logs. Run ./scripts/dev.sh token first"
+    [ -n "$bt_token" ] || die "No bootstrap token in logs. Run ./scripts/dev.sh token first"
     # Node identity via signing.key, no certificates needed
-    ZHIWEI_MONITOR_URL="$(url)" ZHIWEI_BOOTSTRAP_TOKEN="$token" \
+    ZHIWEI_MONITOR_URL="$(url)" ZHIWEI_BOOTSTRAP_TOKEN="$bt_token" \
       nohup "$NODE_BIN" --state-dir "$DATA_DIR/node" --interval "$INTERVAL" >"$NODE_LOG" 2>&1 &
     sleep 3
     say "node started (reporting every ${INTERVAL}s)"
@@ -160,7 +173,9 @@ cmd_stop() {
 cmd_reset() {
   cmd_stop
   rm -rf "$DATA_DIR"
-  say "Deleted $DATA_DIR and restarted from scratch"
+  say "Deleted $DATA_DIR"
+  echo
+  say "Restarting..."
   cmd_start
 }
 

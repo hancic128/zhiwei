@@ -476,7 +476,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     if let Err(e) = alerts::seed_default_rules(&state).await {
-        tracing::warn!(error = %e, "写入默认告警规则失败");
+        tracing::warn!(error = %e, "Failed to write default alert rules");
     }
 
     // 探针结果明细滚动保留 7 天（启动先清一次，之后每 6 小时一次）
@@ -521,7 +521,7 @@ async fn main() -> anyhow::Result<()> {
     // 明文模式：TLS 由前置边缘终结。节点身份来自请求签名而非传输层，
     // 所以这里不做任何额外鉴权——每条请求都要自证。
     if server_cert.is_none() {
-        tracing::info!(%listen, "zhiwei-monitor ready (明文 HTTP，TLS 由前置边缘终结)");
+        tracing::info!(%listen, "zhiwei-monitor ready (plain HTTP, TLS terminated at edge)");
         loop {
             let (stream, peer) = listener.accept().await?;
             let app = app.clone();

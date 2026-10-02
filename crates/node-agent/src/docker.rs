@@ -179,8 +179,8 @@ pub async fn container_action(container: &str, action: &str) -> anyhow::Result<S
         anyhow::bail!("{}", docker_error_message(status, &body));
     }
     let zh = match action {
-        "start" => "已启动",
-        "stop" => "已停止",
+        "start" => "started",
+        "stop" => "stopped",
         _ => "已重启",
     };
     Ok(format!("容器 {container} {zh}"))
@@ -215,7 +215,7 @@ pub async fn container_remove(container: &str, force: bool) -> anyhow::Result<St
     if !(200..300).contains(&status) {
         anyhow::bail!("{}", docker_error_message(status, &body));
     }
-    Ok(format!("容器 {container} 已删除"))
+    Ok(format!("Container {container} deleted"))
 }
 
 /// 列出本机容器（含已停止的）。

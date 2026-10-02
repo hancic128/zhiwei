@@ -278,7 +278,7 @@ pub async fn evaluate(state: &AppState, node_id: &NodeId, hostname: &str, batch:
     let rules = match state.storage.alerts().enabled_rules().await {
         Ok(r) => r,
         Err(e) => {
-            warn!(error = %e, "读取告警规则失败");
+            warn!(error = %e, "Failed to read alert rules");
             return;
         }
     };
@@ -301,7 +301,7 @@ pub async fn evaluate(state: &AppState, node_id: &NodeId, hostname: &str, batch:
         let st = match repo.get_state(rule.id, node_id.as_str()).await {
             Ok(s) => s,
             Err(e) => {
-                warn!(error = %e, "读取告警状态失败");
+                warn!(error = %e, "Failed to read alert state");
                 continue;
             }
         };
@@ -330,7 +330,7 @@ pub async fn evaluate(state: &AppState, node_id: &NodeId, hostname: &str, batch:
                     .await
                 {
                     Ok(alert_id) => {
-                        info!(rule = %rule.name, %node_id, alert_id, "告警触发");
+                        info!(rule = %rule.name, %node_id, alert_id, "Alert firing");
                         let _ = repo
                             .upsert_state(
                                 rule.id,
@@ -354,7 +354,7 @@ pub async fn evaluate(state: &AppState, node_id: &NodeId, hostname: &str, batch:
                         };
                         notify(state, &rule, &facts, now).await;
                     }
-                    Err(e) => warn!(error = %e, "开告警失败"),
+                    Err(e) => warn!(error = %e, "Failed to open alert"),
                 }
             } else {
                 let _ = repo
@@ -373,9 +373,9 @@ pub async fn evaluate(state: &AppState, node_id: &NodeId, hostname: &str, batch:
             if st.firing {
                 if let Some(alert_id) = st.open_alert_id {
                     if let Err(e) = repo.resolve_alert(alert_id, now).await {
-                        warn!(error = %e, "关闭告警失败");
+                        warn!(error = %e, "Failed to close alert");
                     } else {
-                        info!(rule = %rule.name, %node_id, alert_id, "告警恢复");
+                        info!(rule = %rule.name, %node_id, alert_id, "Alert resolved");
                     }
                 }
             }
@@ -403,7 +403,7 @@ async fn notify(state: &AppState, rule: &AlertRule, facts: &AlertFacts, now: i64
     let channels = match state.storage.alerts().list_channels().await {
         Ok(c) => c,
         Err(e) => {
-            warn!(error = %e, "读取通知渠道失败");
+            warn!(error = %e, "Failed to read notify channels");
             return;
         }
     };
@@ -421,11 +421,11 @@ async fn notify(state: &AppState, rule: &AlertRule, facts: &AlertFacts, now: i64
             &ch.receive_id,
             &ch.receive_id_type,
         ) {
-            warn!(channel = %ch.name, kind = %ch.kind, reason = %msg, "通知渠道配置不完整，跳过");
+            warn!(channel = %ch.name, kind = %ch.kind, reason = %msg, "Channel config incomplete, skipping");
             continue;
         }
         if let Err(e) = deliver(&ch, rule, facts, now).await {
-            warn!(channel = %ch.name, kind = %ch.kind, error = %e, "通知投递失败");
+            warn!(channel = %ch.name, kind = %ch.kind, error = %e, "Failed to deliver notification");
         }
     }
 }
@@ -774,13 +774,13 @@ pub async fn on_probe_transition(
     if transition.new_state == STATE_OK {
         match repo.resolve_open_probe_alerts(&probe.id, now).await {
             Ok(n) if n > 0 => {
-                info!(probe = %probe.name, "服务探针恢复，告警关闭");
+                info!(probe = %probe.name, "Service probe recovered, alert closed");
                 // 「恢复上线」的推送受内置开关 service_online 控制；关告警本身不受
                 // 影响——人都回来了，之前那条告警再挂着会误导。
                 let notify_on = match repo.builtin_rule_enabled("service_online").await {
                     Ok(v) => v,
                     Err(e) => {
-                        warn!(error = %e, "查 service_online builtin 开关失败，默认放开");
+                        warn!(error = %e, "Failed to check service_online builtin toggle, enabling by default");
                         true
                     }
                 };
@@ -805,7 +805,7 @@ pub async fn on_probe_transition(
                 notify(state, &rule, &facts, now).await;
             }
             Ok(_) => {}
-            Err(e) => warn!(error = %e, "关闭服务探针告警失败"),
+            Err(e) => warn!(error = %e, "Failed to close service probe alert"),
         }
         return;
     }
@@ -819,7 +819,7 @@ pub async fn on_probe_transition(
     let enabled = match repo.builtin_rule_enabled("service_offline").await {
         Ok(v) => v,
         Err(e) => {
-            warn!(error = %e, "查 service_offline builtin 开关失败，默认放开");
+            warn!(error = %e, "Failed to check service_offline builtin toggle, enabling by default");
             true
         }
     };
@@ -848,7 +848,7 @@ pub async fn on_probe_transition(
         .await
     {
         Ok(alert_id) => {
-            info!(probe = %probe.name, alert_id, "服务探针告警触发");
+            info!(probe = %probe.name, alert_id, "Service probe alert firing");
             let rule = probe_alert_rule(&rule_name, severity);
             let facts = AlertFacts {
                 node: hostname.to_string(),
@@ -866,7 +866,7 @@ pub async fn on_probe_transition(
             };
             notify(state, &rule, &facts, now).await;
         }
-        Err(e) => warn!(error = %e, "开服务探针告警失败"),
+        Err(e) => warn!(error = %e, "Failed to open service probe alert"),
     }
 }
 
@@ -954,7 +954,7 @@ pub async fn on_node_liveness_change(state: &AppState, transitions: &[(String, S
                 let enabled = match repo.builtin_rule_enabled("node_offline").await {
                     Ok(v) => v,
                     Err(e) => {
-                        warn!(%node_id, error = %e, "查 node_offline builtin 开关失败，默认放开");
+                        warn!(%node_id, error = %e, "Failed to check node_offline builtin toggle, enabling by default");
                         true
                     }
                 };
@@ -966,11 +966,11 @@ pub async fn on_node_liveness_change(state: &AppState, transitions: &[(String, S
                 let existing = match repo.open_node_offline_alert_id(node_id).await {
                     Ok(id) => id,
                     Err(e) => {
-                        warn!(%node_id, error = %e, "查询节点离线告警失败");
+                        warn!(%node_id, error = %e, "Failed to query node offline alert");
                         continue;
                     }
                 };
-                let message = format!("节点 {hostname} 已失联");
+                let message = format!("Node {hostname} is offline");
                 let severity = "critical";
                 let alert_id = match repo
                     .open_node_offline_alert(node_id, hostname, severity, &message, now)
@@ -978,7 +978,7 @@ pub async fn on_node_liveness_change(state: &AppState, transitions: &[(String, S
                 {
                     Ok(id) => id,
                     Err(e) => {
-                        warn!(%node_id, error = %e, "开节点离线告警失败");
+                        warn!(%node_id, error = %e, "Failed to open node offline alert");
                         continue;
                     }
                 };
@@ -988,11 +988,11 @@ pub async fn on_node_liveness_change(state: &AppState, transitions: &[(String, S
                     let facts = AlertFacts {
                         node: hostname.clone(),
                         firing: true,
-                        fields: vec![("节点", hostname.clone()), ("状态", "离线".to_string())],
+                        fields: vec![("Node", hostname.clone()), ("Status", "offline".to_string())],
                         detail: message,
                     };
                     notify(state, &rule, &facts, now).await;
-                    info!(alert_id, %node_id, "节点离线告警触发");
+                    info!(alert_id, %node_id, "Node offline alert firing");
                 }
             }
             Liveness::Online => {
@@ -1001,7 +1001,7 @@ pub async fn on_node_liveness_change(state: &AppState, transitions: &[(String, S
                 let resolved = match repo.resolve_node_offline_alerts(node_id, now).await {
                     Ok(n) => n,
                     Err(e) => {
-                        warn!(%node_id, error = %e, "关节点离线告警失败");
+                        warn!(%node_id, error = %e, "Failed to close node offline alert");
                         0
                     }
                 };
@@ -1011,7 +1011,7 @@ pub async fn on_node_liveness_change(state: &AppState, transitions: &[(String, S
                 let enabled = match repo.builtin_rule_enabled("node_online").await {
                     Ok(v) => v,
                     Err(e) => {
-                        warn!(%node_id, error = %e, "查 node_online builtin 开关失败，默认放开");
+                        warn!(%node_id, error = %e, "Failed to check node_online builtin toggle, enabling by default");
                         true
                     }
                 };
@@ -1021,13 +1021,13 @@ pub async fn on_node_liveness_change(state: &AppState, transitions: &[(String, S
                         node: hostname.clone(),
                         firing: true,
                         fields: vec![("节点", hostname.clone()), ("状态", "已上线".to_string())],
-                        detail: format!("节点 {hostname} 已上线"),
+                        detail: format!("Node {hostname} is online"),
                     };
                     notify(state, &rule, &facts, now).await;
-                    info!(%node_id, "节点上线通知已发出");
+                    info!(%node_id, "Node online notification sent");
                 }
                 if resolved > 0 {
-                    info!(count = resolved, %node_id, "节点离线告警已关闭");
+                    info!(count = resolved, %node_id, "Node offline alert closed");
                 }
             }
         }
@@ -1059,7 +1059,7 @@ pub async fn evaluate_cert_expiry(
     {
         Ok(s) => s,
         Err(e) => {
-            warn!(error = %e, "读取证书来源失败");
+            warn!(error = %e, "Failed to read cert sources");
             return;
         }
     };
@@ -1138,14 +1138,14 @@ pub async fn evaluate_cert_expiry(
             let gate_enabled = match repo.builtin_rule_enabled(gate).await {
                 Ok(v) => v,
                 Err(e) => {
-                    warn!(error = %e, %gate, "查 builtin 开关失败，默认放开");
+                    warn!(error = %e, %gate, "Failed to check builtin toggle, enabling by default");
                     true
                 }
             };
             if !gate_enabled {
                 if let Some(id) = open_by_ref.remove(&source_ref) {
                     if let Err(e) = repo.resolve_alert(id, now).await {
-                        warn!(error = %e, %source_ref, "关闭证书告警失败");
+                        warn!(error = %e, %source_ref, "Failed to close cert alert");
                     }
                 }
                 continue;
@@ -1179,7 +1179,7 @@ pub async fn evaluate_cert_expiry(
                         .await
                     {
                         Ok(id) => {
-                            info!(cert = %name, %severity, id, "证书到期告警触发");
+                            info!(cert = %name, %severity, id, "Certificate expiry alert firing");
                             let rule = cert_alert_rule(&rule_name, severity);
                             let days_field = if expired {
                                 format!("已过期 {} 天", (-days_left).floor().max(0.0) as i64)
@@ -1199,7 +1199,7 @@ pub async fn evaluate_cert_expiry(
                             };
                             notify(state, &rule, &facts, now).await;
                         }
-                        Err(e) => warn!(error = %e, "开证书告警失败"),
+                        Err(e) => warn!(error = %e, "Failed to open cert alert"),
                     }
                 }
             }
@@ -1209,9 +1209,9 @@ pub async fn evaluate_cert_expiry(
     // 剩下的都是「不再成立」的：证书续签了、文件删了、来源停用/删除了
     for (source_ref, id) in open_by_ref {
         if let Err(e) = repo.resolve_alert(id, now).await {
-            warn!(error = %e, %source_ref, "关闭证书告警失败");
+            warn!(error = %e, %source_ref, "Failed to close cert alert");
         } else {
-            info!(%source_ref, "证书告警已恢复");
+            info!(%source_ref, "Cert alert resolved");
         }
     }
 }
@@ -1389,14 +1389,14 @@ pub async fn on_container_events(
                 let enabled = match repo.builtin_rule_enabled("container_stopped").await {
                     Ok(v) => v,
                     Err(e) => {
-                        warn!(error = %e, "查 container_stopped builtin 开关失败，默认放开");
+                        warn!(error = %e, "Failed to check container_stopped builtin toggle, enabling by default");
                         true
                     }
                 };
                 if !enabled {
                     continue;
                 }
-                let message = format!("容器 {name}（{short}）已停止");
+                let message = format!("Container {name} ({short}) stopped");
                 match repo
                     .open_container_alert(
                         &id,
@@ -1410,7 +1410,7 @@ pub async fn on_container_events(
                     .await
                 {
                     Ok(alert_id) => {
-                        info!(container = %name, alert_id, %node_id, "容器停止告警触发");
+                        info!(container = %name, alert_id, %node_id, "Container stopped alert firing");
                         let rule = container_event_rule("容器停止", "warning");
                         let facts = AlertFacts {
                             node: hostname.to_string(),
@@ -1424,26 +1424,26 @@ pub async fn on_container_events(
                         };
                         notify(state, &rule, &facts, now).await;
                     }
-                    Err(e) => warn!(error = %e, "开容器停止告警失败"),
+                    Err(e) => warn!(error = %e, "Failed to open container stopped alert"),
                 }
             }
             ContainerEvent::Started { .. } => {
-                // 关掉这条容器的未解决停止告警——就算 started 开关关着也要关：
-                // 容器都起来了，之前那条「已停止」再挂着会误导
+                // Close this container's unresolved stopped alert - even if started toggle is off:
+                // if container is up, the old "stopped" alert would be misleading
                 if let Err(e) = repo.resolve_open_container_alerts(&id, now).await {
-                    warn!(error = %e, "关闭容器停止告警失败");
+                    warn!(error = %e, "Failed to close container stopped alert");
                 }
                 let enabled = match repo.builtin_rule_enabled("container_started").await {
                     Ok(v) => v,
                     Err(e) => {
-                        warn!(error = %e, "查 container_started builtin 开关失败，默认放开");
+                        warn!(error = %e, "Failed to check container_started builtin toggle, enabling by default");
                         true
                     }
                 };
                 if !enabled {
                     continue;
                 }
-                let message = format!("容器 {name}（{short}）已启动");
+                let message = format!("Container {name} ({short}) started");
                 let rule = container_event_rule("容器启动", "info");
                 let facts = AlertFacts {
                     node: hostname.to_string(),
@@ -1456,7 +1456,7 @@ pub async fn on_container_events(
                     detail: message,
                 };
                 notify(state, &rule, &facts, now).await;
-                info!(container = %name, %node_id, "容器启动通知已发出");
+                info!(container = %name, %node_id, "Container started notification sent");
             }
         }
     }
@@ -1686,7 +1686,7 @@ pub async fn seed_default_rules(state: &AppState) -> anyhow::Result<()> {
         repo.create_rule(name, metric, op, threshold, duration, severity, now)
             .await?;
     }
-    info!("已写入 {} 条默认告警规则", defaults.len());
+    info!("Inserted {} default alert rules", defaults.len());
     Ok(())
 }
 
@@ -1736,7 +1736,7 @@ pub fn spawn_node_liveness_watcher(state: AppState) {
                 match compute_transitions(&state, &last_seen_state, state.started_at_ms).await {
                     Ok(t) => t,
                     Err(e) => {
-                        warn!(error = %e, "节点 liveness 巡检失败");
+                        warn!(error = %e, "Node liveness check failed");
                         tokio::time::sleep(LIVENESS_POLL_INTERVAL).await;
                         continue;
                     }

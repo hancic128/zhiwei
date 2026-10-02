@@ -1175,7 +1175,7 @@ async fn delete_node_handler(
 
     match state.storage.nodes().delete(&trimmed).await {
         Ok(true) => {
-            info!(node_id = %trimmed, "节点已删除");
+            info!(node_id = %trimmed, "Node deleted");
             (StatusCode::NO_CONTENT).into_response()
         }
         Ok(false) => {
