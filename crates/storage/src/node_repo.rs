@@ -11,22 +11,22 @@ pub struct NodeRecord {
     pub client_cert_pem: String,
     pub enrolled_at_unix_nano: i64,
     pub last_seen_unix_nano: Option<i64>,
-    /// 主机基本信息（JSON，来自 telemetry 的 HostInfo）
+    /// Basic host info (JSON, from telemetry's HostInfo)
     pub host_info_json: String,
-    /// 节点 Ed25519 公钥（base64）。请求签名用它验签，取代原 mTLS 客户端证书。
+    /// Node Ed25519 public key (base64). Used for request signature verification, replacing the original mTLS client cert.
     pub public_key: String,
-    /// 管理员给的简短别称（≤10 字符）；空串表示未设置
+    /// Short alias given by admin (≤10 chars); empty string means not set
     pub alias: String,
-    /// 管理员给的标签（JSON 数组，≤10 个）
+    /// Admin-provided tags (JSON array, ≤10 items)
     pub tags_json: String,
 }
 
-/// SQLite 行的裸形态：与 SELECT 的列顺序一一对应。
+/// Bare form of SQLite row: one-to-one correspondence with SELECT column order.
 type NodeRow = (
     String,      // id
     String,      // hostname
     String,      // labels_json
-    String,      // client_cert_pem（历史列，已不再读写）
+    String,      // client_cert_pem (historical column, no longer read/written)
     i64,         // enrolled_at_unix_nano
     Option<i64>, // last_seen_unix_nano
     String,      // host_info_json
@@ -115,8 +115,8 @@ impl NodeRepo {
         Ok(())
     }
 
-    /// 允许节点自报新名字（例如首次上报时系统主机名是 bogon，后来改用
-    /// LocalHostName 或 --node-name）。仅在名字非空且确实不同时更新。
+    /// Allow node to report a new hostname (e.g., first report had system hostname as "bogon",
+    /// later uses LocalHostName or --node-name). Only updates if name is non-empty and actually different.
     pub async fn update_hostname(&self, id: &NodeId, hostname: &str) -> anyhow::Result<()> {
         if hostname.trim().is_empty() {
             return Ok(());
@@ -130,7 +130,7 @@ impl NodeRepo {
         Ok(())
     }
 
-    /// 用最新一次上报的 HostInfo 覆盖节点基本信息。
+    /// Overwrite node basic info with the latest reported HostInfo.
     pub async fn update_host_info(&self, id: &NodeId, host_info_json: &str) -> anyhow::Result<()> {
         sqlx::query("UPDATE nodes SET host_info_json = ? WHERE id = ?")
             .bind(host_info_json)
@@ -140,7 +140,7 @@ impl NodeRepo {
         Ok(())
     }
 
-    /// 覆盖管理员维护的别名与标签（节点上报不会碰这两列）。
+    /// Overwrite admin-maintained alias and tags (node reporting doesn't touch these columns).
     pub async fn update_meta(
         &self,
         id: &NodeId,
@@ -164,8 +164,8 @@ impl NodeRepo {
             FROM nodes ORDER BY enrolled_at_unix_nano DESC
             "#,
             )
-            .fetch_all(&self.pool)
-            .await?;
+        .fetch_all(&self.pool)
+        .await?;
 
         Ok(rows
             .into_iter()
@@ -197,24 +197,27 @@ impl NodeRepo {
             .collect())
     }
 
-    /// 节点删除：把这一行连带所有引用它的数据一起清掉。
+    /// Delete a node: clean up this row along with all its referencing data.
     ///
-    /// 设计取舍：
-    ///   - **直接 SQL 而不是事务包装**：SQLite 是单文件锁，没有真正的并发事务边界，
-    ///     加 BEGIN/COMMIT 反而容易让人误以为有回滚能力。失败就直接冒泡给调用方。
-    ///   - **同步删除强引用**：telemetry_batches / node_inventory 有 FK，必须先删。
-    ///     telemetry_hourly / probe_results / cert_sources / alerts / alert_state 没 FK，
-    ///     但删节点时也得跟着清——节点没了，历史指标和「自动关停告警」就毫无意义。
-    ///   - **probes.node_ids_json 是字符串数组**：要把这个节点 id 从所有探针里摘掉，
-    ///     不能直接 `DELETE`，否则剩下的探针会一直把它当绑定节点。这里用 SQL 表达式
-    ///     在数据库里改 JSON 数组，单条 UPDATE 就能干掉所有引用。
-    ///   - **commands 一起删**：发出去的命令都是「针对这台节点」的，节点没了留着无意义。
-    ///     唯一需要保的是 `audit_log`，但 audit_log 表没有 node_id 字段。
+    /// Design choices:
+    ///   - **Direct SQL, not wrapped in transactions**: SQLite uses file-level locking, there's no
+    ///     real concurrent transaction boundary. Adding BEGIN/COMMIT just makes people think there's
+    ///     rollback capability. Failures bubble up directly to callers.
+    ///   - **Synchronously delete strong references**: telemetry_batches / node_inventory have FKs,
+    ///     must be deleted first. telemetry_hourly / probe_results / cert_sources / alerts /
+    ///     alert_state have no FKs, but must also be cleared when node is deleted -- without the
+    ///     node, historical metrics and "auto-close alerts" make no sense.
+    ///   - **probes.node_ids_json is a string array**: need to remove this node's id from all probes,
+    ///     can't just DELETE directly, otherwise remaining probes will keep treating it as a bound node.
+    ///     Here we modify the JSON array in the database with a SQL expression, a single UPDATE
+    ///     removes all references.
+    ///   - **commands deleted together**: issued commands are all "targeting this node", meaningless
+    ///     without the node. The only thing to preserve is `audit_log`, but audit_log has no node_id column.
     pub async fn delete(&self, id: &str) -> anyhow::Result<bool> {
         let mut tx = self.pool.begin().await?;
 
-        // 把节点 id 从所有探针的 node_ids_json 里摘掉。节点删除是低频动作，
-        // 应用层做比写嵌套 json_remove 表达式直观。
+        // Remove node id from all probes' node_ids_json. Node deletion is low-frequency,
+        // doing it in application layer is more intuitive than writing nested json_remove expressions.
         let affected_probes: Vec<(String, String)> = {
             use sqlx::Row;
             let rows = sqlx::query(
@@ -250,8 +253,8 @@ impl NodeRepo {
             .await?;
         }
 
-        // telemetry_batches / node_inventory 是 FK 引用，必须先删。
-        // audit_log 保留：操作审计是事后追责用的，节点没了该看还得看。
+        // telemetry_batches / node_inventory have FK references, must be deleted first.
+        // audit_log is preserved: operational audit is for post-incident review, should still be visible after node deletion.
         for tbl in [
             "telemetry_batches",
             "telemetry_hourly",
@@ -272,7 +275,7 @@ impl NodeRepo {
             .execute(&mut *tx)
             .await?;
         if r.rows_affected() == 0 {
-            // 节点不存在：提交空事务，返回 false 让调用方按 404 处理。
+            // Node doesn't exist: commit empty transaction, return false so caller handles as 404.
             tx.commit().await?;
             return Ok(false);
         }
@@ -283,14 +286,14 @@ impl NodeRepo {
 
 #[cfg(test)]
 mod delete_tests {
-    //! 删除节点的级联与探针解绑行为。
+    //! Cascading and probe unbinding behavior when deleting a node.
     //!
-    //! 关键不变量：
-    //!   1. 节点行真的被删了；
-    //!   2. 所有引用 node_id 的表都跟着清干净了；
-    //!   3. 探针的 node_ids_json 数组里，这个节点 id 被摘掉了，其它节点的绑定不受影响；
-    //!   4. audit_log 保留——它是审计需求，不该跟着节点被洗白；
-    //!   5. 删一个不存在的节点返回 false（且不报错）。
+    //! Key invariants:
+    //!   1. Node row is actually deleted;
+    //!   2. All tables referencing node_id are cleaned up;
+    //!   3. The node id is removed from probes' node_ids_json array, other nodes' bindings unaffected;
+    //!   4. audit_log is preserved -- it's an audit requirement, shouldn't be wiped with the node;
+    //!   5. Deleting a non-existent node returns false (and doesn't error).
 
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;
@@ -325,7 +328,7 @@ mod delete_tests {
         let pool = fresh_pool().await;
         let repo = NodeRepo::new(pool.clone());
 
-        // 入网 + 在每张相关表里塞一条
+        // Enroll + insert one row in each related table
         repo.insert(&make_record("n1", "host-a")).await.unwrap();
         sqlx::query(
             "INSERT INTO telemetry_batches (node_id, ts_unix_nano, interval_seconds, payload_protobuf, received_at_unix_nano)
@@ -383,7 +386,7 @@ mod delete_tests {
         .await
         .unwrap();
 
-        // audit_log 也存一行——删除节点后这条必须还在
+        // Also insert one in audit_log -- must remain after node deletion
         sqlx::query(
             "INSERT INTO audit_log (at_unix_nano, actor, node_id, command_id, action, params_json, outcome)
              VALUES (0, 'admin', 'n1', 'c1', 'restart', '{}', 'issued')",
@@ -392,7 +395,7 @@ mod delete_tests {
         .await
         .unwrap();
 
-        // 探针绑定两台节点：n1（待删） + n2（要保）
+        // Probe binds two nodes: n1 (to be deleted) + n2 (to keep)
         sqlx::query(
             "INSERT INTO probes (id, service_id, name, kind, target_json, expect_json, interval_seconds, timeout_ms, failure_threshold, node_ids_json, location, enabled, created_at_unix_nano, updated_at_unix_nano)
              VALUES ('pr1', 'svc1', 'http', 'http', '{}', '{}', 60, 5000, 3, '[\"n1\",\"n2\"]', '', 1, 0, 0)",
@@ -401,7 +404,7 @@ mod delete_tests {
         .await
         .unwrap();
 
-        // 确认数据真的写进去了
+        // Confirm data was actually written
         let audit_before: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE node_id = 'n1'")
                 .fetch_one(&pool)
@@ -409,20 +412,20 @@ mod delete_tests {
                 .unwrap();
         assert_eq!(audit_before, 1);
 
-        // 执行删除
+        // Execute deletion
         let ok = repo.delete("n1").await.unwrap();
-        assert!(ok, "delete 应该返回 true（节点存在）");
+        assert!(ok, "delete should return true (node exists)");
 
-        // 节点本身没了
+        // Node itself is gone
         assert!(
             repo.find_by_id(&zhiwei_common::NodeId::from_string("n1"))
                 .await
                 .unwrap()
                 .is_none(),
-            "find_by_id 应该找不到被删的节点"
+            "find_by_id should not find deleted node"
         );
 
-        // 级联表全部清空
+        // All cascade tables are cleared
         for tbl in [
             "telemetry_batches",
             "telemetry_hourly",
@@ -438,18 +441,18 @@ mod delete_tests {
                     .fetch_one(&pool)
                     .await
                     .unwrap();
-            assert_eq!(n, 0, "{tbl} 应该清空 n1 的全部行");
+            assert_eq!(n, 0, "{tbl} should have all n1 rows cleared");
         }
 
-        // audit_log 保留
+        // audit_log preserved
         let audit_after: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE node_id = 'n1'")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(audit_after, 1, "audit_log 必须保留——它是审计需求");
+        assert_eq!(audit_after, 1, "audit_log must be preserved -- it's an audit requirement");
 
-        // 探针的 node_ids_json 里 n1 被摘掉了，n2 还在
+        // n1 is removed from probe's node_ids_json, n2 remains
         let raw: String = sqlx::query_scalar("SELECT node_ids_json FROM probes WHERE id = 'pr1'")
             .fetch_one(&pool)
             .await
@@ -458,7 +461,7 @@ mod delete_tests {
         assert_eq!(
             ids,
             vec!["n2".to_string()],
-            "探针绑定里 n1 应被摘掉，只剩 n2"
+            "n1 should be removed from probe binding, only n2 remains"
         );
     }
 
@@ -467,6 +470,6 @@ mod delete_tests {
         let pool = fresh_pool().await;
         let repo = NodeRepo::new(pool);
         let ok = repo.delete("does-not-exist").await.unwrap();
-        assert!(!ok, "删除不存在的节点应该返回 false 而不是报错");
+        assert!(!ok, "deleting non-existent node should return false, not error");
     }
 }

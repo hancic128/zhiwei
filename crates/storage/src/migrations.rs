@@ -48,7 +48,7 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     }
 
-    // Migration 002: 节点主机基本信息（操作系统 / IP / CPU 等），JSON 存储
+    // Migration 002: Node host basic info (OS / IP / CPU, etc.), stored as JSON
     let has_002: Option<i64> =
         sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 2")
             .fetch_optional(pool)
@@ -64,7 +64,7 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     }
 
-    // Migration 003: 容器与进程快照（低频、只留最新一份，不进时序表）
+    // Migration 003: Container and process snapshots (low-frequency, only keep latest, not in time-series table)
     let has_003: Option<i64> =
         sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 3")
             .fetch_optional(pool)
@@ -86,7 +86,7 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     }
 
-    // Migration 004: 证书快照（随 inventory 一起，只留最新一份）
+    // Migration 004: Certificate snapshot (along with inventory, only keep latest)
     let has_004: Option<i64> =
         sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 4")
             .fetch_optional(pool)
@@ -102,7 +102,7 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     }
 
-    // Migration 005: 告警规则 / 评估状态 / 告警实例 / 通知渠道
+    // Migration 005: Alert rules / evaluation state / alert instances / notify channels
     let has_005: Option<i64> =
         sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 5")
             .fetch_optional(pool)
@@ -123,7 +123,7 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
                 updated_at_unix_nano INTEGER NOT NULL
             );
 
-            -- 评估状态：每个 (规则, 节点) 一行，用于实现「持续 N 秒才告警」
+            -- Evaluation state: one row per (rule, node), used to implement "alert only after N seconds"
             CREATE TABLE alert_state (
                 rule_id INTEGER NOT NULL,
                 node_id TEXT NOT NULL,
@@ -170,7 +170,7 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     }
 
-    // Migration 006: 控制平面（签名命令 + 回执 + 审计）
+    // Migration 006: Control plane (signed commands + receipts + audit)
     let has_006: Option<i64> =
         sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 6")
             .fetch_optional(pool)
@@ -183,7 +183,7 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
                 node_id TEXT NOT NULL,
                 action TEXT NOT NULL,
                 params_json TEXT NOT NULL DEFAULT '{}',
-                payload_protobuf BLOB NOT NULL,   -- 含签名的完整 Command
+                payload_protobuf BLOB NOT NULL,   -- Full Command with signature
                 issued_at_unix_nano INTEGER NOT NULL,
                 ttl_seconds INTEGER NOT NULL,
                 -- pending | delivered | done | failed | expired
@@ -198,7 +198,7 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
             CREATE TABLE audit_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 at_unix_nano INTEGER NOT NULL,
-                actor TEXT NOT NULL,              -- 操作者（admin token / ops-cli）
+                actor TEXT NOT NULL,              -- Operator (admin token / ops-cli)
                 node_id TEXT NOT NULL,
                 command_id TEXT NOT NULL,
                 action TEXT NOT NULL,
@@ -213,7 +213,7 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     }
 
-    // Migration 007: 节点身份从 X.509 证书改为 Ed25519 公钥
+    // Migration 007: Node identity changed from X.509 cert to Ed25519 public key
     let has_007: Option<i64> =
         sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 7")
             .fetch_optional(pool)
@@ -222,7 +222,7 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
         sqlx::query(
             r#"
             ALTER TABLE nodes ADD COLUMN public_key TEXT NOT NULL DEFAULT '';
-            -- client_cert_pem 保留列以免破坏既有行，但代码不再读写它
+            -- client_cert_pem kept to avoid breaking existing rows, but code no longer reads/writes it
             INSERT INTO schema_version (version) VALUES (7);
             "#,
         )
@@ -230,7 +230,7 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     }
 
-    // Migration 008: 服务健康度（服务 / 探针 / 探针状态机 / 探针结果时序）
+    // Migration 008: Service health (services / probes / probe state machine / probe result time series)
     let has_008: Option<i64> =
         sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 8")
             .fetch_optional(pool)
@@ -259,8 +259,8 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
                 interval_seconds INTEGER NOT NULL DEFAULT 60,
                 timeout_ms INTEGER NOT NULL DEFAULT 5000,
                 failure_threshold INTEGER NOT NULL DEFAULT 3,
-                node_id TEXT,                             -- 归属节点；NULL = 任意节点
-                location TEXT NOT NULL DEFAULT 'node',    -- node | monitor（monitor 预留）
+                node_id TEXT,                             -- Owning node; NULL = any node
+                location TEXT NOT NULL DEFAULT 'node',    -- node | monitor (monitor reserved)
                 enabled INTEGER NOT NULL DEFAULT 1,
                 created_at_unix_nano INTEGER NOT NULL,
                 updated_at_unix_nano INTEGER NOT NULL
@@ -297,7 +297,7 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     }
 
-    // Migration 009: 告警来源（规则 / 服务探针），便于按来源关闭与区分展示
+    // Migration 009: Alert sources (rules / service probes), for closing by source and display differentiation
     let has_009: Option<i64> =
         sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 9")
             .fetch_optional(pool)
@@ -315,7 +315,7 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     }
 
-    // Migration 010: 证书扫描来源（控制台配置「节点 + 路径」，节点侧拉取后扫描）
+    // Migration 010: Certificate scan sources (console config "node + path", node pulls and scans)
     let has_010: Option<i64> =
         sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 10")
             .fetch_optional(pool)
@@ -341,15 +341,15 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     }
 
-    // Migration 011: 小时聚合（降采样）
+    // Migration 011: Hourly aggregation (downsample)
     //
-    // 原始 10 秒数据滚动保留（默认 14 天），之后只留小时级聚合。
-    // 见 docs/superpowers/specs/2026-09-19-product-structure-design.md §8：
-    // 目的不是省磁盘，是让长窗口查询的代价恒定（30 天窗口直接扫原始表要
-    // 260 万行起），以及让「自动留存」这件事不需要用户操心。
+    // Raw 10-second data kept for rolling period (default 14 days), after that only hourly aggregates.
+    // See docs/superpowers/specs/2026-09-19-product-structure-design.md §8:
+    // Purpose is not to save disk, but to keep long-window query cost constant (30-day window
+    // scanning raw table starts at 2.6 million rows) and to make "auto retention" not require user intervention.
     //
-    // 存 first/last 是为了计数器类指标（网络字节数）还能还原速率：
-    // rate = (last - first) / 3600。
+    // Stores first/last to enable rate recovery for counter-type metrics (network bytes):
+    // rate = (last - first) / 3600.
     let has_011: Option<i64> =
         sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 11")
             .fetch_optional(pool)
@@ -378,13 +378,13 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     }
 
-    // Migration 012: AI token（MCP / 外部 AI 客户端用的读端点凭据）
+    // Migration 012: AI token (credentials for MCP/external AI clients to read endpoints)
     //
-    // 设计：
-    // - id 形如 `ait_<12 hex>`，展示用，不参与校验
-    // - token_hash 是 SHA-256(明文 token) 的小写 hex，校验时算一遍再比
-    // - revoked_at 非空即失效；本次不做过期
-    // - 唯一索引只覆盖未撤销的，让「同 hash 撤销后重建」合法
+    // Design:
+    // - id format `ait_<12 hex>`, for display only, not involved in verification
+    // - token_hash is SHA-256(plaintext token) lowercase hex, verified by computing hash and comparing
+    // - revoked_at non-null means invalid; no expiration this time
+    // - Unique index only covers non-revoked, allowing "same hash, revoked, then recreated" as valid
     let has_012: Option<i64> =
         sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 12")
             .fetch_optional(pool)
@@ -409,11 +409,11 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     }
 
-    // Migration 013: 节点别名 + 标签
+    // Migration 013: Node alias + tags
     //
-    // alias 是管理员给的简短别称（≤10 字符），hostname 由节点自报、可能很长，
-    // 列表与下拉框优先显示 alias。tags_json 是 JSON 数组（≤10 个），用于过滤。
-    // 两者都由管理员维护，节点上报不会覆盖。
+    // alias is admin-provided short alias (≤10 chars), hostname is self-reported by node and may be long,
+    // list and dropdown prefer showing alias. tags_json is JSON array (≤10 items), used for filtering.
+    // Both maintained by admin, node reporting does not overwrite.
     let has_013: Option<i64> =
         sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 13")
             .fetch_optional(pool)
@@ -430,15 +430,15 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     }
 
-    // Migration 014: 留存按时间删除要用的索引
+    // Migration 014: Index for time-based deletion in retention
     //
-    // 留存删的是「比某个时间点更早的行」（`ts_unix_nano < ?`），而 001 建的索引
-    // 是 (node_id, ts_unix_nano)——首列不是时间，SQLite 只能全表扫描。
-    // 现场症状：`INSERT INTO telemetry_batches ... elapsed=2.88s`（写锁被那条
-    // DELETE 占住），连带控制台的容器操作「点了没反应」。
+    // Retention deletes "rows earlier than a time point" (`ts_unix_nano < ?`), but the index
+    // created by 001 is (node_id, ts_unix_nano) -- first column is not time, SQLite does full table scan.
+    // Symptom observed: `INSERT INTO telemetry_batches ... elapsed=2.88s` (write lock held by that
+    // DELETE), container operations in console "clicked but no response".
     //
-    // 注意：大库首次升级时这条 CREATE INDEX 会扫一遍全表，属一次性开销；
-    // 之后带时间条件的删除与查询才走得上索引。
+    // Note: On large databases, this CREATE INDEX scans the full table on first upgrade, one-time cost;
+    // after that, deletions and queries with time conditions use the index.
     let has_014: Option<i64> =
         sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 14")
             .fetch_optional(pool)
@@ -455,15 +455,15 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     }
 
-    // Migration 015: 探针绑定**多个**节点
+    // Migration 015: Probes bind **multiple** nodes
     //
-    // 原 probes.node_id 只能绑一个节点（NULL = 任意节点）。控制台改成多选后，
-    // 用 node_ids_json 存节点 id 数组：空数组 = 任意节点（沿用 NULL 的语义，
-    // 老数据不用改行为），非空则只在这些节点上执行。
+    // Original probes.node_id could only bind one node (NULL = any node). After console changed to multi-select,
+    // use node_ids_json to store node id array: empty array = any node (continues NULL semantics,
+    // old data doesn't change behavior), non-empty means only execute on these nodes.
     //
-    // 老数据先按单节点展开成数组，再把旧列连同它的索引删掉——留着两份真相迟早
-    // 会有人写错一份。`json_array` 依赖 SQLite 的 JSON1（3.38 起内置，sqlx 自带
-    // 的 bundled sqlite 是 3.46）。
+    // Old data first expands single node into array, then drops old column and its index --
+    // keeping two sources of truth will eventually cause someone to write the wrong one.
+    // `json_array` depends on SQLite's JSON1 (built-in from 3.38, sqlx's bundled sqlite is 3.46).
     let has_015: Option<i64> =
         sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 15")
             .fetch_optional(pool)
@@ -483,20 +483,20 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     }
 
-    // Migration 016: 通知渠道收敛为「飞书 / Slack / 通用 webhook」
+    // Migration 016: Consolidate notify channels to "Feishu / Slack / generic webhook"
     //
-    // 飞书不再用「自定义机器人 webhook」，改走官方应用接口：App ID + App Secret 换
-    // tenant_access_token，再按 receive_id 发消息——所以要多存三个字段。
-    // `secret` 一列按类型复用：飞书 = App Secret，通用 webhook = 投递 Token（Bearer）；
-    // `url` 只给 Slack / 通用 webhook 用，飞书的地址由 receive_id 决定。
+    // Feishu no longer uses "custom robot webhook", switched to official app API: App ID + App Secret exchange
+    // tenant_access_token, then send messages by receive_id -- so three more fields needed.
+    // `secret` column reused by type: Feishu = App Secret, generic webhook = delivery Token (Bearer);
+    // `url` only used by Slack/generic webhook, Feishu address determined by receive_id.
     //
-    // 钉钉渠道下线：留着这些行只会变成改不了、也发不出去的僵尸配置（渠道列表里
-    // 还显示不出类型名），直接删掉。
+    // Dingtalk channel discontinued: keeping those rows only creates zombie configs that can't be
+    // changed or sent (channel list can't display type name), just delete them.
     //
-    // 老的飞书「自定义机器人」渠道只有 url、没有 App ID，走不通应用接口——把它们
-    // 置为停用，让控制台里一眼看出这条要重建，而不是留着一条悄悄不发告警的记录。
+    // Old Feishu "custom robot" channels only have url, no App ID, can't go through app API --
+    // disable them so console shows at a glance these need rebuilding, instead of silently not sending alerts.
     //
-    // 号段接着 015 往下取（同号的迁移会被 `has_0xx.is_none()` 静默跳过）。
+    // Numbers continue from 015 (same-number migration is silently skipped by `has_0xx.is_none()`).
     let has_016: Option<i64> =
         sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 16")
             .fetch_optional(pool)
@@ -516,12 +516,12 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     }
 
-    // Migration 017: 内置告警规则（节点上下线）
+    // Migration 017: Builtin alert rules (node online/offline)
     //
-    // 这两类事件不走 alert_rules（不是基于指标阈值），但要受统一的「启用 / 停用」
-    // 控制。id 是稳定字符串（'node_offline' / 'node_online'），后续发通知与查
-    // 状态都用它做主键。enabled 默认 1，老库升级时直接 INSERT OR IGNORE，已有
-    // 的配置不会被覆盖。
+    // These two event types don't go through alert_rules (not based on metric thresholds), but need
+    // unified "enable/disable" control. id is a stable string ('node_offline' / 'node_online'), used as
+    // primary key for subsequent notifications and status queries. enabled defaults to 1, INSERT OR IGNORE
+    // on old database upgrades, existing config not overwritten.
     let has_017: Option<i64> =
         sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 17")
             .fetch_optional(pool)
@@ -537,8 +537,8 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
             );
 
             INSERT OR IGNORE INTO builtin_alert_rules (id, name, enabled, updated_at_unix_nano)
-                VALUES ('node_offline', '节点离线', 1, 0),
-                       ('node_online',  '节点上线', 1, 0);
+                VALUES ('node_offline', 'Node Offline', 1, 0),
+                       ('node_online',  'Node Online', 1, 0);
 
             INSERT INTO schema_version (version) VALUES (17);
             "#,
@@ -547,12 +547,13 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     }
 
-    // Migration 018: cron 任务快照
+    // Migration 018: Cron job snapshot
     //
-    // 与容器 / 进程 / 证书并列，同样属于「当前状态」而非时序：节点每 5 分钟扫一次
-    // 本机所有用户的 crontab，服务端只留最新一份。单独存一列而不是塞进
-    // processes_json，是因为列表端点要按任务逐条过滤 / 回写，字段形态完全不同。
-    // 默认 '[]'：老库升级后、节点第一次上报前，列表端点解析出空数组而不是报错。
+    // Alongside containers/processes/certs, also "current state" not time-series: node scans all
+    // users' crontabs every 5 minutes, server keeps only latest. Stored in separate column instead of
+    // stuffing into processes_json because list endpoints need per-job filtering/writing, column format
+    // is completely different. Default '[]': after old database upgrade, before node's first report,
+    // list endpoint parses empty array instead of error.
     let has_018: Option<i64> =
         sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 18")
             .fetch_optional(pool)
@@ -568,13 +569,13 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     }
 
-    // Migration 019: 扩充内置告警（服务探针上下线 / 容器启停 / 证书到期）
+    // Migration 019: Expand builtin alerts (service probe online/offline / container start/stop / cert expiry)
     //
-    // 服务探针与证书到期在此之前已有各自的告警链路（source = probe / cert），
-    // 缺的只是「内置告警」页上的统一开关；容器启停是新增事件源。六条默认
-    // enabled = 1：对老库而言行为不变（探针 / 证书原来就告警），容器事件是
-    // 新能力，用户要在「告警 → 内置告警」页停用才不推。INSERT OR IGNORE
-    // 保证老库升级不覆盖已有配置。
+    // Service probes and cert expiry already had their own alert paths (source = probe / cert),
+    // missing was the unified toggle on the "builtin alerts" page; container start/stop is a new event source.
+    // Six rules with enabled = 1 by default: for old databases, behavior unchanged (probes/certs already
+    // alerted), container events are new capability, users disable in "Alerts -> Builtin Alerts" to opt out.
+    // INSERT OR IGNORE ensures old database upgrades don't overwrite existing config.
     let has_019: Option<i64> =
         sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 19")
             .fetch_optional(pool)
@@ -596,12 +597,12 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     }
 
-    // Migration 019b: migrate existing Chinese rule names to English and set default threshold/duration
-    let has_019b_done: Option<i64> =
+    // Migration 019b: Migrate Chinese rule names to English (for old databases)
+    let has_019b: Option<i64> =
         sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 19")
             .fetch_optional(pool)
             .await?;
-    if has_019b_done.is_some() {
+    if has_019b.is_some() {
         // Check if any rules still have Chinese names
         let count: Option<i64> = sqlx::query_scalar(
             "SELECT COUNT(*) FROM builtin_alert_rules WHERE name LIKE '%节点%' OR name LIKE '%离线%' OR name LIKE '%上线%' OR name LIKE '%证书%' OR name LIKE '%服务%' OR name LIKE '%容器%'"
@@ -624,28 +625,9 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
             .execute(pool)
             .await?;
         }
-        // Set default threshold for alerts that need it (node_offline: 60s, cert_expiring: 30 days)
-        let count: Option<i64> = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM builtin_alert_rules WHERE threshold = 0 AND (id = 'node_offline' OR id = 'cert_expiring')"
-        )
-        .fetch_optional(pool)
-        .await?;
-        if count.unwrap_or(0) > 0 {
-            sqlx::query(
-                r#"
-                UPDATE builtin_alert_rules SET threshold = 60 WHERE id = 'node_offline';
-                UPDATE builtin_alert_rules SET threshold = 30 WHERE id = 'cert_expiring';
-                UPDATE builtin_alert_rules SET duration_seconds = 300 WHERE duration_seconds = 0;
-                "#,
-            )
-            .execute(pool)
-            .await?;
-        }
     }
 
-    // Migration 020: builtin_alert_rules add editable threshold and duration
-    //
-    // Builtin alerts now support customizing threshold and duration per alert.
+    // Migration 020: Add threshold and duration_seconds columns to builtin_alert_rules
     let has_020: Option<i64> =
         sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 20")
             .fetch_optional(pool)
@@ -655,7 +637,30 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
             r#"
             ALTER TABLE builtin_alert_rules ADD COLUMN threshold REAL NOT NULL DEFAULT 0;
             ALTER TABLE builtin_alert_rules ADD COLUMN duration_seconds INTEGER NOT NULL DEFAULT 300;
+            -- Set appropriate defaults for specific alert types
+            UPDATE builtin_alert_rules SET threshold = 60 WHERE id = 'node_offline';
+            UPDATE builtin_alert_rules SET threshold = 30 WHERE id = 'cert_expiring';
+            UPDATE builtin_alert_rules SET duration_seconds = 300 WHERE duration_seconds = 0;
             INSERT INTO schema_version (version) VALUES (20);
+            "#,
+        )
+        .execute(pool)
+        .await?;
+    }
+
+    // Migration 021: Add CPU/memory/disk metric alert rules
+    let has_021: Option<i64> =
+        sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 21")
+            .fetch_optional(pool)
+            .await?;
+    if has_021.is_none() {
+        sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO builtin_alert_rules (id, name, enabled, threshold, duration_seconds, updated_at_unix_nano)
+                VALUES ('cpu_high',  'CPU Usage High',  1, 80.0, 300, 0),
+                       ('mem_high',  'Memory Usage High', 1, 85.0, 300, 0),
+                       ('disk_high',  'Disk Usage High', 1, 90.0, 300, 0);
+            INSERT INTO schema_version (version) VALUES (21);
             "#,
         )
         .execute(pool)

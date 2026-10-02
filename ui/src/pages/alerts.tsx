@@ -52,6 +52,9 @@ const BUILTIN_META: Record<
   container_started: { metric: "container.state = started", severity: "info", tone: "info" },
   cert_expired: { metric: "cert.days_left < 0", severity: "critical", tone: "danger" },
   cert_expiring: { metric: "cert.days_left < notify_days_before", severity: "warning", tone: "warn" },
+  cpu_high: { metric: "host.cpu.usage > threshold", severity: "warning", tone: "warn" },
+  mem_high: { metric: "host.mem.usage > threshold", severity: "warning", tone: "warn" },
+  disk_high: { metric: "host.disk.usage > threshold", severity: "warning", tone: "warn" },
 };
 
 const BUILTIN_TONE_CLASS: Record<string, string> = {
@@ -223,17 +226,15 @@ function EditBuiltinAlertDialog({ rule, onClose }: EditBuiltinAlertDialogProps) 
   const { t } = useTranslation();
   const qc = useQueryClient();
   const toast = useToast();
-  const meta = builtinMeta(rule.id);
 
   // Determine which fields are applicable based on alert type
   const isOfflineAlert = rule.id === "node_offline" || rule.id === "service_offline" || rule.id === "container_stopped";
   const isCertAlert = rule.id === "cert_expiring" || rule.id === "cert_expired";
+  const isMetricAlert = rule.id === "cpu_high" || rule.id === "mem_high" || rule.id === "disk_high";
 
   const [form, setForm] = React.useState({
     duration_seconds: rule.duration_seconds || 300,
-    // For node offline: threshold is seconds before marking offline (default 60)
-    // For cert expiring: threshold is days before expiry (default 30)
-    threshold: rule.threshold || (isOfflineAlert ? 60 : isCertAlert ? 30 : 0),
+    threshold: rule.threshold || (isOfflineAlert ? 60 : isCertAlert ? 30 : isMetricAlert ? 80 : 0),
   });
 
   const save = useMutation({
@@ -254,7 +255,9 @@ function EditBuiltinAlertDialog({ rule, onClose }: EditBuiltinAlertDialogProps) 
     ? t("alerts.offlineAfterSeconds")
     : isCertAlert
       ? t("alerts.daysBeforeExpiry")
-      : t("alerts.threshold");
+      : isMetricAlert
+        ? t("alerts.thresholdPercent")
+        : t("alerts.threshold");
 
   return (
     <Dialog

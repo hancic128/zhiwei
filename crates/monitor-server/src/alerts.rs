@@ -51,13 +51,13 @@ fn severity_rank(s: &str) -> u8 {
 /// 好过把 `host.disk.usage` 这种内部键和没头没尾的 `92.3` 丢给用户。
 fn metric_label(metric: &str) -> (&str, &str) {
     match metric {
-        "host.cpu.usage" => ("CPU 使用率", "%"),
-        "host.mem.usage" => ("内存使用率", "%"),
-        "host.disk.usage" => ("磁盘使用率", "%"),
-        "host.disk.used_bytes" => ("磁盘占用", " B"),
-        "host.mem.used_bytes" => ("内存占用", " B"),
-        "host.net.rx_bytes" => ("网络接收", " B"),
-        "host.net.tx_bytes" => ("网络发送", " B"),
+        "host.cpu.usage" => ("CPU Usage", "%"),
+        "host.mem.usage" => ("Memory Usage", "%"),
+        "host.disk.usage" => ("Disk Usage", "%"),
+        "host.disk.used_bytes" => ("Disk Used", " B"),
+        "host.mem.used_bytes" => ("Memory Used", " B"),
+        "host.net.rx_bytes" => ("Network RX", " B"),
+        "host.net.tx_bytes" => ("Network TX", " B"),
         other => (other, ""),
     }
 }
@@ -99,15 +99,12 @@ struct LevelStyle {
     slack: &'static str,
 }
 
-/// 三档：严重 / 警告 / 已恢复。
-///
-/// 恢复单独成一档是有意的：以前恢复通知复用 warning 模板，手机上只显示
-/// 「[警告] 服务 X · Y」，看着像又告警了一次。
+/// Three levels: critical / warning / resolved.
 fn level_style(rule: &AlertRule, firing: bool) -> LevelStyle {
     if !firing {
         LevelStyle {
             key: "resolved",
-            label: "已恢复",
+            label: "Resolved",
             emoji: "✅",
             feishu: "green",
             slack: "#2da44e",
@@ -115,7 +112,7 @@ fn level_style(rule: &AlertRule, firing: bool) -> LevelStyle {
     } else if rule.severity == "critical" {
         LevelStyle {
             key: "critical",
-            label: "严重",
+            label: "Critical",
             emoji: "🔴",
             feishu: "red",
             slack: "#cf222e",
@@ -123,7 +120,7 @@ fn level_style(rule: &AlertRule, firing: bool) -> LevelStyle {
     } else {
         LevelStyle {
             key: "warning",
-            label: "警告",
+            label: "Warning",
             emoji: "🟠",
             feishu: "orange",
             slack: "#d93f0b",
@@ -138,7 +135,7 @@ fn level_style(rule: &AlertRule, firing: bool) -> LevelStyle {
 fn title_line(rule: &AlertRule, facts: &AlertFacts) -> String {
     let lv = level_style(rule, facts.firing);
     format!(
-        "{} {} · {}（{}）",
+        "{} {} · {} ({})",
         lv.emoji, lv.label, rule.name, facts.node
     )
 }
@@ -275,6 +272,7 @@ fn slack_payload(rule: &AlertRule, facts: &AlertFacts) -> serde_json::Value {
 
 /// 对一批 telemetry 跑一遍全部启用规则。
 pub async fn evaluate(state: &AppState, node_id: &NodeId, hostname: &str, batch: &TelemetryBatch) {
+    // Get user-defined rules
     let rules = match state.storage.alerts().enabled_rules().await {
         Ok(r) => r,
         Err(e) => {
@@ -282,14 +280,27 @@ pub async fn evaluate(state: &AppState, node_id: &NodeId, hostname: &str, batch:
             return;
         }
     };
-    if rules.is_empty() {
+
+    // Get builtin metric rules (cpu_high, mem_high, disk_high)
+    let builtin_rules = match state.storage.alerts().enabled_builtin_rules().await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(error = %e, "Failed to read builtin rules");
+            Vec::new()
+        }
+    };
+
+    // Combine all rules
+    let all_rules: Vec<_> = rules.into_iter().chain(builtin_rules.into_iter()).collect();
+
+    if all_rules.is_empty() {
         return;
     }
 
     let now = Timestamp::now().unix_nano();
     let repo = state.storage.alerts();
 
-    for rule in rules {
+    for rule in all_rules {
         // 用统一的抽取口径：派生指标（内存百分比、网络合计）也能被规则用上。
         // 这条曾经只查 `metrics[]`——播种规则「内存使用率过高」用的 host.mem.usage
         // 节点从不上报，于是那条规则永远不会触发。
@@ -319,12 +330,12 @@ pub async fn evaluate(state: &AppState, node_id: &NodeId, hostname: &str, batch:
                 let sym = op_symbol(&rule.op);
                 let threshold = rule.threshold;
                 let duration = if rule.duration_seconds > 0 {
-                    format!("，已持续 {}s", rule.duration_seconds)
+                    format!(", sustained {}s", rule.duration_seconds)
                 } else {
                     String::new()
                 };
                 let message =
-                    format!("{label} {sym}{threshold}{unit}（当前 {value:.1}{unit}{duration}）");
+                    format!("{label} {sym}{threshold}{unit} (current: {value:.1}{unit}{duration})");
                 match repo
                     .open_alert(&rule, node_id.as_str(), hostname, value, &message, now)
                     .await
@@ -345,10 +356,10 @@ pub async fn evaluate(state: &AppState, node_id: &NodeId, hostname: &str, batch:
                             node: hostname.to_string(),
                             firing: true,
                             fields: vec![
-                                ("节点", hostname.to_string()),
-                                ("指标", label.to_string()),
-                                ("当前值", format!("{value:.1}{unit}")),
-                                ("阈值", format!("{sym}{threshold}{unit}")),
+                                ("Node", hostname.to_string()),
+                                ("Metric", label.to_string()),
+                                ("Current", format!("{value:.1}{unit}")),
+                                ("Threshold", format!("{sym}{threshold}{unit}")),
                             ],
                             detail: message.clone(),
                         };

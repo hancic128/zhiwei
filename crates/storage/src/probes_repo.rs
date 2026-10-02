@@ -1,14 +1,15 @@
-//! 服务健康度存储：服务 / 探针 / 探针状态机 / 探针结果时序。
+//! Service health storage: services / probes / probe state machine / probe result time series.
 //!
-//! 结构：services 1:N probes 1:1 probe_state（当前状态机）
-//!                             1:N probe_results（历史明细，滚动保留 7 天）
+//! Structure: services 1:N probes 1:1 probe_state (current state machine)
+//!                              1:N probe_results (historical details, rolling 7-day retention)
 //!
-//! 探针由节点侧执行（`location = node`），monitor 只负责下发配置、收敛状态、
-//! 触发告警。状态机规则见 [`ProbesRepo::record_result`]。
+//! Probes are executed by the node side (`location = node`), monitor only handles
+//! config distribution, state aggregation, and alert triggering. State machine rules
+//! are documented in [`ProbesRepo::record_result`].
 
 use sqlx::SqlitePool;
 
-/// 状态常量：ok / degraded / down
+/// State constants: ok / degraded / down
 pub const STATE_OK: &str = "ok";
 pub const STATE_DEGRADED: &str = "degraded";
 pub const STATE_DOWN: &str = "down";
@@ -37,9 +38,9 @@ pub struct Probe {
     pub interval_seconds: i64,
     pub timeout_ms: i64,
     pub failure_threshold: i64,
-    /// 绑定的执行节点；空 = 任意节点（每个节点都跑这个探针）
+    /// Bound execution nodes; empty = any node (every node runs this probe)
     pub node_ids: Vec<String>,
-    /// 绑定节点的展示名，与 `node_ids` 同序（别名优先，回落主机名）
+    /// Display names of bound nodes, in same order as `node_ids` (alias preferred, fallback to hostname)
     pub node_labels: Vec<String>,
     pub location: String,
     pub enabled: bool,
@@ -47,7 +48,7 @@ pub struct Probe {
     pub updated_at_unix_nano: i64,
 }
 
-/// probe_state 行（探针当前状态）
+/// probe_state row (probe's current state)
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ProbeState {
     pub probe_id: String,
@@ -60,8 +61,8 @@ pub struct ProbeState {
 }
 
 impl ProbeState {
-    /// 从未检查过的探针：对外呈现为 unknown，内部按 ok 起算，
-    /// 这样首次失败会走 ok → degraded 的正常收敛路径。
+    /// A probe that has never been checked: presents as unknown externally, treated as ok internally,
+    /// so the first failure follows the normal ok -> degraded convergence path.
     fn unknown(probe_id: &str, now: i64) -> Self {
         Self {
             probe_id: probe_id.to_string(),
@@ -84,7 +85,7 @@ pub struct ProbeResult {
     pub error: String,
 }
 
-/// 探针 + 当前状态（控制台服务页用）
+/// Probe + current state (used by console service page)
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ProbeWithState {
     #[serde(flatten)]
@@ -92,17 +93,17 @@ pub struct ProbeWithState {
     pub state: ProbeState,
 }
 
-/// 服务 + 探针 + 服务健康汇总
+/// Service + probes + service health summary
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ServiceWithProbes {
     #[serde(flatten)]
     pub service: Service,
-    /// 服务健康：全部探针 ok 才 ok；任一 down 即 down；否则 degraded；无探针 unknown
+    /// Service health: all probes ok -> ok; any down -> down; else degraded; no probes -> unknown
     pub health: String,
     pub probes: Vec<ProbeWithState>,
 }
 
-/// 一次结果入库后的状态机输出（告警引擎据此决定开/关告警）
+/// State machine output after one result is stored (alert engine uses this to decide open/close)
 #[derive(Debug, Clone)]
 pub struct StateTransition {
     pub probe_id: String,
@@ -110,11 +111,11 @@ pub struct StateTransition {
     pub new_state: String,
     pub consecutive_failures: i64,
     pub last_error: String,
-    /// 是否发生了状态变化
+    /// Whether a state change occurred
     pub changed: bool,
 }
 
-/// 新建探针的入参
+/// Input for creating a new probe
 #[derive(Debug, Clone, Default)]
 pub struct ProbeInput {
     pub service_id: String,
@@ -125,13 +126,13 @@ pub struct ProbeInput {
     pub interval_seconds: i64,
     pub timeout_ms: i64,
     pub failure_threshold: i64,
-    /// 空 = 任意节点
+    /// Empty = any node
     pub node_ids: Vec<String>,
     pub location: String,
     pub enabled: bool,
 }
 
-/// 局部修改探针：None 表示不改
+/// Partial probe modification: None means don't change
 #[derive(Debug, Clone, Default)]
 pub struct ProbePatch {
     pub name: Option<String>,
@@ -141,12 +142,12 @@ pub struct ProbePatch {
     pub interval_seconds: Option<i64>,
     pub timeout_ms: Option<i64>,
     pub failure_threshold: Option<i64>,
-    /// Some = 整体替换绑定节点（空数组即改回「任意节点」）
+    /// Some = replace all bound nodes as a whole (empty array = revert to "any node")
     pub node_ids: Option<Vec<String>>,
     pub enabled: Option<bool>,
 }
 
-/// 局部修改服务
+/// Partial service modification
 #[derive(Debug, Clone, Default)]
 pub struct ServicePatch {
     pub name: Option<String>,
@@ -170,7 +171,7 @@ type ProbeRow = (
     i64,    // p.interval_seconds
     i64,    // p.timeout_ms
     i64,    // p.failure_threshold
-    String, // p.node_ids_json（JSON 数组，空数组 = 任意节点）
+    String, // p.node_ids_json (JSON array, empty = any node)
     String, // p.location
     i64,    // p.enabled
     i64,    // p.created_at_unix_nano
@@ -227,12 +228,12 @@ fn probe_from_row(r: ProbeRow) -> Probe {
     }
 }
 
-/// 解析 probes.node_ids_json；坏值按「任意节点」处理，不让一条脏数据卡死整页
+/// Parse probes.node_ids_json; bad values treated as "any node", one bad row shouldn't break the whole page
 fn parse_node_ids(raw: &str) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(raw).unwrap_or_default()
 }
 
-/// 序列化绑定节点（空 = 任意节点，存成 `[]` 而不是 NULL，查询只需比较字符串）
+/// Serialize bound nodes (empty = any node, stored as `[]` not NULL, queries only compare strings)
 fn node_ids_json(ids: &[String]) -> String {
     serde_json::to_string(ids).unwrap_or_else(|_| "[]".into())
 }
@@ -248,7 +249,7 @@ const PROBE_COLS: &str =
      p.interval_seconds, p.timeout_ms, p.failure_threshold, p.node_ids_json, p.location, p.enabled, \
      p.created_at_unix_nano, p.updated_at_unix_nano";
 
-/// 最差状态聚合（服务健康 = 最差探针状态）
+/// Aggregate worst state (service health = worst probe state)
 pub fn worst_state(states: &[String]) -> String {
     if states.is_empty() {
         return "unknown".into();
@@ -275,7 +276,7 @@ impl ProbesRepo {
         Self { pool }
     }
 
-    // ---------- 服务 ----------
+    // ---------- Services ----------
 
     pub async fn list_services(&self) -> anyhow::Result<Vec<Service>> {
         let rows: Vec<ServiceRow> = sqlx::query_as(&format!(
@@ -319,7 +320,7 @@ impl ProbesRepo {
         .await?;
         self.find_service(&id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("service 创建后读不到"))
+            .ok_or_else(|| anyhow::anyhow!("service not found after creation"))
     }
 
     pub async fn update_service(
@@ -329,7 +330,7 @@ impl ProbesRepo {
         now: i64,
     ) -> anyhow::Result<()> {
         let Some(mut svc) = self.find_service(id).await? else {
-            anyhow::bail!("service 不存在");
+            anyhow::bail!("service not found");
         };
         if let Some(v) = &patch.name {
             svc.name = v.clone();
@@ -362,7 +363,7 @@ impl ProbesRepo {
         Ok(())
     }
 
-    /// 删除服务连带其探针、状态与结果明细
+    /// Delete service along with its probes, state, and result details
     pub async fn delete_service(&self, id: &str) -> anyhow::Result<()> {
         let probe_ids: Vec<(String,)> =
             sqlx::query_as("SELECT id FROM probes WHERE service_id = ?")
@@ -379,7 +380,7 @@ impl ProbesRepo {
         Ok(())
     }
 
-    // ---------- 探针 ----------
+    // ---------- Probes ----------
 
     pub async fn list_probes(&self) -> anyhow::Result<Vec<Probe>> {
         let rows: Vec<ProbeRow> = sqlx::query_as(&format!(
@@ -394,7 +395,7 @@ impl ProbesRepo {
         Ok(probes)
     }
 
-    /// 某节点要执行的探针：启用 + 归属该节点（或未指定节点）
+    /// Probes a specific node should execute: enabled + bound to this node (or no node specified)
     pub async fn probes_for_node(&self, node_id: &str) -> anyhow::Result<Vec<Probe>> {
         let rows: Vec<ProbeRow> = sqlx::query_as(&format!(
             "SELECT {PROBE_COLS} FROM probes p
@@ -430,7 +431,7 @@ impl ProbesRepo {
         }
     }
 
-    /// 给探针补上绑定节点的展示名：别名优先、回落主机名（与节点列表一致）
+    /// Fill in display names for bound nodes: alias preferred, fallback to hostname (consistent with node list)
     async fn fill_node_labels(&self, probes: &mut [Probe]) -> anyhow::Result<()> {
         if probes.iter().all(|p| p.node_ids.is_empty()) {
             return Ok(());
@@ -487,12 +488,12 @@ impl ProbesRepo {
         .await?;
         self.find_probe(&id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("probe 创建后读不到"))
+            .ok_or_else(|| anyhow::anyhow!("probe not found after creation"))
     }
 
     pub async fn update_probe(&self, id: &str, patch: &ProbePatch, now: i64) -> anyhow::Result<()> {
         let Some(mut p) = self.find_probe(id).await? else {
-            anyhow::bail!("probe 不存在");
+            anyhow::bail!("probe not found");
         };
         if let Some(v) = &patch.name {
             p.name = v.clone();
@@ -563,7 +564,7 @@ impl ProbesRepo {
         Ok(())
     }
 
-    // ---------- 状态机 ----------
+    // ---------- State machine ----------
 
     pub async fn get_state(&self, probe_id: &str) -> anyhow::Result<Option<ProbeState>> {
         let row: Option<StateRow> = sqlx::query_as(&format!(
@@ -575,10 +576,10 @@ impl ProbesRepo {
         Ok(row.map(state_from_row))
     }
 
-    /// 落一条结果并推进状态机，返回本次状态变化（供告警引擎使用）。
+    /// Store one result and advance the state machine, return this state change (for alert engine use).
     ///
-    /// 规则：ok 立刻回 ok（清零失败计数）；非 ok 累加失败计数，
-    /// 达到 `failure_threshold` 才 down，否则 degraded。
+    /// Rules: ok immediately returns ok (clears failure count); non-ok accumulates failure count,
+    /// only goes down when `failure_threshold` is reached, otherwise degraded.
     #[allow(clippy::too_many_arguments)]
     pub async fn record_result(
         &self,
@@ -688,9 +689,9 @@ impl ProbesRepo {
             .collect())
     }
 
-    // ---------- 聚合视图 ----------
+    // ---------- Aggregate views ----------
 
-    /// 服务页数据：服务 → 探针 → 状态
+    /// Service page data: service -> probes -> state
     pub async fn services_with_probes(&self) -> anyhow::Result<Vec<ServiceWithProbes>> {
         let services = self.list_services().await?;
         let mut states = self.all_states().await?;
@@ -710,8 +711,9 @@ impl ProbesRepo {
                 .collect();
             let names: Vec<String> = mine
                 .iter()
-                // 停用的探针不参与服务健康聚合：探针停用 = 主动不探了，
-                // 它的最后一次 down 不该让整组服务继续挂红（列表里仍展示、置灰）
+                // Disabled probes don't participate in service health aggregation: disabling a probe
+                // means you intentionally stopped probing, its last down shouldn't keep the whole
+                // service showing red (still shown in list, grayed out)
                 .filter(|p| p.probe.enabled && svc.enabled)
                 .map(|p| p.state.state.clone())
                 .collect();
@@ -737,10 +739,11 @@ impl ProbesRepo {
             .collect())
     }
 
-    /// 概览卡片用：探针健康数 / 总数（按探针维度，不按服务分组）。
+    /// Overview card data: healthy / total probe count (by probe dimension, not grouped by service).
     ///
-    /// 停用的探针（`p.enabled = 0`）和整组停用的服务（`s.enabled = 0`）都不计入：
-    /// 探针停用了就不再下发、不再期望它工作，它的 down 不该再算进集群故障。
+    /// Disabled probes (`p.enabled = 0`) and fully disabled services (`s.enabled = 0`) are excluded:
+    /// disabled probes won't be dispatched anymore, shouldn't expect them to work, their down
+    /// shouldn't count toward cluster failures.
     pub async fn probe_counts(&self) -> anyhow::Result<(i64, i64)> {
         let services = self.services_with_probes().await?;
         let mut total = 0i64;
@@ -762,13 +765,13 @@ impl ProbesRepo {
         Ok((healthy, total))
     }
 
-    // ---------- 维护 ----------
+    // ---------- Maintenance ----------
 
-    /// 服务健康时间线：把探针结果按时间桶聚合，每个 (服务, 桶) 一行。
+    /// Service health timeline: aggregate probe results by time bucket, one row per (service, bucket).
     ///
-    /// 返回 `(service_id, bucket_start_unix_nano, ok_count, total_count)`。
-    /// 图表画的是「这一格里有多少比例的探测是 ok 的」——比画单次探测的原始
-    /// 结果更能看出趋势，也不会因为采样密度不同而忽高忽低。
+    /// Returns `(service_id, bucket_start_unix_nano, ok_count, total_count)`.
+    /// Charts show "what proportion of probes in this bucket were ok" -- better than showing single
+    /// probe raw results, smoother trend, not affected by varying sampling density.
     pub async fn health_buckets(
         &self,
         from_ns: i64,
@@ -779,8 +782,8 @@ impl ProbesRepo {
             .await
     }
 
-    /// 同上，但按**探针**聚合，返回 `(probe_id, bucket_start_unix_nano, ok, total)`。
-    /// 一个服务挂多个探针时，服务级曲线会把「哪个探针在抖」抹平。
+    /// Same as above, but aggregated by **probe**, returns `(probe_id, bucket_start_unix_nano, ok, total)`.
+    /// When a service has multiple probes, service-level curves flatten out "which probe is jittering".
     pub async fn health_buckets_by_probe(
         &self,
         from_ns: i64,
@@ -799,7 +802,7 @@ impl ProbesRepo {
         bucket_ns: i64,
     ) -> anyhow::Result<Vec<(String, i64, i64, i64)>> {
         let bucket_ns = bucket_ns.max(1);
-        // group_col 只来自本文件的两个常量，不接受外部输入
+        // group_col only comes from two constants in this file, no external input accepted
         let sql = format!(
             r#"
             SELECT {group_col} AS grp,
@@ -823,7 +826,7 @@ impl ProbesRepo {
         Ok(rows)
     }
 
-    /// 删除早于 `cutoff_unix_nano` 的结果明细，返回删除行数
+    /// Delete result details older than `cutoff_unix_nano`, returns rows deleted
     pub async fn cleanup_results(&self, cutoff_unix_nano: i64) -> anyhow::Result<u64> {
         let res = sqlx::query("DELETE FROM probe_results WHERE ts_unix_nano < ?")
             .bind(cutoff_unix_nano)
@@ -843,7 +846,7 @@ mod tests {
         let ids = vec!["n-1".to_string(), "n-2".to_string()];
         assert_eq!(node_ids_json(&ids), r#"["n-1","n-2"]"#);
         assert_eq!(parse_node_ids(r#"["n-1","n-2"]"#), ids);
-        // 脏数据按「任意节点」处理，页面不该因为一行 JSON 坏掉
+        // Bad data treated as "any node", page shouldn't break due to one bad JSON row
         assert_eq!(parse_node_ids("oops"), Vec::<String>::new());
         assert_eq!(parse_node_ids(""), Vec::<String>::new());
     }
@@ -860,8 +863,8 @@ mod tests {
         assert_eq!(worst_state(&["ok".into(), "unknown".into()]), "unknown");
     }
 
-    /// 停用探针不计入总数 / 故障：概览口径与服务健康聚合都要排除。
-    /// 这是产品要求「服务探针停用后，不计入总数/故障」的回归测试。
+    /// Disabled probes excluded from counts/health: both overview count and service health aggregation
+    /// exclude them. This is a regression test for "service probes after disabling are not counted in totals/failures".
     #[tokio::test]
     async fn disabled_probes_are_excluded_from_counts_and_health() {
         use sqlx::sqlite::SqlitePoolOptions;
@@ -899,8 +902,8 @@ mod tests {
             .await
             .unwrap();
 
-        // 停用的 off 探针先被探成 down（模拟「停用后仍有残留状态」），
-        // 但它不该进总数，也不该让服务挂红
+        // The disabled "off" probe first goes to down (simulating "residual state after disabling"),
+        // but it shouldn't count toward totals or make service show red
         assert_eq!(
             repo.get_state(&off.id).await.unwrap().unwrap().state,
             STATE_DOWN
@@ -909,17 +912,17 @@ mod tests {
         assert_eq!(
             (healthy, total),
             (1, 2),
-            "停用探针不计入总数（bad 已启用但未探过，算 unknown，进总数）"
+            "disabled probe not counted in total (bad is enabled but never probed, counts as unknown, in total)"
         );
 
-        // 启用中的 bad 探成 down → 服务健康 = down
+        // The enabled "bad" probe goes to down -> service health = down
         repo.record_result(&bad, "n1", now, "timeout", None, None, "boom")
             .await
             .unwrap();
         let svcs = repo.services_with_probes().await.unwrap();
         assert_eq!(svcs[0].health, STATE_DOWN);
 
-        // 停用 bad → 服务健康回到 ok（停用的 down 不再参与聚合）
+        // Disable bad -> service health returns to ok (disabled down no longer participates in aggregation)
         repo.update_probe(
             &bad.id,
             &ProbePatch {
@@ -933,11 +936,11 @@ mod tests {
         let svcs = repo.services_with_probes().await.unwrap();
         assert_eq!(
             svcs[0].health, STATE_OK,
-            "停用的 down 探针不该让服务继续挂红"
+            "disabled down probe shouldn't keep service showing red"
         );
         assert_eq!(repo.probe_counts().await.unwrap(), (1, 1));
 
-        // 整组服务停用 → 全部不计
+        // Entire service disabled -> all not counted
         repo.update_service(
             &svc.id,
             &ServicePatch {

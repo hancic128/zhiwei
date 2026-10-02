@@ -1,20 +1,21 @@
-//! 证书路径的解析规则（monitor 与 node 共用同一份实现）。
+//! Certificate path parsing rules (same implementation shared by monitor and node).
 //!
-//! 用户填的是一个「路径」，它可能是三种东西：
-//!   1. 目录        → 展开为若干以证书后缀为通配的 glob（非递归，只扫一层）
-//!   2. 单个文件    → 原样使用（后缀是 .pem / .crt / .cer / .cert）
-//!   3. glob 表达式 → 原样使用
+//! User fills in a "path" which can be one of three things:
+//!   1. Directory       -> Expand to globs with cert suffixes (non-recursive, one level only)
+//!   2. Single file     -> Use as-is (suffix is .pem / .crt / .cer / .cert)
+//!   3. Glob expression -> Use as-is
 //!
-//! **纯词法展开**，不依赖本机文件系统——monitor 侧看不到节点上的目录，
-//! 但它要用同一套规则把已上报的证书路径反查回来源，两边必须算出同一个结果。
+//! **Pure lexical expansion**, does not depend on local filesystem -- monitor side can't see
+//! node's directories, but needs to use the same rules to look up reported cert paths back to
+//! sources. Both sides must compute the same result.
 
-/// 目录展开时使用的证书后缀。
+/// Certificate suffixes used for directory expansion.
 pub const CERT_EXTENSIONS: &[&str] = &["pem", "crt", "cer", "cert"];
 
-/// 路径长度上限（挡住把整段配置塞进路径的误用）
+/// Maximum path length (prevents abuse of stuffing entire config into path)
 pub const MAX_PATH_LEN: usize = 512;
 
-/// 校验用户输入的路径。返回规范化后的写法（去首尾空白、去尾部多余 `/`）。
+/// Validate user input path. Returns normalized form (trim whitespace, remove trailing `/`).
 pub fn normalize(raw: &str) -> Result<String, String> {
     let p = raw.trim();
     if p.is_empty() {
@@ -32,7 +33,7 @@ pub fn normalize(raw: &str) -> Result<String, String> {
     if p.split('/').any(|seg| seg == "..") {
         return Err("Path cannot contain ..".into());
     }
-    // 目录写法统一去掉尾部斜杠（根目录除外）
+    // Normalize directory paths by removing trailing slash (except root)
     let trimmed = p.trim_end_matches('/');
     Ok(if trimmed.is_empty() {
         "/".to_string()
@@ -41,10 +42,10 @@ pub fn normalize(raw: &str) -> Result<String, String> {
     })
 }
 
-/// 把一条路径展开成用于扫描 / 匹配的 glob 列表。
+/// Expand one path into a list of globs for scanning/matching.
 ///
-/// 输入应已过 [`normalize`]；这里对空输入返回空列表而不是报错，调用方
-/// （扫描与匹配）对空列表天然是「什么都没命中」的安全行为。
+/// Input should already be normalized; here empty input returns empty list instead of error,
+/// caller (scan and match) safely handles empty list as "nothing matched".
 pub fn expand(raw: &str) -> Vec<String> {
     let p = raw.trim();
     if p.is_empty() {
@@ -60,10 +61,10 @@ pub fn expand(raw: &str) -> Vec<String> {
         .collect()
 }
 
-/// 某个已上报的证书路径是否属于这条来源（路径 → 来源反查）。
+/// Check if a reported cert path belongs to this source (path -> source lookup).
 pub fn matches(raw: &str, cert_path: &str) -> bool {
-    // require_literal_separator：`*` 不跨目录，与节点侧一层展开的语义一致
-    // （整段写 `**` 的递归 glob 不受影响）
+    // require_literal_separator: `*` doesn't cross directories, consistent with node side one-level expansion
+    // (recursive glob with `**` is not affected)
     let opts = glob::MatchOptions {
         case_sensitive: true,
         require_literal_separator: true,
@@ -123,9 +124,9 @@ mod tests {
             "/root/nginx-certs/a.crt"
         ));
         assert!(!matches("/root/nginx-certs", "/etc/ssl/b.crt"));
-        // 目录展开是非递归的，子目录不命中
+        // Directory expansion is non-recursive, subdirectory doesn't match
         assert!(!matches("/root/nginx-certs", "/root/nginx-certs/sub/a.crt"));
-        // 显式写 `**` 时才递归
+        // Only explicit `**` makes it recursive
         assert!(matches(
             "/root/nginx-certs/**/*.crt",
             "/root/nginx-certs/sub/a.crt"

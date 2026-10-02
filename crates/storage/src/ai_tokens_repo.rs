@@ -1,14 +1,14 @@
-//! AI token 表：MCP / 外部 AI 客户端读端点用的凭据。
+//! AI token table: credentials for MCP/external AI clients to read endpoints.
 //!
-//! 设计要点：
-//! - 不存明文 token，只存 SHA-256 哈希。校验时哈希一遍比对。
-//! - 多值，可命名，可单独撤销（revoked_at 非空即失效）。
-//! - 不过期——撤销是唯一失效手段。要做过期再加一列。
-//! - last_used_at 用于审计「谁在什么时候调用过」，仅在 read_auth_ok_v2 命中后异步更新。
+//! Design notes:
+//! - Does not store plaintext tokens, only SHA-256 hashes. Verification compares hashes.
+//! - Multi-value, named, individually revocable (revoked_at non-null means invalid).
+//! - No expiration - revocation is the only way to invalidate. Add an expiry column if needed.
+//! - last_used_at is for auditing "who called when", updated asynchronously after read_auth_ok_v2 hits.
 
 use sqlx::SqlitePool;
 
-/// 数据库行（哈希字段一律小写十六进制）。
+/// Database row (hash fields are lowercase hex strings).
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct AiTokenRow {
     id: String,
@@ -20,7 +20,7 @@ struct AiTokenRow {
     revoked_at_unix_nano: Option<i64>,
 }
 
-/// 暴露给上层（routes.rs）的视图。
+/// View exposed to upper layers (routes.rs).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AiToken {
     pub id: String,
@@ -58,7 +58,7 @@ impl AiTokensRepo {
         Self { pool }
     }
 
-    /// 列出所有 token（包含已撤销的，UI 自己过滤）。
+    /// List all tokens (includes revoked ones, UI filters itself).
     pub async fn list_all(&self) -> anyhow::Result<Vec<AiToken>> {
         let rows: Vec<AiTokenRow> = sqlx::query_as(
             "SELECT id, token_hash, name, created_at_unix_nano,
@@ -70,7 +70,7 @@ impl AiTokensRepo {
         Ok(rows.into_iter().map(AiToken::from).collect())
     }
 
-    /// 通过 token 明文查 active 行（鉴权路径，只查未撤销的）。
+    /// Look up active row by plaintext token (auth path, only looks at non-revoked).
     pub async fn find_active_by_hash(&self, token_hash: &str) -> anyhow::Result<Option<AiToken>> {
         let row: Option<AiTokenRow> = sqlx::query_as(
             "SELECT id, token_hash, name, created_at_unix_nano,
@@ -84,7 +84,7 @@ impl AiTokensRepo {
         Ok(row.map(AiToken::from))
     }
 
-    /// 通过 id 查（删除/UI 详情用）。
+    /// Look up by id (for deletion/UI details).
     pub async fn find(&self, id: &str) -> anyhow::Result<Option<AiToken>> {
         let row: Option<AiTokenRow> = sqlx::query_as(
             "SELECT id, token_hash, name, created_at_unix_nano,
@@ -97,7 +97,7 @@ impl AiTokensRepo {
         Ok(row.map(AiToken::from))
     }
 
-    /// 插入一条新 token。`id` 形如 `ait_<12 hex>`，`token_hash` 为 SHA-256(token) hex。
+    /// Insert a new token. `id` format: `ait_<12 hex>`, `token_hash` is SHA-256(token) hex.
     pub async fn create(
         &self,
         id: &str,
@@ -127,7 +127,7 @@ impl AiTokensRepo {
         })
     }
 
-    /// 撤销：若已撤销则 no-op。返回是否实际改变了状态。
+    /// Revoke: no-op if already revoked. Returns whether state actually changed.
     pub async fn revoke(&self, id: &str, now_unix_nano: i64) -> anyhow::Result<bool> {
         let r = sqlx::query(
             "UPDATE ai_tokens SET revoked_at_unix_nano = ?
@@ -140,7 +140,7 @@ impl AiTokensRepo {
         Ok(r.rows_affected() > 0)
     }
 
-    /// 更新最后使用时间。best-effort，失败不传播（不影响主请求）。
+    /// Update last used timestamp. Best-effort, failures don't propagate (doesn't affect main request).
     pub async fn touch_last_used(&self, id: &str, now_unix_nano: i64) -> anyhow::Result<()> {
         sqlx::query(
             "UPDATE ai_tokens SET last_used_at_unix_nano = ?
@@ -159,7 +159,7 @@ mod tests {
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;
 
-    /// 内存库 + 跑一遍迁移，拿到可用的 repo。
+    /// In-memory repo + run migrations to get a usable repo.
     async fn repo() -> AiTokensRepo {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
@@ -199,9 +199,9 @@ mod tests {
         assert!(r.find_active_by_hash("hash-1").await.unwrap().is_some());
 
         assert!(r.revoke("ait-1", 2).await.unwrap());
-        // find_active_by_hash 只回未撤销的
+        // find_active_by_hash only returns non-revoked
         assert!(r.find_active_by_hash("hash-1").await.unwrap().is_none());
-        // 但 find 仍能查到（审计需要看到 revoked_at）
+        // but find still works (audit needs to see revoked_at)
         let row = r.find("ait-1").await.unwrap().expect("row still present");
         assert!(!row.is_active());
         assert_eq!(row.revoked_at_unix_nano, Some(2));
@@ -248,6 +248,6 @@ mod tests {
         let r = repo().await;
         r.create("ait-x", "same-hash", "first", 1).await.unwrap();
         let err = r.create("ait-y", "same-hash", "second", 2).await;
-        assert!(err.is_err(), "token_hash UNIQUE 应该拒绝重复");
+        assert!(err.is_err(), "token_hash UNIQUE should reject duplicate");
     }
 }

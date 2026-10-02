@@ -1,12 +1,12 @@
-//! 证书扫描来源：控制台配置的「节点 + 路径」。
+//! Certificate scan sources: node + path configured in the console.
 //!
-//! 节点侧不存配置——每次采集快照前拉一次 `/v1/cert-config`，扫完把结果随
-//! inventory 上报，证书条目带上 `source_id` 指回这里。因此「改了配置立刻
-//! 生效」只需要让节点重采一次快照。
+//! The node side does not store configuration - it pulls `/v1/cert-config` once before each snapshot,
+//! then reports results along with inventory. Certificate entries carry `source_id` to reference here.
+//! So "config changes take effect immediately" only requires the node to re-collect a snapshot.
 //!
-//! `node_id` 为空串表示**所有节点**（同一路径在很多机器上都有，一条配置搞定）；
-//! 非空则只作用于那一台。用空串而不是 NULL：唯一索引 `(node_id, path)` 照常生效，
-//! 查询也不用额外处理 NULL 语义。
+//! Empty `node_id` means **all nodes** (same path exists on many machines, one config handles it);
+//! non-empty means only that specific machine. Using empty string instead of NULL: the unique index
+//! `(node_id, path)` still works normally, and no extra NULL semantics handling needed for queries.
 
 use sqlx::SqlitePool;
 
@@ -23,16 +23,16 @@ pub struct CertSource {
 }
 
 impl CertSource {
-    /// 是否作用于所有节点（`node_id` 为空串）
+    /// Whether this applies to all nodes (`node_id` is empty string)
     pub fn is_all_nodes(&self) -> bool {
         self.node_id.is_empty()
     }
 }
 
-/// 修改来源：只改给出的字段（PATCH 语义）
+/// Patch for a source: only changes the provided fields (PATCH semantics)
 #[derive(Debug, Clone, Default)]
 pub struct CertSourcePatch {
-    /// 空串 = 改成「所有节点」
+    /// Empty string = change to "all nodes"
     pub node_id: Option<String>,
     pub path: Option<String>,
     pub enabled: Option<bool>,
@@ -89,8 +89,8 @@ impl CertSourcesRepo {
         Ok(rows.into_iter().map(CertSource::from).collect())
     }
 
-    /// 某节点要扫描的来源。`enabled_only` 为真时只返回启用的（节点侧用）。
-    /// 包含 `node_id = ''` 的「所有节点」来源。
+    /// Sources that a specific node should scan. When `enabled_only` is true, only returns enabled ones (used by node side).
+    /// Includes sources with `node_id = ''` (all nodes).
     pub async fn list_for_node(
         &self,
         node_id: &str,
@@ -144,7 +144,7 @@ impl CertSourcesRepo {
         .await?;
         self.find(&id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("cert_source 创建后读不到"))
+            .ok_or_else(|| anyhow::anyhow!("cert_source not found after creation"))
     }
 
     pub async fn update(
@@ -156,7 +156,7 @@ impl CertSourcesRepo {
         let mut cur = self
             .find(id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("证书来源不存在"))?;
+            .ok_or_else(|| anyhow::anyhow!("certificate source not found"))?;
         if let Some(v) = &patch.node_id {
             cur.node_id = v.clone();
         }

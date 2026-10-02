@@ -1,12 +1,12 @@
-//! 服务健康度（服务 / 探针）的 HTTP 接口。
+//! HTTP API for service health (services / probes).
 //!
-//! 两类调用方：
-//!   - 节点：`GET /v1/probe-config`（拉配置）、`POST /v1/probe-results`（交结果），
-//!     走 Ed25519 请求签名，只能操作自己；
-//!   - 控制台：`/v1/services`、`/v1/probes`，走 admin token。
+//! Two types of callers:
+//!   - Nodes: `GET /v1/probe-config` (pull config), `POST /v1/probe-results` (submit results),
+//!     use Ed25519 request signing, can only operate their own data;
+//!   - Console: `/v1/services`, `/v1/probes`, use admin token.
 //!
-//! 原 `/v1/overview` 已被 `/v1/todo`（`todo_api`）取代——见
-//! `docs/superpowers/specs/2026-09-19-product-structure-design.md`。
+//! Original `/v1/overview` replaced by `/v1/todo` (`todo_api`) -- see
+//! `docs/superpowers/specs/2026-09-19-product-structure-design.md`.
 
 use std::collections::HashMap;
 
@@ -22,9 +22,9 @@ use tracing::{debug, warn};
 use crate::routes::{err, read_auth_ok, verify_node};
 use crate::state::AppState;
 
-// ---------- 节点侧 ----------
+// ---------- Node side ----------
 
-/// `GET /v1/probe-config?node_id=<id>` —— 节点拉取本机要执行的探针
+/// `GET /v1/probe-config?node_id=<id>` -- node pulls probes it should execute
 pub async fn probe_config_handler(
     State(state): State<AppState>,
     method: axum::http::Method,
@@ -82,7 +82,7 @@ struct ProbeResultItem {
     probe_id: String,
     #[serde(default)]
     ts_unix_nano: i64,
-    /// ok | degraded | down（节点按 expect 判定；未知取值按 down 处理）
+    /// ok | degraded | down (node determines by expect; unknown values treated as down)
     state: String,
     #[serde(default)]
     latency_ms: Option<f64>,
@@ -97,7 +97,7 @@ struct ProbeResultsBody {
     results: Vec<ProbeResultItem>,
 }
 
-/// `POST /v1/probe-results` —— 节点上报一批探针结果
+/// `POST /v1/probe-results` -- node submits a batch of probe results
 pub async fn probe_results_ingest_handler(
     State(state): State<AppState>,
     method: axum::http::Method,
@@ -116,7 +116,7 @@ pub async fn probe_results_ingest_handler(
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
     };
     if parsed.results.len() > 500 {
-return err(StatusCode::BAD_REQUEST, "Batch size cannot exceed 500");
+        return err(StatusCode::BAD_REQUEST, "Batch size cannot exceed 500");
     }
 
     let hostname = state
@@ -151,7 +151,7 @@ return err(StatusCode::BAD_REQUEST, "Batch size cannot exceed 500");
             }
         };
 
-        // 归属校验：探针绑定了别的节点时，不接受这台节点的结果
+        // Ownership check: when probe is bound to a different node, don't accept this node's results
         if !probe.node_ids.is_empty() && !probe.node_ids.iter().any(|n| n == node_id.as_str()) {
             continue;
         }
@@ -198,10 +198,10 @@ return err(StatusCode::BAD_REQUEST, "Batch size cannot exceed 500");
     StatusCode::NO_CONTENT.into_response()
 }
 
-// ---------- 控制台侧 ----------
+// ---------- Console side ----------
 
-/// 把「每桶 ok 数 / 总数」折成每个对象一条曲线（`t` 毫秒、`v` 百分比）。
-/// 一条结果都没有的桶直接跳过，让曲线断开而不是掉到 0。
+/// Convert "ok count / total per bucket" to one curve per object (`t` milliseconds, `v` percentage).
+/// Buckets with no results at all are skipped, making the curve break rather than drop to 0.
 fn ratio_series(rows: Vec<(String, i64, i64, i64)>) -> HashMap<String, Vec<serde_json::Value>> {
     let mut series: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
     for (key, bucket, ok, total) in rows {
@@ -219,13 +219,14 @@ fn ratio_series(rows: Vec<(String, i64, i64, i64)>) -> HashMap<String, Vec<serde
 
 /// `GET /v1/services/timeline?from=<ms>&to=<ms>&buckets=N&level=service|probe`
 ///
-/// 健康时间线：每个时间桶里「有多少比例的探测是 ok 的」，一条线一个对象。
-/// 用比例而不是单次探测结果——单次结果受采样密度影响，曲线会毛刺化；
-/// 比例能在同一个尺度上比较不同频率的探针。
+/// Health timeline: "what proportion of probes in this time bucket were ok", one line per object.
+/// Uses proportion instead of single probe results -- raw results are affected by sampling density,
+/// curves become jittery; proportions are comparable across different probe frequencies on the same scale.
 ///
-/// `level=service`（默认）一条线一个服务；`level=probe` 一条线一个探针，
-/// 服务级曲线会把「同一个服务里哪个探针在抖」抹平，排查时要看得到。
-/// 探针级用服务名做分组前缀（`服务名 / 探针名`），图例里同服务的线挨在一起。
+/// `level=service` (default): one line per service; `level=probe`: one line per probe.
+/// Service-level curves flatten out "which probe within the same service is jittering", need to see
+/// it during investigation. Probe-level uses service name as group prefix (`Service / Probe`),
+/// keeping lines for the same service together in the legend.
 pub async fn services_timeline_handler(
     State(state): State<AppState>,
     Query(q): Query<HashMap<String, String>>,
@@ -326,7 +327,7 @@ pub async fn services_timeline_handler(
         .await
         .unwrap_or_default();
 
-    // service_id -> 点集（按桶顺序）
+    // service_id -> point set (in bucket order)
     let mut series = ratio_series(rows);
 
     let out: Vec<serde_json::Value> = services
@@ -466,9 +467,9 @@ pub async fn patch_service_handler(
         .await
     {
         Ok(()) => {
-            // 整组停用：把旗下探针的未解决告警一并关掉——不探了就不该继续挂红。
-            // （probe_counts / 服务健康聚合也已排除停用项，这里清的是遗留的
-            // 「探针 down」告警与待办条目）
+            // Disabling entire service: also close unresolved alerts for its probes -- no longer probing,
+            // shouldn't keep showing red. (probe_counts / service health aggregation already exclude disabled,
+            // what we're clearing here are legacy "probe down" alerts and todo items)
             if patch.enabled == Some(false) {
                 let probes = state
                     .storage
@@ -507,7 +508,8 @@ pub async fn delete_service_handler(
             "authentication required (Bearer admin token)",
         );
     }
-    // 先关掉该服务下探针的未解决告警，避免留下永远无法恢复的孤儿告警
+    // First close unresolved alerts for this service's probes, to avoid leaving orphan alerts
+    // that can never be resolved
     let now = zhiwei_common::Timestamp::now().unix_nano();
     match state.storage.probes().list_probes().await {
         Ok(probes) => {
@@ -534,7 +536,7 @@ pub async fn delete_service_handler(
     }
 }
 
-/// 扁平探针列表（含状态）：给「探针」独立视图与节点详情用
+/// Flat probe list (with state): for "probes" standalone view and node detail pages
 pub async fn list_probes_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if !read_auth_ok(&state, &headers).await {
         return err(
@@ -554,7 +556,7 @@ pub async fn list_probes_handler(State(state): State<AppState>, headers: HeaderM
     }
 }
 
-/// 绑定节点列表去空、去重（顺序即界面勾选顺序，保持稳定）
+/// Deduplicate and remove empty from node id list (order is UI checkbox order, kept stable)
 fn normalize_node_ids(ids: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for raw in ids {
@@ -566,7 +568,7 @@ fn normalize_node_ids(ids: &[String]) -> Vec<String> {
     out
 }
 
-/// 校验并规范化探针的 kind / target / expect
+/// Validate and normalize probe kind / target / expect
 fn normalize_probe_parts(
     kind: &str,
     target_json: &str,
@@ -583,7 +585,7 @@ fn normalize_probe_parts(
         serde_json::from_str(expect_json).map_err(|e| format!("expect is not valid JSON: {e}"))?
     };
 
-    // 必填字段：没有目标地址的探针永远只会失败，创建时就拦下来
+    // Required fields: probes without target address will always fail, block at creation time
     match kind {
         "http" => {
             let url = target.get("url").and_then(|v| v.as_str()).unwrap_or("");
@@ -633,7 +635,7 @@ pub async fn create_probe_handler(
         timeout_ms: i64,
         #[serde(default = "default_threshold")]
         failure_threshold: i64,
-        /// 绑定的执行节点；缺省或空数组 = 任意节点
+        /// Bound execution nodes; omitted or empty array = any node
         #[serde(default)]
         node_ids: Vec<String>,
         #[serde(default = "default_enabled")]
@@ -699,10 +701,11 @@ pub async fn create_probe_handler(
     }
 }
 
-/// `POST /v1/probes/test` —— 保存前的一次性测试，只跑不落库。
+/// `POST /v1/probes/test` -- one-time test before saving, runs but doesn't store.
 ///
-/// 从控制台（monitor）发起，用来快速确认目标可达、期望配置写得对；
-/// 真正的探针仍然由执行节点周期性运行。结论里的 reason/args 交给前端做文案。
+/// Initiated from console (monitor), quickly confirms target is reachable and expect config is correct;
+/// real probes are still run periodically by executing nodes. Conclusion's reason/args handed to
+/// frontend for messaging.
 pub async fn test_probe_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -732,7 +735,7 @@ pub async fn test_probe_handler(
         Ok(b) => b,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
     };
-    // 与创建探针用同一套校验：测出来的东西必须和存下去的一致
+    // Uses same validation as create probe: what tests pass must match what gets stored
     let (target_json, expect_json) =
         match normalize_probe_parts(&b.kind, &b.target_json, &b.expect_json) {
             Ok(v) => v,
@@ -780,7 +783,7 @@ pub async fn patch_probe_handler(
         timeout_ms: Option<i64>,
         #[serde(default)]
         failure_threshold: Option<i64>,
-        /// 给数组即整体替换绑定节点（`[]` = 改回「任意节点」）
+        /// Giving array replaces all bound nodes as a whole (`[]` = revert to "any node")
         #[serde(default)]
         node_ids: Option<Vec<String>>,
         #[serde(default)]
@@ -791,7 +794,7 @@ pub async fn patch_probe_handler(
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
     };
 
-    // 改 target 必须连同 kind 一起给，否则无法校验必填字段
+    // Changing target requires giving kind at the same time, otherwise can't validate required fields
     let target_json = match (&b.kind, &b.target_json) {
         (Some(kind), Some(target)) => {
             let expect = b.expect_json.clone().unwrap_or_else(|| "{}".into());
@@ -818,8 +821,8 @@ pub async fn patch_probe_handler(
     let now = zhiwei_common::Timestamp::now().unix_nano();
     match state.storage.probes().update_probe(&id, &patch, now).await {
         Ok(()) => {
-            // 停用探针：关闭它的未解决告警——不再下发了，之前那条
-            // 「探针 down」不该继续占着待办（统计口径也已在后端排除停用项）
+            // Disabling probe: close its unresolved alerts -- no longer dispatched, the previous
+            // "probe down" shouldn't continue occupying the todo list (stats also exclude disabled in backend)
             if b.enabled == Some(false) {
                 if let Err(e) = state
                     .storage
@@ -857,7 +860,7 @@ pub async fn delete_probe_handler(
         .resolve_open_probe_alerts(&id, now)
         .await
     {
-        warn!(error = %e, "关闭探针告警失败");
+        warn!(error = %e, "Failed to close probe alerts");
     }
     match state.storage.probes().delete_probe(&id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
@@ -894,11 +897,11 @@ pub async fn probe_results_handler(
     }
 }
 
-// ---------- 概览聚合 ----------
+// ---------- Overview aggregation ----------
 
-/// 容器「异常」判定（概览卡片用）：
-/// dead / restarting 一律算异常；exited 看退出码（`Exited (0)` 之外都算）；
-/// running 但健康检查报 unhealthy 也算。
+/// Container "failed" detection (for overview cards):
+/// dead / restarting always count as failed; exited looks at exit code (anything other than `Exited (0)`);
+/// running but health check reports unhealthy also counts.
 pub fn container_is_failed(state: &str, status: &str) -> bool {
     let state = state.to_ascii_lowercase();
     let status = status.to_ascii_lowercase();

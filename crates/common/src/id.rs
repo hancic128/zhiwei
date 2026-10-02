@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// 节点 ID（首次 enroll 后由 monitor 分配，node 持久化保存）。
+/// Node ID (assigned by monitor after first enroll, node persists it).
 ///
-/// 格式：短横线分隔的小写字母数字 UUID。
+/// Format: lowercase alphanumeric UUID separated by hyphens.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct NodeId(String);

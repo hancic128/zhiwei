@@ -71,11 +71,12 @@ impl TelemetryRepo {
         Ok(rows)
     }
 
-    /// 时间窗内的批次（纳秒、闭区间），按时间升序。
+    /// Batches within a time window (nanoseconds, inclusive), ordered by time ascending.
     ///
-    /// 长窗口（7 天 / 30 天）按 10s 采样会有几万个点，直接全取既慢又画不动，
-    /// 所以在 SQL 里做等步长抽稀：窗口内不足 `limit` 条就全取，否则按
-    /// `ceil(total / limit)` 的步长取每个桶的第一条，点数≈limit 且覆盖整个窗口。
+    /// Long windows (7 days / 30 days) at 10s sampling have tens of thousands of points;
+    /// fetching all is slow and hard to visualize. So we downsample in SQL: if fewer than
+    /// `limit` rows in the window, fetch all; otherwise take one row per bucket at
+    /// `ceil(total / limit)` stride, giving ~limit points covering the whole window.
     pub async fn range(
         &self,
         node_id: &str,
@@ -110,7 +111,7 @@ impl TelemetryRepo {
         Ok(rows)
     }
 
-    /// 每个节点的最新一帧（节点列表一次取齐，避免逐节点 N 次查询）。
+    /// Latest frame per node (get all nodes at once, avoid N queries per node).
     pub async fn latest_per_node(&self) -> anyhow::Result<Vec<(String, i64, Vec<u8>)>> {
         let rows: Vec<(String, i64, Vec<u8>)> = sqlx::query_as(
             r#"
@@ -124,9 +125,10 @@ impl TelemetryRepo {
         Ok(rows)
     }
 
-    // ---------- 小时聚合（降采样，见 migrations.rs 的 Migration 011）----------
+    // ---------- Hourly aggregation (downsample, see Migration 011 in migrations.rs) ----------
 
-    /// 时间窗内的所有节点的原始批次——留存任务一次取齐，避免逐节点查询。
+    /// Raw batches for all nodes within a time window -- retention task fetches all at once,
+    /// avoids querying per node.
     pub async fn batches_in_window(
         &self,
         from_ns: i64,
@@ -147,8 +149,8 @@ impl TelemetryRepo {
         Ok(rows)
     }
 
-    /// 写入 / 覆盖一个 (节点, 小时, 指标) 的聚合值。
-    /// 用 upsert 而不是 insert：重跑同一小时是幂等的。
+    /// Insert/overwrite an aggregated value for (node, hour, metric).
+    /// Uses upsert rather than insert: re-running the same hour is idempotent.
     #[allow(clippy::too_many_arguments)]
     pub async fn upsert_hourly(
         &self,
@@ -186,7 +188,8 @@ impl TelemetryRepo {
         Ok(())
     }
 
-    /// 已聚合到哪个小时（水位线）——留存任务只往前推，不回头重算。
+    /// Which hour has been aggregated up to (watermark) -- retention task only moves forward,
+    /// does not recalculate the past.
     pub async fn max_hourly_ts(&self) -> anyhow::Result<Option<i64>> {
         let v: Option<i64> =
             sqlx::query_scalar("SELECT MAX(ts_hour_unix_nano) FROM telemetry_hourly")
@@ -195,8 +198,8 @@ impl TelemetryRepo {
         Ok(v)
     }
 
-    /// 长窗口查询：从小时聚合表按步长抽稀取值。
-    /// 返回 `(ts_nano, avg, min, max, first, last, samples)`。
+    /// Long window query: downsample from hourly aggregation table by stride.
+    /// Returns `(ts_nano, avg, min, max, first, last, samples)`.
     pub async fn hourly_range(
         &self,
         node_id: &str,
@@ -234,11 +237,12 @@ impl TelemetryRepo {
         Ok(rows)
     }
 
-    /// 滚掉过期的原始数据，返回删除行数。
+    /// Delete expired raw data, returns number of rows deleted.
     ///
-    /// 走 `id` 子查询 + 上限，分小批删（见 `delete_in_batches`）：留存量以百万行
-    /// 计时，一条 `DELETE ... WHERE ts_unix_nano < ?` 会一路持有写锁到扫完为止，
-    /// 期间 telemetry 上报与命令下发全部排队。
+    /// Uses `id` subquery + limit, deletes in small batches (see `delete_in_batches`):
+    /// retention data can be millions of rows; one `DELETE ... WHERE ts_unix_nano < ?`
+    /// holds a write lock until the full scan is done, during which telemetry reports
+    /// and command dispatch all queue up.
     pub async fn delete_raw_before(&self, cutoff_ns: i64) -> anyhow::Result<u64> {
         delete_in_batches(
             &self.pool,
@@ -251,7 +255,7 @@ impl TelemetryRepo {
         .await
     }
 
-    /// 滚掉过期的小时聚合，返回删除行数。
+    /// Delete expired hourly aggregates, returns number of rows deleted.
     pub async fn delete_hourly_before(&self, cutoff_ns: i64) -> anyhow::Result<u64> {
         delete_in_batches(
             &self.pool,
@@ -265,22 +269,24 @@ impl TelemetryRepo {
     }
 }
 
-/// 一条删除语句最多处理多少行。
+/// Maximum rows per delete statement.
 ///
-/// 数字不是拍脑袋：SQLite 的写锁是**库级**的，一批 5000 行的删除在普通 VPS 上
-/// 是毫秒级——足够短，别的写事务排队也来得及；再大就会把一次上报拖成「慢语句」。
+/// Not arbitrary: SQLite's write lock is database-level; deleting 5000 rows on a typical VPS
+/// takes milliseconds -- short enough that other write transactions can still queue in time.
+/// Any larger and a single report gets dragged into a "slow statement".
 pub const DELETE_BATCH_ROWS: i64 = 5_000;
 
-/// 一轮留存最多删多少批。长期停机（水位线落后几个月）时，一轮删不完就留给下一轮，
-/// 不为了「一次清干净」把写锁攥住几分钟。
+/// Maximum batches per retention run. When a node is offline for a long time (watermark
+/// lags by months), one run won't finish everything -- don't hold the write lock for minutes
+/// trying to "clean everything at once".
 const MAX_DELETE_BATCHES: usize = 200;
 
-/// 分批删除：每批一条语句、一次提交，写完就让出写锁。
+/// Delete in batches: one statement per batch, one commit, release write lock after each.
 ///
-/// 现场症状（2026-09-23）：容器操作点了没反应，monitor 日志里
-/// `INSERT INTO telemetry_batches ... elapsed=2.88s`——留存那条全表 DELETE 把
-/// 写锁占了近 3 秒，命令的 INSERT 只能干等。索引（migration 014）解决「扫全表」，
-/// 分批解决「一次删太多」。
+/// Symptom observed (2026-09-23): clicking container operations had no response, monitor logs
+/// showed `INSERT INTO telemetry_batches ... elapsed=2.88s` -- that full-table DELETE held
+/// the write lock for nearly 3 seconds, INSERT for commands just waited. Index (migration 014)
+/// solves "full table scan", batching solves "deleting too much at once".
 async fn delete_in_batches(
     pool: &SqlitePool,
     sql: &str,
@@ -309,8 +315,8 @@ mod tests {
     use sqlx::sqlite::SqlitePoolOptions;
     use sqlx::Row;
 
-    /// 内存库 + 跑一遍迁移，拿到可用的 repo。
-    /// 先补一行节点：telemetry 有外键，sqlx 默认开 `PRAGMA foreign_keys`。
+    /// In-memory repo + run migrations to get a usable repo.
+    /// Insert a node row first: telemetry has foreign keys, sqlx enables `PRAGMA foreign_keys` by default.
     async fn repo() -> TelemetryRepo {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
@@ -348,8 +354,9 @@ mod tests {
 
     #[tokio::test]
     async fn delete_loops_until_the_backlog_is_gone() {
-        // 一批只删 2 行时，3 行过期的数据要分两批删完——只删一批会留下残渣，
-        // 而留存量是每天 8640 行 × 节点数，必然远超一批。
+        // When batch only deletes 2 rows, 3 expired rows need two batches to fully delete --
+        // deleting only one batch leaves residue, and retention is 8640 rows/day * node count,
+        // which definitely exceeds one batch.
         let r = repo().await;
         seed(&r, 10).await;
         let deleted = delete_in_batches(&r.pool, DELETE_ONE_BATCH_SQL, 3, 2)
@@ -367,12 +374,13 @@ mod tests {
         assert_eq!(r.count_by_node("n1").await.unwrap(), 3);
     }
 
-    /// 删除必须走时间索引。
+    /// Deletes must use the time index.
     ///
-    /// 001 建的索引是 (node_id, ts_unix_nano)，首列不是时间——`WHERE ts < ?` 用不上，
-    /// SQLite 只能全表扫描；一条 DELETE 全程持写锁，现场表现为
-    /// `INSERT INTO telemetry_batches ... elapsed=2.88s` + 容器操作「点了没反应」。
-    /// migration 014 补的 idx_telemetry_ts 就是为这条语句。
+    /// The index created by 001 is (node_id, ts_unix_nano), first column is not time --
+    /// `WHERE ts < ?` can't use it, SQLite does a full table scan; one DELETE holds write lock
+    /// the whole time, symptom is `INSERT INTO telemetry_batches ... elapsed=2.88s` +
+    /// container operations "clicked but no response". The idx_telemetry_ts added by
+    /// migration 014 is for this query.
     #[tokio::test]
     async fn time_based_delete_uses_the_ts_index() {
         let r = repo().await;
@@ -390,11 +398,11 @@ mod tests {
             let plan: Vec<String> = rows.iter().map(|row| row.get::<String, _>(3)).collect();
             assert!(
                 plan.iter().any(|d| d.contains(index)),
-                "{sql} 没走索引 {index}：{plan:?}"
+                "{sql} not using index {index}: {plan:?}"
             );
             assert!(
                 !plan.iter().any(|d| d.starts_with("SCAN")),
-                "{sql} 仍在全表扫描：{plan:?}"
+                "{sql} still doing full table scan: {plan:?}"
             );
         }
     }

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result};
 
-/// Ed25519 签名（64 字节）。
+/// Ed25519 signature (64 bytes).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Signature(pub Vec<u8>);
@@ -15,7 +15,7 @@ impl Signature {
     }
 }
 
-/// Ed25519 公钥（32 字节）。
+/// Ed25519 public key (32 bytes).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PublicKey(pub Vec<u8>);
@@ -39,7 +39,7 @@ impl PublicKey {
     }
 }
 
-/// Ed25519 密钥对。私钥内存中自动 zeroize。
+/// Ed25519 key pair. Private key is automatically zeroized in memory.
 #[derive(Debug)]
 pub struct KeyPair {
     signing_key: SigningKey,

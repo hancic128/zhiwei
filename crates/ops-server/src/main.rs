@@ -1,11 +1,11 @@
-//! ZhiWei ops-server —— 控制平面。
+//! ZhiWei ops-server -- control plane.
 //!
-//! 设计稿 D7 要求 monitor（数据平面）与 ops（控制平面）拆成两个进程，
-//! 目的很具体：**签名私钥只在 ops 进程内**。命令由 ops 签名后落库，
-//! 节点在 enroll 时拿到 ops 公钥（TOFU）并逐个验签——因此即便 monitor
-//! 被攻陷，它也无法伪造一条节点会执行的命令。
+//! Design D7 requires monitor (data plane) and ops (control plane) to be separate processes.
+//! The purpose is specific: **signing private key only exists within ops process**. Commands are
+//! signed by ops before being stored. Nodes receive ops public key during enroll (TOFU) and
+//! verify each one -- so even if monitor is compromised, it cannot forge a command that nodes will execute.
 //!
-//! ops 只监听回环地址，供 monitor 转发控制台发起的命令。
+//! Ops only listens on loopback address, for monitor to forward commands initiated by the console.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -32,15 +32,15 @@ use zhiwei_proto::control::{Action, Command};
     version
 )]
 struct Args {
-    /// 数据目录（与 monitor 共用，命令写进同一个库）
+    /// Data directory (shared with monitor, commands written to same database)
     #[arg(long, default_value = "data", env = "ZHIWEI_DATA_DIR")]
     data_dir: PathBuf,
 
-    /// 监听地址，默认只绑回环
+    /// Listen address, default loopback only
     #[arg(long, default_value = "127.0.0.1:8444", env = "ZHIWEI_OPS_LISTEN")]
     listen: String,
 
-    /// 命令默认有效期（秒）
+    /// Default command TTL (seconds)
     #[arg(long, default_value_t = 60, env = "ZHIWEI_OPS_TTL")]
     ttl: i64,
 }
@@ -62,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     tokio::fs::create_dir_all(&args.data_dir).await?;
 
-    // 签名密钥：只在 ops 进程内，落盘 0600
+    // Signing key: only exists within ops process, persisted as 0600
     let key_path = args.data_dir.join("ops.key");
     let pub_path = args.data_dir.join("ops.pub");
     let key = if key_path.exists() {
@@ -82,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
         kp
     };
 
-    // 公钥给 monitor 在 enroll 时下发给节点
+    // Public key given to monitor to distribute to nodes during enroll
     let pub_b64 = {
         use base64::Engine;
         base64::engine::general_purpose::STANDARD.encode(key.public_key().as_bytes())
@@ -145,8 +145,8 @@ fn parse_action(s: &str) -> Option<Action> {
     }
 }
 
-/// 命令参数校验。控制平面是最后一个能拦住畸形参数的关口——
-/// 节点侧还会再校验一次（纵深防御），但错误在这里返回，控制台能立刻看到原因。
+/// Validate command parameters. Control plane is the last checkpoint that can block malformed parameters --
+/// node side validates again (defense in depth), but errors returned here let console see the cause immediately.
 fn validate_params(action: Action, params: &serde_json::Value) -> Result<(), String> {
     match action {
         Action::KillProcess => {
@@ -164,7 +164,7 @@ fn validate_params(action: Action, params: &serde_json::Value) -> Result<(), Str
             Ok(())
         }
         Action::RestartHost | Action::ShutdownHost => {
-            // 无参数动作：带上参数说明调用方搞错了动作，直接拒绝
+            // No-parameter actions: if params are provided, caller got the action wrong, reject directly
             if params.as_object().is_some_and(|o| !o.is_empty()) {
                 return Err("This action does not accept parameters".into());
             }
@@ -182,7 +182,7 @@ fn validate_params(action: Action, params: &serde_json::Value) -> Result<(), Str
             if name.is_empty() {
                 return Err("This action requires container (name or ID)".into());
             }
-            // 容器名/ID 会拼进 docker API 路径，挡掉路径穿越与控制字符
+            // Container name/ID gets concatenated into docker API path, block path traversal and control chars
             if name.len() > 128
                 || !name
                     .chars()
@@ -194,7 +194,7 @@ fn validate_params(action: Action, params: &serde_json::Value) -> Result<(), Str
         }
         Action::RefreshInventory => {
             if params.as_object().is_some_and(|o| !o.is_empty()) {
-                return Err("该动作不接受参数".into());
+                return Err("This action does not accept parameters".into());
             }
             Ok(())
         }
@@ -203,7 +203,7 @@ fn validate_params(action: Action, params: &serde_json::Value) -> Result<(), Str
                 .get("path")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
-            // 路径规则与证书来源配置共用同一份实现（绝对路径 / 无 .. / 无控制字符）
+            // Path rules shared with cert source config (absolute path / no .. / no control chars)
             zhiwei_common::certpath::normalize(path)
                 .map(|_| ())
                 .map_err(|msg| format!("scan_certs requires a valid path: {msg}"))
@@ -246,7 +246,7 @@ async fn exec(State(state): State<Arc<OpsState>>, Json(req): Json<ExecRequest>) 
         signature: Vec::new(),
     };
 
-    // 签名覆盖 signature 置空后的整个消息
+    // Signature covers the entire message with signature field set to empty
     let mut preimage = Vec::new();
     if let Err(e) = prost::Message::encode(&cmd, &mut preimage) {
         return (
