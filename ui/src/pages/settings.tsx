@@ -1319,6 +1319,7 @@ function UiSection() {
               }}
             >
               <option value="en-US">{t("settings.lang_en-US")}</option>
+              <option value="zh-CN">{t("settings.lang_zh-CN")}</option>
             </Select>
           </div>
         </div>
