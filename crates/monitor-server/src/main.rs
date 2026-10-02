@@ -599,12 +599,15 @@ async fn main() -> anyhow::Result<()> {
 const INSTALL_NODE_SH: &str = include_str!("../../../scripts/install-node.sh");
 
 /// 内嵌的帮助页 markdown（理由同上）。
+const HELP_MD_ZH: &str = include_str!("../assets/help.md");
 const HELP_MD_EN: &str = include_str!("../assets/help.en.md");
 
-/// Help page content. Single binary serves all locales via the `Accept-Language` header.
-/// Unknown / missing locale falls back to en-US.
+/// Help page content. Both zh-CN and en-US are loaded at startup.
 fn load_help_markdown() -> crate::state::HelpContent {
-    crate::state::HelpContent::new([("en-US".to_string(), HELP_MD_EN.to_string())])
+    crate::state::HelpContent::new([
+        ("zh-CN".to_string(), HELP_MD_ZH.to_string()),
+        ("en-US".to_string(), HELP_MD_EN.to_string()),
+    ])
 }
 
 #[cfg(test)]
