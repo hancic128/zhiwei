@@ -596,37 +596,51 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     }
 
-    // Migration 019b: migrate existing Chinese rule names to English
-    let has_019b: Option<i64> =
+    // Migration 019b: migrate existing Chinese rule names to English and set default threshold/duration
+    let has_019b_done: Option<i64> =
         sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 19")
             .fetch_optional(pool)
             .await?;
-    let should_migrate_names = if has_019b.is_some() {
+    if has_019b_done.is_some() {
         // Check if any rules still have Chinese names
         let count: Option<i64> = sqlx::query_scalar(
             "SELECT COUNT(*) FROM builtin_alert_rules WHERE name LIKE '%节点%' OR name LIKE '%离线%' OR name LIKE '%上线%' OR name LIKE '%证书%' OR name LIKE '%服务%' OR name LIKE '%容器%'"
         )
         .fetch_optional(pool)
         .await?;
-        count.unwrap_or(0) > 0
-    } else {
-        false
-    };
-    if should_migrate_names {
-        sqlx::query(
-            r#"
-            UPDATE builtin_alert_rules SET name = 'Node Offline' WHERE id = 'node_offline';
-            UPDATE builtin_alert_rules SET name = 'Node Online' WHERE id = 'node_online';
-            UPDATE builtin_alert_rules SET name = 'Service Down' WHERE id = 'service_offline';
-            UPDATE builtin_alert_rules SET name = 'Service Up' WHERE id = 'service_online';
-            UPDATE builtin_alert_rules SET name = 'Container Started' WHERE id = 'container_started';
-            UPDATE builtin_alert_rules SET name = 'Container Stopped' WHERE id = 'container_stopped';
-            UPDATE builtin_alert_rules SET name = 'Certificate Expiring' WHERE id = 'cert_expiring';
-            UPDATE builtin_alert_rules SET name = 'Certificate Expired' WHERE id = 'cert_expired';
-            "#,
+        if count.unwrap_or(0) > 0 {
+            sqlx::query(
+                r#"
+                UPDATE builtin_alert_rules SET name = 'Node Offline' WHERE id = 'node_offline';
+                UPDATE builtin_alert_rules SET name = 'Node Online' WHERE id = 'node_online';
+                UPDATE builtin_alert_rules SET name = 'Service Down' WHERE id = 'service_offline';
+                UPDATE builtin_alert_rules SET name = 'Service Up' WHERE id = 'service_online';
+                UPDATE builtin_alert_rules SET name = 'Container Started' WHERE id = 'container_started';
+                UPDATE builtin_alert_rules SET name = 'Container Stopped' WHERE id = 'container_stopped';
+                UPDATE builtin_alert_rules SET name = 'Certificate Expiring' WHERE id = 'cert_expiring';
+                UPDATE builtin_alert_rules SET name = 'Certificate Expired' WHERE id = 'cert_expired';
+                "#,
+            )
+            .execute(pool)
+            .await?;
+        }
+        // Set default threshold for alerts that need it (node_offline: 60s, cert_expiring: 30 days)
+        let count: Option<i64> = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM builtin_alert_rules WHERE threshold = 0 AND (id = 'node_offline' OR id = 'cert_expiring')"
         )
-        .execute(pool)
+        .fetch_optional(pool)
         .await?;
+        if count.unwrap_or(0) > 0 {
+            sqlx::query(
+                r#"
+                UPDATE builtin_alert_rules SET threshold = 60 WHERE id = 'node_offline';
+                UPDATE builtin_alert_rules SET threshold = 30 WHERE id = 'cert_expiring';
+                UPDATE builtin_alert_rules SET duration_seconds = 300 WHERE duration_seconds = 0;
+                "#,
+            )
+            .execute(pool)
+            .await?;
+        }
     }
 
     // Migration 020: builtin_alert_rules add editable threshold and duration
