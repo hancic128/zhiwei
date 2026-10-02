@@ -31,8 +31,8 @@ i18n.on("languageChanged", syncDocumentMeta);
 if (i18n.isInitialized) syncDocumentMeta();
 
 export function switchLocale(locale: Locale) {
-  void i18n.changeLanguage(locale);
   persist.locale(locale);
+  void i18n.changeLanguage(locale);
 }
 
 export default i18n;
