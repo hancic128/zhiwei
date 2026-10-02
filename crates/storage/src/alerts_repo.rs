@@ -113,25 +113,30 @@ pub struct NewChannel<'a> {
 /// alert_rules 行的裸形态（与 SELECT 列顺序一致）
 type RuleRow = (i64, String, String, String, f64, i64, String, i64, i64, i64);
 
-/// 内置规则（节点上下线）的对外形态。
-/// id 是稳定字符串（'node_offline' / 'node_online'），前端用它做 toggle 的 key。
+/// 内置规则（节点上下线/服务探针/容器/证书）的对外形态。
+/// id 是稳定字符串（'node_offline' / 'node_online' 等），前端用它做 toggle 的 key。
+/// 支持编辑 threshold 和 duration_seconds。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct BuiltinAlertRule {
     pub id: String,
     pub name: String,
     pub enabled: bool,
+    pub threshold: f64,
+    pub duration_seconds: i64,
     pub updated_at_unix_nano: i64,
 }
 
 /// builtin_alert_rules 行的裸形态（与 SELECT 列顺序一致）
-type BuiltinRow = (String, String, i64, i64);
+type BuiltinRow = (String, String, i64, f64, i64, i64);
 
 fn builtin_from_row(r: BuiltinRow) -> BuiltinAlertRule {
     BuiltinAlertRule {
         id: r.0,
         name: r.1,
         enabled: r.2 != 0,
-        updated_at_unix_nano: r.3,
+        threshold: r.3,
+        duration_seconds: r.4,
+        updated_at_unix_nano: r.5,
     }
 }
 
@@ -368,7 +373,8 @@ impl AlertsRepo {
     /// 列出全部内置规则（按 id 字典序，UI 展示顺序稳定）
     pub async fn list_builtin_rules(&self) -> anyhow::Result<Vec<BuiltinAlertRule>> {
         let rows: Vec<BuiltinRow> = sqlx::query_as(
-            "SELECT id, name, enabled, updated_at_unix_nano
+            "SELECT id, name, enabled, COALESCE(threshold, 0) as threshold,
+                    COALESCE(duration_seconds, 300) as duration_seconds, updated_at_unix_nano
              FROM builtin_alert_rules ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -443,6 +449,41 @@ impl AlertsRepo {
             }
         }
         Ok(Some(enabled))
+    }
+
+    /// Update builtin alert rule settings (threshold, duration_seconds, enabled).
+    pub async fn update_builtin_rule(
+        &self,
+        id: &str,
+        threshold: f64,
+        duration_seconds: i64,
+        enabled: bool,
+        now: i64,
+    ) -> anyhow::Result<Option<BuiltinAlertRule>> {
+        let n = sqlx::query(
+            "UPDATE builtin_alert_rules
+             SET threshold = ?, duration_seconds = ?, enabled = ?, updated_at_unix_nano = ?
+             WHERE id = ?",
+        )
+        .bind(threshold)
+        .bind(duration_seconds)
+        .bind(if enabled { 1 } else { 0 })
+        .bind(now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if n == 0 {
+            return Ok(None);
+        }
+        let row: Option<BuiltinRow> = sqlx::query_as(
+            "SELECT id, name, enabled, COALESCE(threshold, 0), COALESCE(duration_seconds, 300), updated_at_unix_nano
+             FROM builtin_alert_rules WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(builtin_from_row))
     }
 
     // ---------- 评估状态 ----------

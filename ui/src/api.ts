@@ -739,21 +739,23 @@ export const alertsApi = {
   channels: () => request<NotifyChannel[]>("/v1/channels"),
 };
 
-/** 内置告警规则：节点上下线等平台自带的事件，可启用 / 停用 */
+/** Builtin alert rule: node up/down, service probe, container, certificate events. Supports editing threshold and duration. */
 export interface BuiltinAlertRule {
   id: string;
   name: string;
   enabled: boolean;
+  threshold: number;
+  duration_seconds: number;
   updated_at_unix_nano: number;
 }
 
 export const builtinAlertsApi = {
   list: () => request<BuiltinAlertRule[]>("/v1/builtin-alerts"),
-  setEnabled: (id: string, enabled: boolean) =>
+  update: (id: string, updates: { enabled?: boolean; threshold?: number; duration_seconds?: number }) =>
     request<unknown>(`/v1/builtin-alerts/${encodeURIComponent(id)}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enabled }),
+      body: JSON.stringify(updates),
     }),
 };
 

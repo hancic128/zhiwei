@@ -2423,9 +2423,9 @@ async fn list_builtin_alerts_handler(
     }
 }
 
-/// `PATCH /v1/builtin-alerts/:id`：切换内置告警规则的启用状态
+/// `PATCH /v1/builtin-alerts/:id`：更新内置告警规则的设置
 ///
-/// id 是稳定字符串（目前只有 `node_offline` / `node_online`）。未知 id 返回 404。
+/// id 是稳定字符串（'node_offline' / 'node_online' 等）。未知 id 返回 404。
 async fn patch_builtin_alert_handler(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -2440,27 +2440,54 @@ async fn patch_builtin_alert_handler(
     }
     #[derive(serde::Deserialize)]
     struct Body {
-        enabled: bool,
+        enabled: Option<bool>,
+        threshold: Option<f64>,
+        duration_seconds: Option<i64>,
     }
     let b: Body = match serde_json::from_slice(&body) {
         Ok(b) => b,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
     };
+
+    // If no updates provided, just return success
+    if b.enabled.is_none() && b.threshold.is_none() && b.duration_seconds.is_none() {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+
     let now = zhiwei_common::Timestamp::now().unix_nano();
-    match state
-        .storage
-        .alerts()
-        .set_builtin_rule_enabled(&id, b.enabled, now)
-        .await
-    {
-        Ok(Some(_)) => StatusCode::NO_CONTENT.into_response(),
-        Ok(None) => err(
-            StatusCode::NOT_FOUND,
-            format!("unknown builtin alert: {id}"),
-        ),
+
+    // Get current rule to merge with updates
+    match state.storage.alerts().list_builtin_rules().await {
+        Ok(rules) => {
+            let rule = rules.iter().find(|r| r.id == id);
+            let Some(current) = rule else {
+                return err(StatusCode::NOT_FOUND, format!("unknown builtin alert: {id}"));
+            };
+
+            let threshold = b.threshold.unwrap_or(current.threshold);
+            let duration_seconds = b.duration_seconds.unwrap_or(current.duration_seconds);
+            let enabled = b.enabled.unwrap_or(current.enabled);
+
+            match state
+                .storage
+                .alerts()
+                .update_builtin_rule(&id, threshold, duration_seconds, enabled, now)
+                .await
+            {
+                Ok(Some(_)) => StatusCode::NO_CONTENT.into_response(),
+                Ok(None) => err(
+                    StatusCode::NOT_FOUND,
+                    format!("unknown builtin alert: {id}"),
+                ),
+                Err(e) => err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("update builtin alert: {e}"),
+                ),
+            }
+        }
         Err(e) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("patch builtin alert: {e}"),
+            format!("list builtin alerts: {e}"),
         ),
     }
 }

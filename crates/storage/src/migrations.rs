@@ -583,13 +583,65 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
         sqlx::query(
             r#"
             INSERT OR IGNORE INTO builtin_alert_rules (id, name, enabled, updated_at_unix_nano)
-                VALUES ('service_offline',  '服务离线', 1, 0),
-                       ('service_online',   '服务恢复上线', 1, 0),
-                       ('container_started','容器启动', 1, 0),
-                       ('container_stopped','容器停止', 1, 0),
-                       ('cert_expiring',    '证书临近到期', 1, 0),
-                       ('cert_expired',     '证书已过期', 1, 0);
+                VALUES ('service_offline',  'Service Down', 1, 0),
+                       ('service_online',   'Service Up', 1, 0),
+                       ('container_started','Container Started', 1, 0),
+                       ('container_stopped','Container Stopped', 1, 0),
+                       ('cert_expiring',    'Certificate Expiring', 1, 0),
+                       ('cert_expired',     'Certificate Expired', 1, 0);
             INSERT INTO schema_version (version) VALUES (19);
+            "#,
+        )
+        .execute(pool)
+        .await?;
+    }
+
+    // Migration 019b: migrate existing Chinese rule names to English
+    let has_019b: Option<i64> =
+        sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 19")
+            .fetch_optional(pool)
+            .await?;
+    let should_migrate_names = if has_019b.is_some() {
+        // Check if any rules still have Chinese names
+        let count: Option<i64> = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM builtin_alert_rules WHERE name LIKE '%节点%' OR name LIKE '%离线%' OR name LIKE '%上线%' OR name LIKE '%证书%' OR name LIKE '%服务%' OR name LIKE '%容器%'"
+        )
+        .fetch_optional(pool)
+        .await?;
+        count.unwrap_or(0) > 0
+    } else {
+        false
+    };
+    if should_migrate_names {
+        sqlx::query(
+            r#"
+            UPDATE builtin_alert_rules SET name = 'Node Offline' WHERE id = 'node_offline';
+            UPDATE builtin_alert_rules SET name = 'Node Online' WHERE id = 'node_online';
+            UPDATE builtin_alert_rules SET name = 'Service Down' WHERE id = 'service_offline';
+            UPDATE builtin_alert_rules SET name = 'Service Up' WHERE id = 'service_online';
+            UPDATE builtin_alert_rules SET name = 'Container Started' WHERE id = 'container_started';
+            UPDATE builtin_alert_rules SET name = 'Container Stopped' WHERE id = 'container_stopped';
+            UPDATE builtin_alert_rules SET name = 'Certificate Expiring' WHERE id = 'cert_expiring';
+            UPDATE builtin_alert_rules SET name = 'Certificate Expired' WHERE id = 'cert_expired';
+            "#,
+        )
+        .execute(pool)
+        .await?;
+    }
+
+    // Migration 020: builtin_alert_rules add editable threshold and duration
+    //
+    // Builtin alerts now support customizing threshold and duration per alert.
+    let has_020: Option<i64> =
+        sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 20")
+            .fetch_optional(pool)
+            .await?;
+    if has_020.is_none() {
+        sqlx::query(
+            r#"
+            ALTER TABLE builtin_alert_rules ADD COLUMN threshold REAL NOT NULL DEFAULT 0;
+            ALTER TABLE builtin_alert_rules ADD COLUMN duration_seconds INTEGER NOT NULL DEFAULT 300;
+            INSERT INTO schema_version (version) VALUES (20);
             "#,
         )
         .execute(pool)
