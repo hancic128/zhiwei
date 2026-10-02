@@ -86,7 +86,7 @@ fn scan_entries(patterns: &[(String, String)]) -> BTreeMap<String, ScanEntry> {
         let entries = match glob::glob(pattern) {
             Ok(e) => e,
             Err(e) => {
-                tracing::debug!(pattern, error = %e, "证书 glob 无效");
+                tracing::debug!(pattern, error = %e, "Invalid cert glob pattern");
                 continue;
             }
         };
@@ -110,11 +110,11 @@ fn scan_entries(patterns: &[(String, String)]) -> BTreeMap<String, ScanEntry> {
                 // 否则 nginx 那种 `key.pem + cert.pem` 并排的目录会满屏「解析失败」，
                 // 也会让「命中数」虚高。
                 Ok(None) => {
-                    tracing::debug!(path, "不是证书文件，跳过");
+                    tracing::debug!(path, "Not a cert file, skipping");
                 }
                 Err(e) => {
                     let reason = format!("{e}");
-                    tracing::debug!(path, error = %reason, "证书解析失败");
+                    tracing::debug!(path, error = %reason, "Cert parsing failed");
                     by_path.insert(
                         path.clone(),
                         ScanEntry {

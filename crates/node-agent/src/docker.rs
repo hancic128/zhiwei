@@ -230,7 +230,7 @@ pub async fn list_containers() -> anyhow::Result<Option<Vec<Container>>> {
     let stream = match tokio::net::UnixStream::connect(SOCKET).await {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            tracing::warn!("docker socket 权限不足，跳过容器采集");
+            tracing::warn!("docker socket permission denied, skipping container collection");
             return Ok(None);
         }
         Err(e) => return Err(e).context("连接 docker socket"),
@@ -279,7 +279,7 @@ pub async fn list_containers() -> anyhow::Result<Option<Vec<Container>>> {
         let rt = match inspect_container(&c.id).await {
             Ok(rt) => rt,
             Err(e) => {
-                tracing::debug!(container = %c.id, error = %e, "inspect 容器失败，启动时长留空");
+                tracing::debug!(container = %c.id, error = %e, "Failed to inspect container, leaving uptime empty");
                 ContainerRuntime::default()
             }
         };

@@ -105,15 +105,17 @@ cmd_start() {
     return
   fi
 
-  if pgrep -f 'zhiwei-node --state-dir' >/dev/null 2>&1; then
-    say "node already running"
+  # Only check for local node (specific state-dir path)
+  if [ -f "$DATA_DIR/node/state/signing.key" ] && pgrep -f "zhiwei-node --state-dir $DATA_DIR/node" >/dev/null 2>&1; then
+    say "local node already enrolled"
   else
     [ -n "$bt_token" ] || die "No bootstrap token in logs. Run ./scripts/dev.sh token first"
     # Node identity via signing.key, no certificates needed
+    mkdir -p "$DATA_DIR/node"
     ZHIWEI_MONITOR_URL="$(url)" ZHIWEI_BOOTSTRAP_TOKEN="$bt_token" \
       nohup "$NODE_BIN" --state-dir "$DATA_DIR/node" --interval "$INTERVAL" >"$NODE_LOG" 2>&1 &
     sleep 3
-    say "node started (reporting every ${INTERVAL}s)"
+    say "node enrolled (reporting every ${INTERVAL}s)"
   fi
 
   cmd_status
@@ -158,16 +160,23 @@ cmd_token() {
 cmd_status() {
   say "ops:     $(pgrep -f 'zhiwei-ops --data-dir' >/dev/null && echo running || echo stopped)"
   say "monitor: $(pgrep -f 'zhiwei-monitor --data-dir' >/dev/null && echo running || echo stopped)"
-  say "node:    $(pgrep -f 'zhiwei-node --state-dir' >/dev/null && echo running || echo stopped)"
+  # Check for local node in DATA_DIR or system service
+  if pgrep -f 'zhiwei-node --state-dir '"$DATA_DIR/node"'' >/dev/null 2>&1; then
+    say "node:    running (local)"
+  elif pgrep -f 'zhiwei-node' >/dev/null 2>&1; then
+    say "node:    running (external)"
+  else
+    say "node:    stopped"
+  fi
   [ -f "$MONITOR_LOG" ] && say "Recent monitor log:" && tail -3 "$MONITOR_LOG"
   [ -f "$NODE_LOG" ] && say "Recent node log:" && tail -3 "$NODE_LOG"
 }
 
 cmd_stop() {
   pkill -f 'zhiwei-monitor --data-dir' 2>/dev/null || true
-  pkill -f 'zhiwei-node --state-dir' 2>/dev/null || true
+  pkill -f 'zhiwei-node --state-dir '"$DATA_DIR/node"'' 2>/dev/null || true
   pkill -f 'zhiwei-ops --data-dir' 2>/dev/null || true
-  say "Stopped all processes"
+  say "Stopped local processes"
 }
 
 cmd_reset() {

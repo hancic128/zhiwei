@@ -1778,7 +1778,7 @@ async fn compute_transitions(
         tracing::debug!(
             monitor_uptime_ms,
             warmup_ms = LIVENESS_WARMUP_MS,
-            "跳过 liveness transition 计算（warmup）"
+            "Skipping liveness transition (warmup)"
         );
         return Ok(out);
     }

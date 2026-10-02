@@ -87,7 +87,7 @@ fn action_allowed(action: Action) -> bool {
 
 pub async fn run_poll_loop(monitor: String, state: Arc<NodeState>, node_id: String) {
     if state.ops_public_key.is_none() {
-        warn!("未持有 ops 公钥，控制通道不会拉取命令（安全侧默认拒绝）");
+        warn!("No ops public key held, command channel will not pull commands (secure default)");
         return;
     }
 
@@ -104,7 +104,7 @@ pub async fn run_poll_loop(monitor: String, state: Arc<NodeState>, node_id: Stri
                 }
             }
             Err(e) => {
-                tracing::debug!(error = %e, "命令轮询失败");
+                tracing::debug!(error = %e, "Command poll failed");
                 tokio::time::sleep(Duration::from_secs(POLL_INTERVAL)).await;
             }
         }
@@ -141,7 +141,7 @@ async fn poll_once(monitor: &str, state: &NodeState, node_id: &str) -> anyhow::R
         let cmd = match Command::decode(&bytes[..]) {
             Ok(c) => c,
             Err(e) => {
-                warn!(error = %e, "解码命令失败");
+                warn!(error = %e, "Failed to decode command");
                 continue;
             }
         };
@@ -149,15 +149,15 @@ async fn poll_once(monitor: &str, state: &NodeState, node_id: &str) -> anyhow::R
 
         match verify(&cmd, state) {
             Ok(()) => {
-                info!(command_id = %cmd.id, action = ?cmd.action, "执行命令");
+                info!(command_id = %cmd.id, action = ?cmd.action, "Executing command");
                 let result = execute(&cmd, state).await;
                 if let Err(e) = submit_result(monitor, state, node_id, &cmd.id, result).await {
-                    warn!(error = %e, "回执提交失败");
+                    warn!(error = %e, "Failed to submit receipt");
                 }
             }
             Err(e) => {
                 // 验签失败必须留痕：可能是 monitor 被攻陷在伪造命令
-                warn!(command_id = %cmd.id, error = %e, "命令验签失败，已拒绝执行");
+                warn!(command_id = %cmd.id, error = %e, "Command signature verification failed, rejected");
                 let _ = submit_result(
                     monitor,
                     state,

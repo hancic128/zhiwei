@@ -121,7 +121,7 @@ async fn main() -> anyhow::Result<()> {
     if !args.node_name.trim().is_empty() {
         state.node_name = args.node_name.trim().to_string();
     }
-    tracing::info!(node_name = %state.node_name, "节点名");
+    tracing::info!(node_name = %state.node_name, "Node name");
 
     // --monitor-ca：显式覆盖 pin 用的 CA；`-` 表示强制走系统根
     match args.monitor_ca.trim() {
@@ -129,7 +129,7 @@ async fn main() -> anyhow::Result<()> {
         "-" => {
             state.no_ca_pin = true;
             state.ca_cert_pem = None;
-            tracing::info!("--monitor-ca=-：不 pin monitor CA，一律走系统根");
+            tracing::info!("--monitor-ca=-: no monitor CA pin, using system root");
         }
         path => {
             let pem = tokio::fs::read_to_string(path)
@@ -137,7 +137,7 @@ async fn main() -> anyhow::Result<()> {
                 .with_context(|| format!("读取 --monitor-ca 指定的 CA：{path}"))?;
             state.ca_cert_pem = Some(pem);
             state.no_ca_pin = false;
-            tracing::info!(path, "已用 --monitor-ca 指定的 CA pin monitor");
+            tracing::info!(path, "Using --monitor-ca specified CA to pin monitor");
         }
     }
 
@@ -351,7 +351,7 @@ async fn enroll(
     let alias = alias.trim().to_string();
     let tags = split_tags(tags);
     if !alias.is_empty() || !tags.is_empty() {
-        tracing::info!(alias = %alias, tags = ?tags, "入网时一并设置别名 / 标签");
+        tracing::info!(alias = %alias, tags = ?tags, "Setting alias/tags on enrollment");
     }
 
     let req = EnrollRequest {
@@ -733,7 +733,7 @@ async fn build_inventory(
         // 没有 Docker（或 socket 不可用）时上报空列表，表示本机无容器运行时
         Ok(None) => Vec::new(),
         Err(e) => {
-            tracing::warn!(error = %e, "采集容器失败");
+            tracing::warn!(error = %e, "Failed to collect containers");
             Vec::new()
         }
     };
@@ -836,7 +836,7 @@ async fn fetch_cert_sources(
     match result {
         Ok(sources) => sources,
         Err(e) => {
-            tracing::debug!(error = %e, "拉取证书配置失败，本轮只用本机基线路径");
+            tracing::debug!(error = %e, "Failed to fetch cert config, using local baseline paths only");
             Vec::new()
         }
     }

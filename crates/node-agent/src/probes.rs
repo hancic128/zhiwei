@@ -93,7 +93,7 @@ pub async fn run_loop(monitor: String, state: Arc<NodeState>, node_id: String) {
             match fetch_specs(&monitor, &state, &node_id).await {
                 Ok(list) => {
                     if list.is_empty() && !logged_empty {
-                        tracing::debug!("当前没有分配给本节点的探针");
+                        tracing::debug!("No probes assigned to this node");
                         logged_empty = true;
                     } else if !list.is_empty() {
                         logged_empty = false;
@@ -101,7 +101,7 @@ pub async fn run_loop(monitor: String, state: Arc<NodeState>, node_id: String) {
                     specs = list;
                     last_fetch = Some(Instant::now());
                 }
-                Err(e) => tracing::warn!(error = %e, "拉取探针配置失败"),
+                Err(e) => tracing::warn!(error = %e, "Failed to fetch probe config"),
             }
         }
 
@@ -137,7 +137,7 @@ pub async fn run_loop(monitor: String, state: Arc<NodeState>, node_id: String) {
 
         if !results.is_empty() {
             if let Err(e) = post_results(&monitor, &state, &node_id, &results).await {
-                tracing::warn!(error = %e, "上报探针结果失败，下一轮重试");
+                tracing::warn!(error = %e, "Failed to report probe results, will retry next round");
                 // 上报失败不丢结果语义：立即重试（下一 tick 就会再跑一次）
                 for r in &results {
                     if let Some(id) = r.get("probe_id").and_then(|v| v.as_str()) {
