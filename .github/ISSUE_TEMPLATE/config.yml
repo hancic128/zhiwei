@@ -1,0 +1,27 @@
+name: Configuration
+description: Configure issue templates
+labels: []
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Issue Templates
+
+        Choose the template that best fits your issue:
+        - 🐛 [Bug Report](./bug_report.yml) - Something isn't working
+        - ✨ [Feature Request](./feature_request.yml) - Suggest an idea
+        - ❓ [Question](./question.yml) - Ask a question
+
+        ## Before Submitting
+
+        - ✅ Search existing issues first
+        - ✅ Read the [positioning document](./docs/POSITIONING.md)
+        - ✅ Check the [docs](./docs/) for your question
+        - ✅ Include relevant logs and environment details
+
+        ## Closed Without Action
+
+        Issues that don't align with the project's positioning (single operator,
+        multi-machine management) may be closed. This isn't unfriendly -
+        it's how we keep the project focused.

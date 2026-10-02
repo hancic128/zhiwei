@@ -1,0 +1,11 @@
+# Clippy lints
+# https://rust-lang.github.io/rust-clippy/
+
+msrv = "1.75"
+
+type-complexity = false
+cognitive-complexity = false
+too-many-arguments-threshold = 10
+field-init-shorthand = "warn"
+single-char-binding-names-threshold = 4
+unnested-or-patterns = "warn"

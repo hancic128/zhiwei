@@ -1,0 +1,1354 @@
+import * as React from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
+import {
+  Bot,
+  Clock,
+  Copy,
+  Eye,
+  EyeOff,
+  Info,
+  KeyRound,
+  Pencil,
+  Plus,
+  ShieldCheck,
+  Trash2,
+} from "lucide-react";
+import {
+  aiTokens,
+  alertsApi,
+  enrollTokens,
+  getToken,
+  setToken,
+  settingsApi,
+  type AiTokenMeta,
+  type EnrollTokenMeta,
+  type NotifyChannel,
+} from "@/api";
+import { AiTokenDialog } from "@/components/ai-token-dialog";
+import { EnrollTokenDialog } from "@/components/enroll-token-dialog";
+import { DotBadge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardBody, CardHeader } from "@/components/ui/card";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { Dialog } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import { EmptyState, ErrorState, Skeleton } from "@/components/ui/feedback";
+import {
+  Table,
+  TableShell,
+  TableToolbar,
+  TBody,
+  Td,
+  Th,
+  THead,
+  Tr,
+} from "@/components/ui/table";
+import { useToast } from "@/components/ui/toast";
+import { usePrefs } from "@/components/prefs-provider";
+import { cn, copyText, formatTime, friendlyError, TIMEZONES } from "@/lib/utils";
+import type { Locale } from "@/lib/prefs";
+
+export function Settings() {
+  const { t } = useTranslation();
+  return (
+    <div className="space-y-4 md:space-y-6">
+      <UiSection />
+      <ChannelsSection />
+      <CredentialSection />
+      <EnrollTokensSection />
+      <AiSection />
+      <CaSection />
+      <p className="text-xs text-ink-400">{t("settings.caWarn")}</p>
+    </div>
+  );
+}
+
+function CaSection() {
+  const { t } = useTranslation();
+  const { timezone } = usePrefs();
+  const toast = useToast();
+  const caQ = useQuery({ queryKey: ["ca"], queryFn: settingsApi.ca });
+
+  return (
+    <Card>
+      <CardHeader
+        icon={<ShieldCheck className="w-5 h-5 text-brand-600" aria-hidden="true" />}
+        title={t("settings.caTitle")}
+        description={t("settings.caSubtitle")}
+      />
+      <CardBody>
+        {caQ.isLoading ? (
+          <Skeleton className="h-24 w-full" />
+        ) : caQ.isError ? (
+          <ErrorState
+            compact
+            message={t(friendlyError(caQ.error))}
+            onRetry={() => void caQ.refetch()}
+            retrying={caQ.isFetching}
+          />
+        ) : caQ.data ? (
+          <div className="space-y-4">
+            {/* 边缘终结 TLS 时这个 CA 不参与任何事——别让人以为它是「集群身份根」 */}
+            {!caQ.data.tls_terminated_locally && (
+              <div className="flex items-start gap-2 rounded-lg bg-surface-2 dark:bg-ink-700/60 px-3 py-2">
+                <Info
+                  className="w-4 h-4 mt-0.5 shrink-0 text-ink-400"
+                  aria-hidden="true"
+                />
+                <p className="text-xs text-ink-500">{t("settings.caEdgeNote")}</p>
+              </div>
+            )}
+          <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-4 text-sm">
+            <Row label={t("settings.caSubject")} value={caQ.data.subject} />
+            <Row
+              label={t("settings.caSerial")}
+              value={caQ.data.serial}
+              mono
+            />
+            <Row
+              label={t("settings.caValid")}
+              value={`${formatTime(caQ.data.not_before_unix_nano / 1e6, timezone)} → ${formatTime(
+                caQ.data.not_after_unix_nano / 1e6,
+                timezone,
+              )}`}
+            />
+            <Row
+              label={t("settings.caNodes")}
+              value={String(caQ.data.nodes_enrolled)}
+              mono
+            />
+            <div className="sm:col-span-2 min-w-0">
+              <dt className="text-xs text-ink-400">
+                {t("settings.caFingerprint")}
+              </dt>
+              <dd className="mt-1 flex items-start gap-2">
+                <code className="flex-1 min-w-0 break-all rounded bg-surface-2 dark:bg-ink-700/60 px-2 py-1 text-xs text-ink-700 dark:text-surface-4">
+                  {caQ.data.fingerprint_sha256}
+                </code>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label={t("settings.caCopy")}
+                  onClick={() => {
+                    void copyText(caQ.data!.fingerprint_sha256).then((ok) =>
+                      toast.push(
+                        ok ? "success" : "error",
+                        t(ok ? "settings.caCopied" : "toast.copyFailed"),
+                      ),
+                    );
+                  }}
+                >
+                  <Copy className="w-4 h-4" aria-hidden="true" />
+                </Button>
+              </dd>
+            </div>
+          </dl>
+          </div>
+        ) : null}
+      </CardBody>
+    </Card>
+  );
+}
+
+/** 飞书接收 ID 类型（与后端 FEISHU_RECEIVE_ID_TYPES 同步） */
+const RECEIVE_ID_TYPES = [
+  "chat_id",
+  "open_id",
+  "user_id",
+  "union_id",
+  "email",
+] as const;
+
+/** 表单一行：标签 + 输入 + 可选说明（渠道表单按类型拼装，字段多但都不带别的行为） */
+function Field({
+  label,
+  hint,
+  ...input
+}: { label: string; hint?: string } & React.ComponentProps<typeof Input>) {
+  return (
+    <label className="block">
+      <span className="block text-xs text-ink-500 mb-1">{label}</span>
+      <Input {...input} />
+      {hint ? (
+        <span className="mt-1 block text-xs text-ink-400">{hint}</span>
+      ) : null}
+    </label>
+  );
+}
+
+function ChannelsSection() {
+  const { t } = useTranslation();
+  const qc = useQueryClient();
+  const toast = useToast();
+  const chQ = useQuery({ queryKey: ["channels"], queryFn: alertsApi.channels });
+
+  const EMPTY = {
+    name: "",
+    kind: "feishu",
+    url: "",
+    /** 通用 webhook 的 Token */
+    secret: "",
+    /** 飞书的 App Secret（与上面的 Token 分开存，免得切换类型时把凭据发错地方） */
+    app_secret: "",
+    app_id: "",
+    receive_id: "",
+    receive_id_type: "chat_id",
+    min_severity: "warning",
+  };
+  const [dialogOpen, setDialogOpen] = React.useState(false);
+  const [form, setForm] = React.useState(EMPTY);
+  /** 非空 = 正在编辑该渠道（保存走 PATCH 而不是 POST） */
+  const [editing, setEditing] = React.useState<NotifyChannel | null>(null);
+  const [confirmDelete, setConfirmDelete] = React.useState<NotifyChannel | null>(
+    null,
+  );
+  const [testing, setTesting] = React.useState(false);
+
+  const invalidate = () => void qc.invalidateQueries({ queryKey: ["channels"] });
+
+  /** 编辑时把已有渠道回填进表单：凭据一并带出（列表接口本就返回明文），
+   *  保存时原样回写，不需要用户重新输入。 */
+  const formOf = (c: NotifyChannel) => ({
+    name: c.name,
+    kind: c.kind,
+    url: c.url,
+    secret: c.kind === "feishu" ? "" : c.secret,
+    app_secret: c.kind === "feishu" ? c.secret : "",
+    app_id: c.app_id,
+    receive_id: c.receive_id,
+    receive_id_type: c.receive_id_type || "chat_id",
+    min_severity: c.min_severity || "warning",
+  });
+  const openCreate = () => {
+    setEditing(null);
+    setForm(EMPTY);
+    setDialogOpen(true);
+  };
+  const openEdit = (c: NotifyChannel) => {
+    setEditing(c);
+    setForm(formOf(c));
+    setDialogOpen(true);
+  };
+  const closeDialog = () => {
+    setDialogOpen(false);
+    setEditing(null);
+  };
+
+  const isFeishu = form.kind === "feishu";
+  const isSlack = form.kind === "slack";
+  const isBluebird = form.kind === "bluebird";
+  /** 表单 → 接口字段。后端的 `secret` 一列按类型复用：飞书 = App Secret，青鸟/通用 webhook = Token */
+  const payload = {
+    name: form.name.trim(),
+    kind: form.kind,
+    url: isFeishu ? "" : form.url.trim(),
+    secret: isFeishu ? form.app_secret.trim() : isSlack ? "" : form.secret.trim(),
+    app_id: isFeishu ? form.app_id.trim() : "",
+    receive_id: isFeishu ? form.receive_id.trim() : "",
+    receive_id_type: form.receive_id_type,
+    min_severity: form.min_severity,
+  };
+
+  const create = useMutation({
+    mutationFn: () =>
+      editing
+        ? settingsApi.updateChannel(editing.id, payload)
+        : settingsApi.createChannel(payload),
+    onSuccess: () => {
+      toast.push(
+        "success",
+        t(editing ? "settings.chUpdated" : "settings.chCreated"),
+      );
+      setForm(EMPTY);
+      closeDialog();
+      invalidate();
+    },
+    onError: (e) => toast.push("error", t(friendlyError(e))),
+  });
+
+  /** 拿当前填的参数真发一条——保存之前就能知道地址对不对 */
+  const test = async () => {
+    setTesting(true);
+    try {
+      const r = await settingsApi.testChannel(payload);
+      if (r.ok) toast.push("success", t("settings.chTestOk"));
+      else toast.push("error", t("settings.chTestFail", { detail: r.detail }));
+    } catch (e) {
+      toast.push("error", t(friendlyError(e)));
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const toggle = useMutation({
+    mutationFn: ({ id, enabled }: { id: number; enabled: boolean }) =>
+      settingsApi.toggleChannel(id, enabled),
+    onSuccess: invalidate,
+    onError: (e) => toast.push("error", t(friendlyError(e))),
+  });
+  const remove = useMutation({
+    mutationFn: (id: number) => settingsApi.deleteChannel(id),
+    onSuccess: () => {
+      toast.push("success", t("settings.chDeleted"));
+      setConfirmDelete(null);
+      invalidate();
+    },
+    onError: (e) => toast.push("error", t(friendlyError(e))),
+  });
+
+  const channels = chQ.data ?? [];
+  // 每种渠道要填的东西不同：飞书用应用凭据 + 接收 ID，青鸟要地址 + Token，Slack / 通用 webhook 只要有地址
+  const canSubmit =
+    !!form.name.trim() &&
+    (isFeishu
+      ? !!form.app_id.trim() && !!form.app_secret.trim() && !!form.receive_id.trim()
+      : isBluebird
+        ? !!form.url.trim() && !!form.secret.trim()
+        : !!form.url.trim());
+
+  /** 列表「目标」列：飞书没有地址，显示它发往哪里 */
+  const targetOf = (c: NotifyChannel) =>
+    c.kind === "feishu"
+      ? `${t(`settings.chRid_${c.receive_id_type}`)} · ${c.receive_id}`
+      : c.url;
+
+  /** 凭据状态：Slack 的地址本身即凭据，没什么可标的 */
+  const secretHint = (c: NotifyChannel) =>
+    c.kind === "feishu"
+      ? // 老的自定义机器人渠道只有 url + 加签 secret，别把那个 secret 说成 App Secret
+        t(
+          c.app_id && c.secret
+            ? "settings.chAppSecretSet"
+            : "settings.chAppSecretUnset",
+        )
+      : c.kind === "webhook" || c.kind === "bluebird"
+        ? t(c.secret ? "settings.chTokenSet" : "settings.chTokenUnset")
+        : "";
+
+  return (
+    <>
+      <TableShell>
+        <TableToolbar>
+          <div>
+            <h2 className="text-base font-semibold text-ink-900 dark:text-surface-0">
+              {t("settings.chTitle")}
+            </h2>
+            <p className="text-sm text-ink-500 mt-0.5">
+              {t("settings.chSubtitle")}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <DotBadge tone="neutral">{channels.length}</DotBadge>
+            <Button size="sm" onClick={openCreate}>
+              <Plus className="w-4 h-4" aria-hidden="true" />
+              {t("settings.chAdd")}
+            </Button>
+          </div>
+        </TableToolbar>
+
+        {chQ.isError ? (
+          <ErrorState
+            message={t(friendlyError(chQ.error))}
+            onRetry={() => void chQ.refetch()}
+            retrying={chQ.isFetching}
+          />
+        ) : chQ.isLoading ? (
+          <Skeleton className="h-20 w-full" />
+        ) : channels.length === 0 ? (
+          <EmptyState
+            title={t("settings.chEmpty")}
+            description={t("settings.chEmptyHint")}
+          />
+        ) : (
+          <Table>
+            <THead>
+              <tr>
+                <Th>{t("settings.chName")}</Th>
+                <Th className="hidden md:table-cell">{t("settings.chKind")}</Th>
+                <Th className="hidden lg:table-cell">{t("settings.chTarget")}</Th>
+                <Th>{t("settings.chMinSeverity")}</Th>
+                <Th align="right">{t("alerts.colActions")}</Th>
+              </tr>
+            </THead>
+            <TBody>
+              {channels.map((c) => (
+                <Tr key={c.id}>
+                  <Td>
+                    <div className="text-sm font-medium text-ink-900 dark:text-surface-0">
+                      {c.name}
+                    </div>
+                    {secretHint(c) ? (
+                      <div className="text-xs text-ink-400">{secretHint(c)}</div>
+                    ) : null}
+                  </Td>
+                  <Td className="hidden md:table-cell">
+                    <span className="text-xs text-ink-500">
+                      {t(`settings.chKind_${c.kind}`)}
+                    </span>
+                  </Td>
+                  <Td className="hidden lg:table-cell">
+                    <span className="text-xs text-ink-400 truncate max-w-[240px] block">
+                      {targetOf(c)}
+                    </span>
+                  </Td>
+                  <Td>
+                    <DotBadge
+                      tone={c.min_severity === "critical" ? "danger" : "warn"}
+                    >
+                      {t(
+                        c.min_severity === "critical"
+                          ? "alerts.critical"
+                          : "alerts.warning",
+                      )}
+                    </DotBadge>
+                  </Td>
+                  <Td align="right">
+                    <div className="flex items-center justify-end gap-2">
+                      <Switch
+                        checked={c.enabled}
+                        onCheckedChange={(next) =>
+                          toggle.mutate({ id: c.id, enabled: next })
+                        }
+                        disabled={toggle.isPending}
+                        aria-label={`${c.name} — ${t(
+                          c.enabled ? "alerts.disable" : "alerts.enable",
+                        )}`}
+                      />
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        aria-label={t("settings.chEdit")}
+                        onClick={() => openEdit(c)}
+                      >
+                        <Pencil className="w-4 h-4" aria-hidden="true" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        aria-label={t("alerts.delete")}
+                        onClick={() => setConfirmDelete(c)}
+                        className="text-rose-600 dark:text-rose-400"
+                      >
+                        <Trash2 className="w-4 h-4" aria-hidden="true"
+                        />
+                      </Button>
+                    </div>
+                  </Td>
+                </Tr>
+              ))}
+            </TBody>
+          </Table>
+        )}
+      </TableShell>
+
+      <Dialog
+        open={dialogOpen}
+        onClose={closeDialog}
+        title={editing ? t("settings.chEdit") : t("settings.chAdd")}
+        description={
+          editing ? t("settings.chEditHint") : t("settings.chHttpsNote")
+        }
+        footer={
+          <>
+            <Button
+              variant="secondary"
+              loading={testing}
+              disabled={!canSubmit}
+              onClick={() => void test()}
+            >
+              {t("settings.chTest")}
+            </Button>
+            <Button variant="secondary" onClick={closeDialog}>
+              {t("alerts.cancel")}
+            </Button>
+            <Button
+              loading={create.isPending}
+              disabled={!canSubmit}
+              onClick={() => create.mutate()}
+            >
+              {editing ? t("settings.chSave") : t("settings.chAdd")}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-4">
+            <label className="block">
+              <span className="block text-xs text-ink-500 mb-1">
+                {t("settings.chKind")}
+              </span>
+              <Select
+                value={form.kind}
+                onChange={(e) => setForm({ ...form, kind: e.target.value })}
+                aria-label={t("settings.chKind")}
+                disabled={!!editing}
+              >
+                <option value="feishu">{t("settings.chKind_feishu")}</option>
+                <option value="slack">{t("settings.chKind_slack")}</option>
+                <option value="bluebird">{t("settings.chKind_bluebird")}</option>
+                <option value="webhook">{t("settings.chKind_webhook")}</option>
+              </Select>
+            </label>
+            <label className="block">
+              <span className="block text-xs text-ink-500 mb-1">
+                {t("settings.chMinSeverity")}
+              </span>
+              <Select
+                value={form.min_severity}
+                onChange={(e) =>
+                  setForm({ ...form, min_severity: e.target.value })
+                }
+                aria-label={t("settings.chMinSeverity")}
+              >
+                <option value="warning">{t("alerts.warning")}</option>
+                <option value="critical">{t("alerts.critical")}</option>
+              </Select>
+            </label>
+          </div>
+          <Field
+            label={t("settings.chName")}
+            value={form.name}
+            onChange={(e) => setForm({ ...form, name: e.target.value })}
+            placeholder="ops-feishu"
+          />
+          {/* 飞书：应用凭据 + 接收对象（对照 bluebird 的分发渠道） */}
+          {isFeishu ? (
+            <>
+              <Field
+                label={t("settings.chAppId")}
+                value={form.app_id}
+                onChange={(e) => setForm({ ...form, app_id: e.target.value })}
+                placeholder="cli_xxxxxxxxxxxxxxxx"
+                autoComplete="off"
+              />
+              <Field
+                label={t("settings.chAppSecret")}
+                value={form.app_secret}
+                onChange={(e) => setForm({ ...form, app_secret: e.target.value })}
+                type="password"
+                autoComplete="off"
+              />
+              <div className="grid grid-cols-2 gap-4">
+                <label className="block">
+                  <span className="block text-xs text-ink-500 mb-1">
+                    {t("settings.chReceiveIdType")}
+                  </span>
+                  <Select
+                    value={form.receive_id_type}
+                    onChange={(e) =>
+                      setForm({ ...form, receive_id_type: e.target.value })
+                    }
+                    aria-label={t("settings.chReceiveIdType")}
+                  >
+                    {RECEIVE_ID_TYPES.map((v) => (
+                      <option key={v} value={v}>
+                        {t(`settings.chRid_${v}`)}
+                      </option>
+                    ))}
+                  </Select>
+                </label>
+                <Field
+                  label={t("settings.chReceiveId")}
+                  value={form.receive_id}
+                  onChange={(e) => setForm({ ...form, receive_id: e.target.value })}
+                  placeholder={t("settings.chReceiveIdPlaceholder")}
+                />
+              </div>
+              <p className="text-xs text-ink-400">{t("settings.chFeishuNote")}</p>
+            </>
+          ) : (
+            <>
+              <Field
+                label={
+                  isSlack
+                    ? t("settings.chSlackUrl")
+                    : isBluebird
+                      ? t("settings.chBluebirdUrl")
+                      : t("settings.chWebhookUrl")
+                }
+                value={form.url}
+                onChange={(e) => setForm({ ...form, url: e.target.value })}
+                placeholder={
+                  isSlack
+                    ? t("settings.chSlackUrlPlaceholder")
+                    : isBluebird
+                      ? t("settings.chBluebirdUrlPlaceholder")
+                      : t("settings.chWebhookUrlPlaceholder")
+                }
+              />
+              {isSlack ? null : (
+                <Field
+                  label={
+                    isBluebird
+                      ? t("settings.chBluebirdToken")
+                      : t("settings.chToken")
+                  }
+                  value={form.secret}
+                  onChange={(e) => setForm({ ...form, secret: e.target.value })}
+                  placeholder={
+                    isBluebird
+                      ? t("settings.chBluebirdTokenPlaceholder")
+                      : t("settings.chTokenPlaceholder")
+                  }
+                  hint={
+                    isBluebird
+                      ? t("settings.chBluebirdTokenNote")
+                      : t("settings.chTokenNote")
+                  }
+                />
+              )}
+              <p className="text-xs text-ink-400">
+                {isSlack
+                  ? t("settings.chSlackNote")
+                  : isBluebird
+                    ? t("settings.chBluebirdNote")
+                    : t("settings.chWebhookNote")}
+              </p>
+            </>
+          )}
+        </div>
+      </Dialog>
+
+      <ConfirmDialog
+        open={!!confirmDelete}
+        title={t("settings.chDeleteConfirmTitle")}
+        message={t("settings.chDeleteConfirmMessage")}
+        confirmLabel={t("alerts.delete")}
+        cancelLabel={t("alerts.cancel")}
+        danger
+        loading={remove.isPending}
+        onCancel={() => setConfirmDelete(null)}
+        onConfirm={() => confirmDelete && remove.mutate(confirmDelete.id)}
+      />
+    </>
+  );
+}
+
+/**
+ * 界面偏好。时区原先在右下角悬浮按钮组里，按本人要求从那组撤掉；
+ * 功能不能跟着消失——时间显示到处都要用它，所以落到设置页。
+ */
+/**
+ * 新凭据强度评估：长度三档（8 / 12 / 16）+ 字符种类。
+ * 只做展示——真正拦住的是后端的「至少 16 个字符」；这里给的是
+ * 「长度够不够、够不够杂」的直观反馈。纯一种字符（如 16 个小写字母）
+ * 会被降一档，避免长度堆出来一个「强」。
+ */
+function passwordStrength(
+  pw: string,
+): { score: number; labelKey: string; bar: string } | null {
+  if (!pw) return null;
+  let score = 0;
+  if (pw.length >= 8) score += 1;
+  if (pw.length >= 12) score += 1;
+  if (pw.length >= 16) score += 1;
+  const classes = [/[a-z]/, /[A-Z]/, /\d/, /[^a-zA-Z0-9]/].filter((re) =>
+    re.test(pw),
+  ).length;
+  if (classes >= 3) score += 1;
+  else if (classes <= 1) score -= 1;
+
+  const level = Math.max(1, Math.min(4, score));
+  const labelKey =
+    level === 1
+      ? "settings.pwStrWeak"
+      : level === 2
+        ? "settings.pwStrFair"
+        : level === 3
+          ? "settings.pwStrStrong"
+          : "settings.pwStrVeryStrong";
+  const bar =
+    level === 1
+      ? "bg-rose-500"
+      : level === 2
+        ? "bg-amber-500"
+        : level === 3
+          ? "bg-emerald-500"
+          : "bg-brand-600";
+  return { score: level, labelKey, bar };
+}
+
+/**
+ * 修改控制台凭据。
+ *
+ * 控制台只有这一把钥匙（节点走签名、不认它），所以要求：带当前凭据 +
+ * 新凭据输两遍。改完立即生效，并把本地存的那份一起换掉——否则下一次请求就 401。
+ */
+function CredentialSection() {
+  const { t } = useTranslation();
+  const toast = useToast();
+  const [open, setOpen] = React.useState(false);
+  const [form, setForm] = React.useState({
+    current: "",
+    next: "",
+    confirm: "",
+  });
+
+  const mismatch = form.confirm.length > 0 && form.next !== form.confirm;
+  const tooShort = form.next.length > 0 && form.next.length < 16;
+  const strength = passwordStrength(form.next);
+  const canSubmit =
+    !!form.current && form.next.length >= 16 && form.next === form.confirm;
+
+  const save = useMutation({
+    mutationFn: () => settingsApi.changeToken(form.current, form.next),
+    onSuccess: () => {
+      setToken(form.next);
+      toast.push("success", t("settings.pwChanged"));
+      setForm({ current: "", next: "", confirm: "" });
+      setOpen(false);
+    },
+    onError: (e) => toast.push("error", t(friendlyError(e))),
+  });
+
+  return (
+    <Card>
+      <CardHeader
+        icon={<KeyRound className="w-5 h-5 text-brand-600" aria-hidden="true" />}
+        title={t("settings.pwTitle")}
+        description={t("settings.pwSubtitle")}
+        action={
+          <Button size="sm" onClick={() => setOpen(true)}>
+            {t("settings.pwChange")}
+          </Button>
+        }
+      />
+      <CardBody compact>
+        <p className="text-xs text-ink-400">{t("settings.pwNote")}</p>
+      </CardBody>
+
+      <Dialog
+        open={open}
+        onClose={() => setOpen(false)}
+        size="md"
+        title={t("settings.pwChange")}
+        description={t("settings.pwNote")}
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setOpen(false)}>
+              {t("alerts.cancel")}
+            </Button>
+            <Button
+              loading={save.isPending}
+              disabled={!canSubmit}
+              onClick={() => save.mutate()}
+            >
+              {t("settings.pwSave")}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <label className="block">
+            <span className="block text-xs text-ink-500 mb-1">
+              {t("settings.pwCurrent")}
+            </span>
+            <Input
+              type="password"
+              value={form.current}
+              onChange={(e) => setForm({ ...form, current: e.target.value })}
+            />
+          </label>
+          <label className="block">
+            <span className="block text-xs text-ink-500 mb-1">
+              {t("settings.pwNew")}
+            </span>
+            <Input
+              type="password"
+              value={form.next}
+              onChange={(e) => setForm({ ...form, next: e.target.value })}
+            />
+            {strength ? (
+              <div className="mt-2 space-y-1">
+                <div className="flex gap-1" aria-hidden="true">
+                  {[0, 1, 2, 3].map((i) => (
+                    <span
+                      key={i}
+                      className={cn(
+                        "h-1 flex-1 rounded-full",
+                        i < strength.score
+                          ? strength.bar
+                          : "bg-ink-100 dark:bg-ink-700",
+                      )}
+                    />
+                  ))}
+                </div>
+                <span className="block text-xs text-ink-500">
+                  {t("settings.pwStrength")}：{t(strength.labelKey)}
+                </span>
+              </div>
+            ) : null}
+            {(tooShort || mismatch) && (
+              <span className="mt-1 block text-xs text-rose-600 dark:text-rose-400">
+                {tooShort ? t("settings.pwTooShort") : t("settings.pwMismatch")}
+              </span>
+            )}
+          </label>
+          <label className="block">
+            <span className="block text-xs text-ink-500 mb-1">
+              {t("settings.pwConfirm")}
+            </span>
+            <Input
+              type="password"
+              value={form.confirm}
+              onChange={(e) => setForm({ ...form, confirm: e.target.value })}
+            />
+          </label>
+        </div>
+      </Dialog>
+    </Card>
+  );
+}
+
+/**
+ * AI 接入 + AI 令牌（合并为同一段：「接入说明」给 agent 看，「令牌列表」给管理员管）。
+ */
+function AiSection() {
+  const { t } = useTranslation();
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [revealed, setRevealed] = React.useState(false);
+  const [dialogOpen, setDialogOpen] = React.useState(false);
+  const [pendingRevoke, setPendingRevoke] = React.useState<AiTokenMeta | null>(
+    null,
+  );
+
+  const token = getToken() ?? "";
+  const base = window.location.origin;
+  const masked = token ? `${token.slice(0, 8)}…${token.slice(-4)}` : "—";
+
+  const copy = (text: string, okKey: string) =>
+    void copyText(text).then((ok) =>
+      toast.push(ok ? "success" : "error", t(ok ? okKey : "toast.copyFailed")),
+    );
+
+  const tokensQ = useQuery({
+    queryKey: ["ai-tokens"],
+    queryFn: aiTokens.list,
+  });
+
+  const invalidate = () =>
+    void qc.invalidateQueries({ queryKey: ["ai-tokens"] });
+
+  const revoke = useMutation({
+    mutationFn: (id: string) => aiTokens.revoke(id),
+    onSuccess: () => {
+      toast.push("success", t("settings.aiTokenRevoked"));
+      setPendingRevoke(null);
+      invalidate();
+    },
+    onError: (e) => toast.push("error", t(friendlyError(e))),
+  });
+
+  const readOnly = [
+    "GET /v1/todo",
+    "GET /v1/nodes",
+    "GET /v1/nodes/<id>/series?metric=&from=&to=&limit=",
+    "GET /v1/nodes/<id>/containers",
+    "GET /v1/containers",
+    "GET /v1/certificates",
+    "GET /v1/services",
+  ];
+  const actions = [
+    "container_start / container_stop / container_restart / container_remove",
+    "kill_process(pid, signal) / fetch_logs",
+    "restart_host / shutdown_host",
+    "refresh_inventory / scan_certs",
+  ];
+
+  const tokens = tokensQ.data?.tokens ?? [];
+
+  return (
+    <>
+      <Card>
+        <CardHeader
+          icon={<Bot className="w-5 h-5 text-brand-600" aria-hidden="true" />}
+          title={t("settings.aiTitle")}
+          description={t("settings.aiSubtitle")}
+          action={
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() =>
+                copy(
+                  t("settings.aiBrief", { base, token: token || "<admin token>" }),
+                  "settings.aiBriefCopied",
+                )
+              }
+            >
+              <Copy className="w-4 h-4" aria-hidden="true" />
+              {t("settings.aiCopyBrief")}
+            </Button>
+          }
+        />
+        <CardBody compact className="space-y-4">
+          <dl className="grid gap-4 sm:grid-cols-2">
+            <div className="min-w-0">
+              <dt className="text-xs text-ink-400">{t("settings.aiBase")}</dt>
+              <dd className="mt-1 flex items-center gap-2">
+                <code className="text-sm text-ink-900 dark:text-surface-0 truncate">
+                  {base}
+                </code>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label={t("settings.aiCopyBase")}
+                  onClick={() => copy(base, "settings.aiBaseCopied")}
+                >
+                  <Copy className="w-4 h-4" aria-hidden="true" />
+                </Button>
+              </dd>
+            </div>
+            <div className="min-w-0">
+              <dt className="text-xs text-ink-400">{t("settings.aiToken")}</dt>
+              <dd className="mt-1 flex items-center gap-2">
+                <code className="text-sm tabular-nums text-ink-900 dark:text-surface-0">
+                  {revealed ? token : masked}
+                </code>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label={t(revealed ? "settings.aiHide" : "settings.aiReveal")}
+                  onClick={() => setRevealed((v) => !v)}
+                >
+                  {revealed ? (
+                    <EyeOff className="w-4 h-4" aria-hidden="true" />
+                  ) : (
+                    <Eye className="w-4 h-4" aria-hidden="true" />
+                  )}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label={t("settings.aiCopyToken")}
+                  onClick={() => copy(token, "settings.aiTokenCopied")}
+                >
+                  <Copy className="w-4 h-4" aria-hidden="true" />
+                </Button>
+              </dd>
+            </div>
+          </dl>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <h4 className="text-xs text-ink-400">{t("settings.aiRead")}</h4>
+              <ul className="mt-1 space-y-0.5">
+                {readOnly.map((r) => (
+                  <li
+                    key={r}
+                    className="text-xs font-mono text-ink-600 dark:text-surface-4 break-all"
+                  >
+                    {r}
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div>
+              <h4 className="text-xs text-ink-400">{t("settings.aiAct")}</h4>
+              <ul className="mt-1 space-y-0.5">
+                {actions.map((a) => (
+                  <li
+                    key={a}
+                    className="text-xs font-mono text-ink-600 dark:text-surface-4 break-all"
+                  >
+                    {a}
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-2 text-xs text-ink-400 break-all">
+                POST /v1/exec {"{"}"node_id","action","params"{"}"}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-start gap-2">
+            <ShieldCheck
+              className="w-4 h-4 mt-0.5 shrink-0 text-ink-400"
+              aria-hidden="true"
+            />
+            <p className="text-xs text-ink-400">{t("settings.aiBoundary")}</p>
+          </div>
+        </CardBody>
+      </Card>
+
+      <TableShell>
+        <TableToolbar>
+          <div>
+            <h2 className="text-base font-semibold text-ink-900 dark:text-surface-0">
+              {t("settings.aiTokensTitle")}
+            </h2>
+            <p className="text-sm text-ink-500 mt-0.5">
+              {t("settings.aiTokensSubtitle")}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <DotBadge tone="neutral">{tokens.length}</DotBadge>
+            <Button size="sm" onClick={() => setDialogOpen(true)}>
+              <Plus className="w-4 h-4" aria-hidden="true" />
+              {t("settings.aiTokensCreate")}
+            </Button>
+          </div>
+        </TableToolbar>
+
+        {tokensQ.isError ? (
+          <ErrorState
+            message={t(friendlyError(tokensQ.error))}
+            onRetry={() => void tokensQ.refetch()}
+            retrying={tokensQ.isFetching}
+          />
+        ) : tokensQ.isLoading ? (
+          <Skeleton className="h-20 w-full" />
+        ) : tokens.length === 0 ? (
+          <EmptyState
+            title={t("settings.aiTokensEmpty")}
+            description={t("settings.aiTokensEmptyHint")}
+          />
+        ) : (
+          <Table>
+            <THead>
+              <tr>
+                <Th>{t("settings.aiTokenColName")}</Th>
+                <Th>{t("settings.aiTokenColCreated")}</Th>
+                <Th>{t("settings.aiTokenColLastUsed")}</Th>
+                <Th align="right">{t("alerts.colActions")}</Th>
+              </tr>
+            </THead>
+            <TBody>
+              {tokens.map((tok) => (
+                <Tr key={tok.id}>
+                  <Td>
+                    <div className="text-sm font-medium text-ink-900 dark:text-surface-0">
+                      {tok.name}
+                    </div>
+                    <div className="text-xs tabular-nums text-ink-400">
+                      {tok.id}
+                    </div>
+                  </Td>
+                  <Td>
+                    <AiTokenTime tsUnixNano={tok.created_at_unix_nano} />
+                  </Td>
+                  <Td>
+                    {tok.last_used_at_unix_nano == null ? (
+                      <span className="text-sm text-ink-400">
+                        {t("time.never")}
+                      </span>
+                    ) : (
+                      <AiTokenTime tsUnixNano={tok.last_used_at_unix_nano} />
+                    )}
+                  </Td>
+                  <Td align="right">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      aria-label={t("alerts.delete")}
+                      onClick={() => setPendingRevoke(tok)}
+                      className="text-rose-600 dark:text-rose-400"
+                      disabled={tok.revoked_at_unix_nano != null}
+                    >
+                      <Trash2 className="w-4 h-4" aria-hidden="true"
+                      />
+                    </Button>
+                  </Td>
+                </Tr>
+              ))}
+            </TBody>
+          </Table>
+        )}
+      </TableShell>
+
+      <AiTokenDialog
+        open={dialogOpen}
+        onClose={() => setDialogOpen(false)}
+      />
+
+      <ConfirmDialog
+        open={!!pendingRevoke}
+        title={t("settings.aiTokenRevokeTitle")}
+        message={t("settings.aiTokenRevokeMessage")}
+        confirmLabel={t("settings.aiTokenRevoke")}
+        cancelLabel={t("alerts.cancel")}
+        danger
+        loading={revoke.isPending}
+        onCancel={() => setPendingRevoke(null)}
+        onConfirm={() => pendingRevoke && revoke.mutate(pendingRevoke.id)}
+      />
+    </>
+  );
+}
+
+/**
+ * 入网令牌（enroll-tokens）—— 给目标机器的一次性 `curl | bash` 命令。
+ *
+ * 列出当前还没过期的入网令牌元信息（**不**含明文 token 字符串）；
+ * 长期有效的来自 `ZHIWEI_BOOTSTRAP_TOKEN` 环境变量，单独标 `permanent`。
+ */
+function EnrollTokensSection() {
+  const { t } = useTranslation();
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [dialogOpen, setDialogOpen] = React.useState(false);
+  const [pendingRevoke, setPendingRevoke] = React.useState<EnrollTokenMeta | null>(
+    null,
+  );
+
+  const q = useQuery({
+    queryKey: ["enroll-tokens"],
+    queryFn: enrollTokens.list,
+    // 入网操作很罕见，挂着就行，不主动重试
+    staleTime: 30_000,
+  });
+
+  const invalidate = () =>
+    void qc.invalidateQueries({ queryKey: ["enroll-tokens"] });
+
+  const revoke = useMutation({
+    mutationFn: (id: string) => enrollTokens.revoke(id),
+    onSuccess: () => {
+      toast.push("success", t("settings.enrollTokenRevoked"));
+      setPendingRevoke(null);
+      invalidate();
+    },
+    onError: (e) => toast.push("error", t(friendlyError(e))),
+  });
+
+  const tokens = q.data?.tokens ?? [];
+
+  return (
+    <>
+      <TableShell>
+        <TableToolbar>
+          <div>
+            <h2 className="text-base font-semibold text-ink-900 dark:text-surface-0">
+              {t("settings.enrollTokensTitle")}
+            </h2>
+            <p className="text-sm text-ink-500 mt-0.5">
+              {t("settings.enrollTokensSubtitle")}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <DotBadge tone="neutral">{tokens.length}</DotBadge>
+            <Button size="sm" onClick={() => setDialogOpen(true)}>
+              <Plus className="w-4 h-4" aria-hidden="true" />
+              {t("settings.enrollTokensCreate")}
+            </Button>
+          </div>
+        </TableToolbar>
+
+        {q.isError ? (
+          <ErrorState
+            message={t(friendlyError(q.error))}
+            onRetry={() => void q.refetch()}
+            retrying={q.isFetching}
+          />
+        ) : q.isLoading ? (
+          <Skeleton className="h-20 w-full" />
+        ) : tokens.length === 0 ? (
+          <EmptyState
+            title={t("settings.enrollTokensEmpty")}
+            description={t("settings.enrollTokensEmptyHint")}
+          />
+        ) : (
+          <Table>
+            <THead>
+              <tr>
+                <Th>{t("settings.enrollTokenColLabel")}</Th>
+                <Th>{t("settings.enrollTokenColKind")}</Th>
+                <Th>{t("settings.enrollTokenColExpires")}</Th>
+                <Th align="right">{t("alerts.colActions")}</Th>
+              </tr>
+            </THead>
+            <TBody>
+              {tokens.map((tok) => (
+                <Tr key={tok.id}>
+                  <Td>
+                    <div className="text-sm font-medium text-ink-900 dark:text-surface-0">
+                      {tok.label || (
+                        <span className="text-ink-400">—</span>
+                      )}
+                    </div>
+                    <div className="text-xs tabular-nums text-ink-400">
+                      {tok.id}
+                    </div>
+                  </Td>
+                  <Td>
+                    {tok.permanent ? (
+                      <DotBadge tone="success">
+                        {t("settings.enrollTokenPermanent")}
+                      </DotBadge>
+                    ) : (
+                      <DotBadge tone="neutral">
+                        {t("settings.enrollTokenEphemeral")}
+                      </DotBadge>
+                    )}
+                  </Td>
+                  <Td>
+                    <EnrollTokenExpiry meta={tok} />
+                  </Td>
+                  <Td align="right">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      aria-label={t("alerts.delete")}
+                      onClick={() => setPendingRevoke(tok)}
+                      className="text-rose-600 dark:text-rose-400"
+                    >
+                      <Trash2 className="w-4 h-4" aria-hidden="true"
+                      />
+                    </Button>
+                  </Td>
+                </Tr>
+              ))}
+            </TBody>
+          </Table>
+        )}
+      </TableShell>
+
+      <EnrollTokenDialog
+        open={dialogOpen}
+        onClose={() => setDialogOpen(false)}
+      />
+
+      <ConfirmDialog
+        open={!!pendingRevoke}
+        title={t("settings.enrollTokenRevokeTitle")}
+        message={t("settings.enrollTokenRevokeMessage")}
+        confirmLabel={t("settings.enrollTokenRevoke")}
+        cancelLabel={t("alerts.cancel")}
+        danger
+        loading={revoke.isPending}
+        onCancel={() => setPendingRevoke(null)}
+        onConfirm={() => pendingRevoke && revoke.mutate(pendingRevoke.id)}
+      />
+    </>
+  );
+}
+
+/** 入网令牌的过期时间展示：「长期」或「N 小时 / N 天后过期」 */
+function EnrollTokenExpiry({ meta }: { meta: EnrollTokenMeta }) {
+  const { t } = useTranslation();
+  if (meta.permanent) {
+    return (
+      <span className="text-sm text-emerald-600 dark:text-emerald-400">
+        {t("settings.enrollTokenPermanentExpiry")}
+      </span>
+    );
+  }
+  const remain = meta.expires_at_unix - Math.floor(Date.now() / 1000);
+  let label: string;
+  if (remain <= 0) label = t("time.secondsAgo", { n: 0 });
+  else if (remain < 3600) {
+    const m = Math.max(1, Math.ceil(remain / 60));
+    label = t("time.minutesAgo", { n: m });
+  } else if (remain < 86400) {
+    const h = Math.round(remain / 3600);
+    label = t("time.hoursAgo", { n: h });
+  } else {
+    const d = Math.round(remain / 86400);
+    label = t("time.daysAgo", { n: d });
+  }
+  return (
+    <span className="text-sm tabular-nums text-ink-700 dark:text-surface-4">
+      {t("settings.enrollTokenExpiresIn", { at: label })}
+    </span>
+  );
+}
+
+/** 纳秒时间戳统一转 ms 后用 formatTime 显示。 */
+function AiTokenTime({ tsUnixNano }: { tsUnixNano: number }) {
+  const { timezone } = usePrefs();
+  const ms = Math.floor(tsUnixNano / 1e6);
+  return (
+    <span className="text-sm tabular-nums text-ink-700 dark:text-surface-4">
+      {formatTime(ms, timezone)}
+    </span>
+  );
+}
+
+function UiSection() {
+  const { t } = useTranslation();
+  const prefs = usePrefs();
+  const toast = useToast();
+  return (
+    <Card>
+      <CardHeader
+        icon={<Clock className="w-5 h-5 text-brand-600" aria-hidden="true" />}
+        title={t("settings.uiTitle")}
+        description={t("settings.uiSubtitle")}
+      />
+      <CardBody compact className="space-y-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label
+              className="block text-xs text-ink-500 mb-1"
+              htmlFor="settings-timezone"
+            >
+              {t("settings.tzLabel")}
+            </label>
+            <Select
+              id="settings-timezone"
+              value={prefs.timezone}
+              onChange={(e) => {
+                prefs.setTimezone(e.target.value);
+                toast.push("success", t("settings.tzSaved"));
+              }}
+            >
+              {TIMEZONES.map((z) => (
+                <option key={z.tz} value={z.tz}>
+                  {t(`tz.${z.key}`)}
+                </option>
+              ))}
+            </Select>
+          </div>
+          <div>
+            <label
+              className="block text-xs text-ink-500 mb-1"
+              htmlFor="settings-locale"
+            >
+              {t("settings.langLabel")}
+            </label>
+            <Select
+              id="settings-locale"
+              value={prefs.locale}
+              onChange={(e) => {
+                const next = e.target.value as Locale;
+                prefs.setLocale(next);
+                toast.push("success", t("settings.langSaved"));
+              }}
+            >
+              <option value="zh-CN">{t("settings.lang_zh-CN")}</option>
+              <option value="en-US">{t("settings.lang_en-US")}</option>
+            </Select>
+          </div>
+        </div>
+        <p className="text-xs text-ink-400">{t("settings.uiNote")}</p>
+      </CardBody>
+    </Card>
+  );
+}
+
+function Row({
+  label,
+  value,
+  mono,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+}) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-xs text-ink-400">{label}</dt>
+      <dd
+        className={cn(
+          "mt-1 text-sm text-ink-900 dark:text-surface-0 truncate",
+          mono && "tabular-nums",
+        )}
+      >
+        {value}
+      </dd>
+    </div>
+  );
+}

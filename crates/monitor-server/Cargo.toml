@@ -1,0 +1,57 @@
+[package]
+name = "zhiwei-monitor-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ZhiWei monitor-server: data plane (telemetry ingest + UI API)"
+
+[[bin]]
+name = "zhiwei-monitor"
+path = "src/main.rs"
+
+[dependencies]
+zhiwei-common = { path = "../common" }
+zhiwei-proto = { path = "../proto" }
+zhiwei-storage = { path = "../storage" }
+
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+reqwest = { workspace = true }
+tower-http = { workspace = true }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
+http-body-util = "0.1"
+
+prost = { workspace = true }
+bytes = { workspace = true }
+
+chrono = { workspace = true }
+uuid = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+sqlx = { workspace = true }
+
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+webpki-roots = "0.26"
+rcgen = { workspace = true }
+x509-parser = { workspace = true }
+base64 = { workspace = true }
+ring = "0.17"
+time = { workspace = true }
+parking_lot = { workspace = true }
+toml = { workspace = true }
+
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+clap = { workspace = true }

@@ -1,0 +1,80 @@
+name: Feature Request
+description: Suggest an idea for this project
+title: "[Feature] "
+labels: ["enhancement"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Feature Request
+
+        Thanks for your feature request! Before submitting, please read our
+        [positioning document](./docs/POSITIONING.md) to understand our goals
+        and boundaries.
+
+        **Key question**: Does this feature help **one person manage N machines**,
+        or does it enable **team collaboration**? Only the former fits this project.
+
+  - type: checkboxes
+    id: alignment
+    attributes:
+      label: Alignment Check
+      options:
+        - label: I have read the [positioning document](./docs/POSITIONING.md)
+          required: true
+        - label: This feature is for a single operator managing multiple machines
+          required: true
+        - label: This is not a multi-user, RBAC, or team collaboration feature
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or Pain Point
+      description: Describe the problem you're trying to solve
+      placeholder: |
+        As a [type of user], I want [some goal] so that [some benefit].
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: Describe the solution you'd like
+      placeholder: |
+        A clear description of what you want to happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Any alternative solutions you've considered?
+      placeholder: |
+        I considered using [alternative], but [reason for not using it].
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context
+      description: Any other context, mockups, or examples?
+      placeholder: |
+        Add any other context about the feature request here.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - Nice to have
+        - Important
+        - Critical (blocks my workflow)
+      validations:
+        required: false

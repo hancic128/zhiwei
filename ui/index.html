@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>知微 · 控制台</title>
+    <meta name="description" content="见微知著，守正待时 —— 知微多主机可观测平台" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <!--
+      首帧应用主题色与明暗，避免刷新闪烁（规范 03：偏好持久化 + 首帧恢复）。
+      这段脚本必须先于任何 CSS / JS 执行。
+    -->
+    <script>
+      (function () {
+        try {
+          var theme = localStorage.getItem("theme") || "zhiwei";
+          var scheme = localStorage.getItem("colorScheme");
+          if (scheme !== "light" && scheme !== "dark") {
+            scheme = window.matchMedia &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "light";
+          }
+          var locale = localStorage.getItem("locale");
+          var root = document.documentElement;
+          root.setAttribute("data-theme", theme);
+          if (scheme === "dark") root.classList.add("dark");
+          if (locale) root.setAttribute("lang", locale);
+        } catch (e) {
+          /* localStorage 不可用时用默认值 */
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

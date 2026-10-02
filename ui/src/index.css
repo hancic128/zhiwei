@@ -1,0 +1,291 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ────────────────────────────────────────────────────────────────────
+   令牌定义 —— 严格遵循 Trilium「前端约束规范」02 / 03。
+   brand 色阶随 [data-theme] 切换；surface / ink 固定不随主题变。
+   ──────────────────────────────────────────────────────────────────── */
+@layer base {
+  :root {
+    /* 默认主题：zhiwei（朱砂 #C73225，见 docs/NAMING.md 视觉基线） */
+    --brand-50: #fdf2f1;
+    --brand-100: #fbe1df;
+    --brand-500: #df473a;
+    --brand-600: #c73225;
+    --brand-700: #a42419;
+    --brand-900: #53130e;
+  }
+
+  [data-theme="indigo"] {
+    --brand-50: #eef2ff;
+    --brand-100: #e0e7ff;
+    --brand-500: #6366f1;
+    --brand-600: #4f46e5;
+    --brand-700: #4338ca;
+    --brand-900: #312e81;
+  }
+
+  [data-theme="emerald"] {
+    --brand-50: #ecfdf5;
+    --brand-100: #d1fae5;
+    --brand-500: #10b981;
+    --brand-600: #059669;
+    --brand-700: #047857;
+    --brand-900: #064e3b;
+  }
+
+  [data-theme="rose"] {
+    --brand-50: #fff1f2;
+    --brand-100: #ffe4e6;
+    --brand-500: #f43f5e;
+    --brand-600: #e11d48;
+    --brand-700: #be123c;
+    --brand-900: #881337;
+  }
+
+  [data-theme="amber"] {
+    --brand-50: #fffbeb;
+    --brand-100: #fef3c7;
+    --brand-500: #f59e0b;
+    --brand-600: #d97706;
+    --brand-700: #b45309;
+    --brand-900: #78350f;
+  }
+
+  [data-theme="slate"] {
+    --brand-50: #f8fafc;
+    --brand-100: #f1f5f9;
+    --brand-500: #64748b;
+    --brand-600: #475569;
+    --brand-700: #334155;
+    --brand-900: #0f172a;
+  }
+
+  * {
+    border-color: #e4e4e7; /* surface-3 */
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    margin: 0;
+    background-color: #f4f4f5; /* surface-2 */
+    color: #18181b; /* ink-900 */
+    font-family: theme("fontFamily.sans");
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  .dark body {
+    background-color: #18181b; /* ink-900 */
+    color: #ffffff; /* surface-0 */
+  }
+
+  /* 主题色切换时，所有品牌色元素统一过渡（规范 08：200ms） */
+  .brand-transition,
+  .brand-transition * {
+    transition:
+      background-color 200ms,
+      border-color 200ms,
+      color 200ms;
+  }
+
+  ::selection {
+    background: var(--brand-100);
+  }
+}
+
+@layer utilities {
+  /* 规范 08：表格横向滚动条 scrollbar-thin，滑块 surface-4 */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: #d4d4d8 transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: #d4d4d8; /* surface-4 */
+    border-radius: 8px;
+  }
+  .dark .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: #3f3f46; /* ink-700 */
+  }
+}
+
+/* ────────────────────────────────────────────────────────────────────
+   markdown-body —— 帮助页里把 react-markdown 的原始元素映射到项目令牌。
+   不引 @tailwindcss/typography，自己写一遍更短也更可控。
+   ──────────────────────────────────────────────────────────────────── */
+@layer components {
+  .markdown-body {
+    color: theme("colors.ink.900");
+    font-size: 0.875rem;
+    line-height: 1.6;
+  }
+  .dark .markdown-body {
+    color: theme("colors.surface.0");
+  }
+  .markdown-body h1,
+  .markdown-body h2,
+  .markdown-body h3,
+  .markdown-body h4,
+  .markdown-body h5,
+  .markdown-body h6 {
+    font-weight: 600;
+    color: theme("colors.ink.900");
+    scroll-margin-top: 5rem;
+    line-height: 1.3;
+  }
+  .dark .markdown-body h1,
+  .dark .markdown-body h2,
+  .dark .markdown-body h3,
+  .dark .markdown-body h4,
+  .dark .markdown-body h5,
+  .dark .markdown-body h6 {
+    color: theme("colors.surface.0");
+  }
+  .markdown-body > :first-child {
+    margin-top: 0;
+  }
+  .markdown-body > :last-child {
+    margin-bottom: 0;
+  }
+  .markdown-body h1 {
+    font-size: 1.5rem;
+    margin: 1.25rem 0 0.75rem;
+  }
+  .markdown-body h2 {
+    font-size: 1.25rem;
+    margin: 1.5rem 0 0.5rem;
+    padding-bottom: 0.25rem;
+    border-bottom: 1px solid theme("colors.surface.3");
+  }
+  .markdown-body h3 {
+    font-size: 1.05rem;
+    margin: 1.25rem 0 0.5rem;
+  }
+  .markdown-body h4 {
+    font-size: 0.95rem;
+    margin: 1rem 0 0.5rem;
+  }
+  .markdown-body p {
+    margin: 0.75rem 0;
+  }
+  .markdown-body ul,
+  .markdown-body ol {
+    margin: 0.75rem 0;
+    padding-left: 1.5rem;
+  }
+  .markdown-body ul {
+    list-style: disc;
+  }
+  .markdown-body ol {
+    list-style: decimal;
+  }
+  .markdown-body li {
+    margin: 0.25rem 0;
+  }
+  .markdown-body li > ul,
+  .markdown-body li > ol {
+    margin: 0.25rem 0;
+  }
+  .markdown-body code {
+    background-color: theme("colors.surface.2");
+    color: theme("colors.ink.700");
+    padding: 0.125rem 0.375rem;
+    border-radius: 0.25rem;
+    font-size: 0.85em;
+    font-family: theme("fontFamily.mono");
+  }
+  .dark .markdown-body code {
+    background-color: theme("colors.ink.700");
+    color: theme("colors.surface.4");
+  }
+  .markdown-body pre {
+    margin: 0.75rem 0;
+    padding: 0.75rem 0.875rem;
+    background-color: theme("colors.surface.2");
+    color: theme("colors.ink.700");
+    border-radius: 0.5rem;
+    overflow-x: auto;
+    scrollbar-width: thin;
+    font-family: theme("fontFamily.mono");
+    font-size: 0.8125rem;
+    line-height: 1.5;
+  }
+  .markdown-body pre code {
+    background-color: transparent;
+    padding: 0;
+    border-radius: 0;
+    font-size: inherit;
+    color: inherit;
+  }
+  .dark .markdown-body pre {
+    background-color: rgb(63 63 70 / 0.6);
+    color: theme("colors.surface.4");
+  }
+  .markdown-body a {
+    color: theme("colors.brand.600");
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .markdown-body a:hover {
+    color: theme("colors.brand.700");
+  }
+  .dark .markdown-body a {
+    color: theme("colors.brand.500");
+  }
+  .markdown-body blockquote {
+    margin: 0.75rem 0;
+    padding: 0.5rem 0.875rem;
+    border-left: 3px solid theme("colors.surface.3");
+    color: theme("colors.ink.500");
+  }
+  .dark .markdown-body blockquote {
+    border-left-color: theme("colors.ink.700");
+    color: theme("colors.ink.400");
+  }
+  .markdown-body hr {
+    margin: 1.5rem 0;
+    border-color: theme("colors.surface.3");
+  }
+  .dark .markdown-body hr {
+    border-color: theme("colors.ink.700");
+  }
+  .markdown-body table {
+    width: 100%;
+    margin: 0.75rem 0;
+    border-collapse: collapse;
+    font-size: 0.8125rem;
+  }
+  .markdown-body th,
+  .markdown-body td {
+    padding: 0.5rem 0.75rem;
+    border: 1px solid theme("colors.surface.3");
+    text-align: left;
+  }
+  .markdown-body th {
+    background-color: theme("colors.surface.2");
+    font-weight: 600;
+  }
+  .dark .markdown-body th,
+  .dark .markdown-body td {
+    border-color: theme("colors.ink.700");
+  }
+  .dark .markdown-body th {
+    background-color: theme("colors.ink.700");
+  }
+  .markdown-body img {
+    max-width: 100%;
+    height: auto;
+    border-radius: 0.375rem;
+  }
+}

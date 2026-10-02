@@ -1,0 +1,52 @@
+[package]
+name = "zhiwei-node-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ZhiWei node-agent: runs on every host, reports telemetry over signed HTTP"
+
+[[bin]]
+name = "zhiwei-node"
+path = "src/main.rs"
+
+[dependencies]
+zhiwei-common = { path = "../common" }
+zhiwei-proto = { path = "../proto" }
+
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
+axum = { workspace = true }
+tower = { workspace = true }
+
+prost = { workspace = true }
+bytes = { workspace = true }
+
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }
+
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+rcgen = { workspace = true }
+hostname = "0.4"
+base64 = { workspace = true }
+
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+clap = { workspace = true }
+sysinfo = "0.37"
+glob = "0.3"
+webpki-roots = "0.26"
+x509-parser = { workspace = true }

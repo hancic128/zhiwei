@@ -1,0 +1,51 @@
+# PR Labeler
+# https://github.com/actions/labeler
+
+# Labels applied based on file patterns
+
+# Rust backend changes
+crates/**:
+  - changed-files:
+      - any-glob-to-any-file: 'crates/**'
+
+# Frontend changes
+ui/**:
+  - changed-files:
+      - any-glob-to-any-file: 'ui/**'
+
+# Documentation
+docs/**:
+  - changed-files:
+      - any-glob-to-any-file: 'docs/**'
+  - all-globs-to-all-files: '*.md'
+
+# CI/CD
+.github/workflows/**:
+  - changed-files:
+      - any-glob-to-any-file: '.github/workflows/**'
+
+# Docker
+Dockerfile:
+  - changed-files:
+      - any-glob-to-any-file: 'Dockerfile'
+        - any-glob-to-any-file: '.dockerignore'
+
+# Scripts
+scripts/**:
+  - changed-files:
+      - any-glob-to-any-file: 'scripts/**'
+
+# Protocol definitions
+proto/**:
+  - changed-files:
+      - any-glob-to-any-file: 'proto/**'
+
+# Configuration
+*.toml:
+  - changed-files:
+      - any-glob-to-any-file: '*.toml'
+
+# Config directory
+config/**:
+  - changed-files:
+      - any-glob-to-any-file: 'config/**'

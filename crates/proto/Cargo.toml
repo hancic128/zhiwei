@@ -1,0 +1,16 @@
+[package]
+name = "zhiwei-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Protobuf message definitions for zhiwei"
+
+[dependencies]
+prost = { workspace = true }
+prost-types = { workspace = true }
+
+[build-dependencies]
+prost-build = "0.13"
+tonic-build = "0.12"
+protoc-bin-vendored = "3"

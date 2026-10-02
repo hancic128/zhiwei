@@ -1,0 +1,25 @@
+[package]
+name = "zhiwei-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SQLite-backed storage for zhiwei monitor"
+
+[dependencies]
+zhiwei-common = { path = "../common" }
+zhiwei-proto = { path = "../proto" }
+
+chrono = { workspace = true }
+uuid = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+prost = { workspace = true }
+bytes = { workspace = true }
+base64 = { workspace = true }
