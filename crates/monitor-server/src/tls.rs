@@ -8,7 +8,7 @@ use std::path::Path;
 
 use anyhow::Context;
 use rcgen::{CertificateParams, DistinguishedName, IsCa, KeyPair, SanType, SerialNumber};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
 use time::{Duration, OffsetDateTime};
 
@@ -90,14 +90,11 @@ pub fn build_server_config(
     key_pem: &str,
     _ca_pem: &str,
 ) -> anyhow::Result<ServerConfig> {
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_pem.as_bytes())
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
         .collect::<Result<Vec<_>, _>>()
         .context("parsing server cert chain")?;
-    let key = rustls_pemfile::pkcs8_private_keys(&mut key_pem.as_bytes())
-        .next()
-        .context("no PKCS#8 private key found")?
-        .context("parsing server private key")?;
-    let key = PrivateKeyDer::Pkcs8(key);
+    let key =
+        PrivateKeyDer::from_pem_slice(key_pem.as_bytes()).context("parsing server private key")?;
 
     // No longer requires client certificates: node identity is now carried
     // by Ed25519 request signatures, so this still works when deployed behind

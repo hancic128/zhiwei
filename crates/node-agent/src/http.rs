@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context};
-use rustls::pki_types::{CertificateDer, ServerName};
+use rustls::pki_types::{pem::PemObject, CertificateDer, ServerName};
 use rustls::{ClientConfig, RootCertStore};
 use tokio::io::AsyncWriteExt;
 use tokio_rustls::TlsConnector;
@@ -378,11 +378,10 @@ pub fn build_client_config(
 
     let mut roots = RootCertStore::empty();
     if let Some(pem) = ca_pem {
-        for c in rustls_pemfile::certs(&mut pem.as_bytes())
-            .collect::<Result<Vec<_>, _>>()
-            .context("parsing monitor CA")?
-        {
-            roots.add(c).context("adding to root store")?;
+        for c in CertificateDer::pem_slice_iter(pem.as_bytes()) {
+            roots
+                .add(c.context("parsing monitor CA")?)
+                .context("adding to root store")?;
         }
     } else {
         // Managed platform: standard certificates, use system roots

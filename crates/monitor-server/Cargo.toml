@@ -41,7 +41,6 @@ sqlx = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
 rustls = { workspace = true }
-rustls-pemfile = { workspace = true }
 webpki-roots = "1"
 rcgen = { workspace = true }
 x509-parser = { workspace = true }

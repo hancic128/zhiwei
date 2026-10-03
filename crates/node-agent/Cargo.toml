@@ -37,7 +37,6 @@ futures = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
 rustls = { workspace = true }
-rustls-pemfile = { workspace = true }
 rcgen = { workspace = true }
 hostname = "0.4"
 base64 = { workspace = true }
