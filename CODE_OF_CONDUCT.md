@@ -53,7 +53,7 @@ decisions when appropriate.
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported to the community leaders responsible for enforcement:
 
-- **Primary Contact**: hancic128+conduct@proton.me
+- **Primary Contact**: conduct@zhiwei.example.invalid
 
 All complaints will be reviewed and investigated promptly and fairly.
 

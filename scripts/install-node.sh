@@ -66,7 +66,7 @@
 #   ZHIWEI_NODE_TAGS         Same as --tags
 #   ZHIWEI_VERSION           Optional, used only for log / fallback; the real version is read from
 #                            VERSION in the package. Not setting it is fine (asset name has no version).
-#   ZHIWEI_REPO              Repository owner/name (default hancic128/zhiwei)
+#   ZHIWEI_REPO              Repository owner/name (default zhiwei/zhiwei)
 #   ZHIWEI_INSTALL_DIR       Binary directory (default /usr/local/bin)
 #   ZHIWEI_STATE_DIR         State directory (default /var/lib/zhiwei-node)
 #   ZHIWEI_ENV_FILE          Env file path (default /etc/zhiwei-node.env)
@@ -92,7 +92,7 @@
 set -euo pipefail
 umask 077
 
-REPO="${ZHIWEI_REPO:-hancic128/zhiwei}"
+REPO="${ZHIWEI_REPO:-zhiwei/zhiwei}"
 VERSION="${ZHIWEI_VERSION:-}"
 INSTALL_DIR="${ZHIWEI_INSTALL_DIR:-/usr/local/bin}"
 STATE_DIR="${ZHIWEI_STATE_DIR:-/var/lib/zhiwei-node}"

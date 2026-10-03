@@ -156,8 +156,8 @@ pub async fn todo_handler(State(state): State<AppState>, headers: HeaderMap) -> 
     };
 
     // Node names in the todo always use the "display name" (alias if set) —
-    // hostnames tend to look like VM-16-12-opencloudos and you can't tell which
-    // machine it is; aliases are user-chosen names. When a node is deleted,
+    // hostnames tend to look like auto-generated cloud names and you can't tell
+    // which machine it is; aliases are user-chosen names. When a node is deleted,
     // fall back to the hostname recorded when the alert was stored.
     let display_of = |id: &str, fallback: &str| -> String {
         nodes

@@ -16,7 +16,7 @@ please report it responsibly.
 **Please DO NOT file a public GitHub issue** for security vulnerabilities.
 Instead, please email us directly:
 
-- **Email**: hancic128+security@proton.me
+- **Email**: security@zhiwei.example.invalid
 
 ### What to Include
 

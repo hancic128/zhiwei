@@ -1,7 +1,7 @@
 #!/bin/sh
 # ZhiWei node daemon uninstaller
 #
-#   curl -fsSL https://raw.githubusercontent.com/hancic128/zhiwei/main/scripts/uninstall-node-service.sh \
+#   curl -fsSL https://raw.githubusercontent.com/zhiwei/zhiwei/main/scripts/uninstall-node-service.sh \
 #     | sudo sh
 #
 # Equivalent to `install-node-service.sh uninstall`, but standalone (no
@@ -122,6 +122,6 @@ cat <<EOF
 \033[32m+ uninstall complete\033[0m
 
   To reinstall:
-    curl -fsSL https://raw.githubusercontent.com/hancic128/zhiwei/main/scripts/install-node-service.sh \\
+    curl -fsSL https://raw.githubusercontent.com/zhiwei/zhiwei/main/scripts/install-node-service.sh \\
       | sudo sh -s -- --token zhi-bt-xxx
 EOF

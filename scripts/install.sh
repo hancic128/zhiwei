@@ -1,7 +1,7 @@
 #!/bin/sh
 # ZhiWei binary installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/hancic128/zhiwei/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/zhiwei/zhiwei/main/scripts/install.sh | sh
 #
 # Auto-detects the OS and architecture, downloads the matching prebuilt
 # tarball from a GitHub Release, and verifies its SHA256. By default installs
@@ -31,7 +31,7 @@
 
 set -eu
 
-REPO="${ZHIWEI_REPO:-hancic128/zhiwei}"
+REPO="${ZHIWEI_REPO:-zhiwei/zhiwei}"
 BIN="${ZHIWEI_BIN:-node}"
 VERSION="${ZHIWEI_VERSION:-latest}"
 INSTALL_DIR="${ZHIWEI_INSTALL_DIR:-/usr/local/bin}"

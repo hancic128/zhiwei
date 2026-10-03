@@ -1,11 +1,11 @@
 #!/bin/sh
 # ZhiWei node daemon installer
 #
-#   curl -fsSL https://raw.githubusercontent.com/hancic128/zhiwei/main/scripts/install-node-service.sh \
+#   curl -fsSL https://raw.githubusercontent.com/zhiwei/zhiwei/main/scripts/install-node-service.sh \
 #     | sudo sh -s -- --token zhi-bt-xxxxxxxx
 #
 #   # All-env-vars version:
-#   curl -fsSL ... | sudo env ZHIWEI_BOOTSTRAP_TOKEN=zhi-bt-xxx ZHIWEI_MONITOR_URL=https://x.onrender.com sh
+#   curl -fsSL ... | sudo env ZHIWEI_BOOTSTRAP_TOKEN=zhi-bt-xxx ZHIWEI_MONITOR_URL=https://monitor.example.com sh
 #
 #   # Or pass nothing — the script prompts interactively for each value (token is hidden):
 #   curl -fsSL ... | sudo sh
@@ -35,7 +35,7 @@
 #   --state-dir <dir>  Node state directory, default /var/lib/zhiwei-node
 #   --interval <sec>   Reporting interval in seconds, default 5
 #   --dir <dir>        Binary directory, default /usr/local/bin
-#   --repo <o/r>       Default hancic128/zhiwei
+#   --repo <o/r>       Default zhiwei/zhiwei
 #   --branch <name>    Default main (switch for private repos)
 #   --no-start         Install but don't start (install only)
 #   ZHIWEI_VERSION     Which version to install, default latest (applies to install / upgrade, same as install.sh)
@@ -44,7 +44,7 @@
 
 set -eu
 
-REPO="${ZHIWEI_REPO:-hancic128/zhiwei}"
+REPO="${ZHIWEI_REPO:-zhiwei/zhiwei}"
 BRANCH="${ZHIWEI_BRANCH:-main}"
 INSTALL_DIR="${ZHIWEI_INSTALL_DIR:-/usr/local/bin}"
 STATE_DIR="${ZHIWEI_STATE_DIR:-/var/lib/zhiwei-node}"
@@ -122,7 +122,7 @@ have_tty() {
 ask_url() {
   if [ -n "$URL" ]; then return; fi
   have_tty || die "Neither --url / ZHIWEI_MONITOR_URL was provided nor a tty available to ask"
-  printf 'Monitor URL (e.g. https://zhiwei.onrender.com/): '
+  printf 'Monitor URL (e.g. https://monitor.example.com/): '
   read -r URL </dev/tty || die "Read failed"
   [ -n "$URL" ] || die "URL cannot be empty"
 }

@@ -4,18 +4,26 @@
 > certificate checks. ZhiWei extends this into a full observability capability:
 > multiple probe types, SLA tracking, public status pages, incident management.
 
+> **Note on scope** — this document describes both the **current** capabilities
+> and the **design direction**. As of `0.0.1`, only **HTTP / HTTPS / TCP / TLS
+> probes** are implemented (sections 2.1–2.4 below). The remaining sections
+> (status pages, incidents, RBAC, multi-tenant) are **planned but not yet
+> shipped**; see [docs/roadmap.md](./roadmap.md) for the order they will land.
+> Items in the "ZhiWei Extension" column that aren't yet implemented are
+> marked `[planned]` in the table below.
+
 ## 1. Design Goals
 
-| Dimension | Old Approach | ZhiWei Extension |
-| --- | --- | --- |
-| Probe types | HTTP / HTTPS | HTTP / HTTPS / TCP / gRPC / DNS / ICMP / TLS / command / multi-step |
-| Probe executor | agent (single point) | agent / monitor / external (geo-distributed) |
-| Scheduling | Single interval | interval + retries + backoff + maintenance windows |
-| Thresholds | Single (ok / fail) | warning + critical (latency, error rate, packet loss) |
-| SLA | None | uptime % + MTTR + MTBF + error budget |
-| Status page | None | public/private status pages + subscriptions |
-| Incidents | None | incident timeline + blast radius + postmortems |
-| Multi-tenant | None | per-team probes + RBAC |
+| Dimension | Old Approach | ZhiWei Extension | Status |
+| --- | --- | --- | --- |
+| Probe types | HTTP / HTTPS | HTTP / HTTPS / TCP / gRPC / DNS / ICMP / TLS / command / multi-step | HTTP / HTTPS / TCP / TLS shipped; rest planned |
+| Probe executor | agent (single point) | agent / monitor / external (geo-distributed) | agent-only in 0.0.1 |
+| Scheduling | Single interval | interval + retries + backoff + maintenance windows | interval + failure_threshold only |
+| Thresholds | Single (ok / fail) | warning + critical (latency, error rate, packet loss) | severity on alerts only; probes are `ok`/`degraded`/`down` |
+| SLA | None | uptime % + MTTR + MTBF + error budget | `[planned]` |
+| Status page | None | public/private status pages + subscriptions | `[planned]` |
+| Incidents | None | incident timeline + blast radius + postmortems | `[planned]` |
+| Multi-tenant | None | per-team probes + RBAC | `[planned]` — ZhiWei is single-operator |
 
 ## 2. Probe Types
 

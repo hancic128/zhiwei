@@ -2,7 +2,7 @@
 #
 # Verify node-agent HTTP client correctly decodes chunked transfer-encoding.
 #
-# Background (2026-09-21): node `VM-16-12-opencloudos` reported
+# Background (2026-09-21): a node reported
 #   WARN failed to fetch probe config error=probe config parse failed
 #   DEBUG failed to fetch cert config error=trailing characters at line 1 column 2
 # Root cause: node-agent HTTP client used bare `read_to_end` + split on `\r\n\r\n`,
@@ -12,7 +12,7 @@
 #
 # Usage:
 #   ./scripts/smoke-chunked.sh
-#   ./scripts/smoke-chunked.sh --against zhiwei.onrender.com   # real edge
+#   ./scripts/smoke-chunked.sh --against monitor.example.com   # real edge
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

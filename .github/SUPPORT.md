@@ -11,8 +11,8 @@ right channel.
 | Report a bug | [GitHub Issues](../../issues/new?template=bug_report.yml) — fill in OS, deployment method, version, architecture, and paste actual logs (not paraphrases) |
 | Request a feature | [GitHub Issues](../../issues/new?template=feature_request.yml) — see [GOVERNANCE.md](./GOVERNANCE.md) for the alignment check |
 | Ask "how do I …" | [GitHub Discussions](../../discussions) → Q&A — questions are not bugs; opening them as issues crowds out real bug reports |
-| Report a security vulnerability | **Do not file a public issue.** Email `hancic128+security@proton.me` — see [SECURITY.md](./SECURITY.md) for the full process |
-| Report a code-of-conduct violation | Email `hancic128+conduct@proton.me` — see [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) |
+| Report a security vulnerability | **Do not file a public issue.** Email `security@zhiwei.example.invalid` — see [SECURITY.md](./SECURITY.md) for the full process |
+| Report a code-of-conduct violation | Email `conduct@zhiwei.example.invalid` — see [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) |
 
 ## What to expect
 

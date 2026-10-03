@@ -54,8 +54,11 @@ Common scopes: `auth` `api` `ui` `node` `ops` `storage` `alerts` `certs` `servic
 increment the version number, idempotent via `schema_version`. Never modify existing migrations.
 
 **Frontend**: Follow the UI constraints spec — use only `brand-*` / `surface-*` / `ink-*`
-tokens (no hardcoded colors), Lucide SVG icons only (no emoji), all text through `t()`,
-keep Chinese and English language packs in sync. `npm run build` fails on imbalance.
+tokens (no hardcoded colors), Lucide SVG icons only (no emoji), all text through `t()`.
+The default locale is **en-US**; an opt-in **zh-CN** translation is shipped for
+the UI strings. New user-facing text must come with an `en-US` entry; a matching
+`zh-CN` entry is appreciated but optional. `npm run build` includes a locale
+key-count check (both files must have the same set of keys).
 
 **Tests**: New behavior should come with reproducible verification. Describe what
 commands you ran and what output you saw — coverage numbers are less useful than a

@@ -12,8 +12,8 @@
 # The two processes remain independent; **the signing private key lives only
 # inside zhiwei-ops**: monitor reads the public key from `<data-dir>/ops.pub`
 # and hands it to nodes on enroll (TOFU), so monitor cannot forge commands.
-# This is the monitor/ops separation constraint from docs/DESIGN.md — not a
-# candidate for merging them.
+# This is the monitor/ops separation constraint documented in docs/architecture.md
+# — not a candidate for merging them.
 #
 # Environment variables:
 #   ZHIWEI_OPS_DISABLE=1   skip ops-server (data-plane-only deployments)

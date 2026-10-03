@@ -63,10 +63,11 @@ from environment variables. The first heartbeat enrolls automatically.
 
 ### 4. Naming: aliases and tags
 
-Hostname-only enrollment is hard to read (`VM-16-12-opencloudos`-style). The
-console lets you add two layers of metadata to each node — open the edit
-button to the right of the host column in the list. You can also attach them
-on **first enroll** (`install-node.sh --alias/--tags`, see section 2):
+Hostname-only enrollment is hard to read (auto-generated cloud names like
+`ip-10-0-0-5.ec2.internal` are not). The console lets you add two layers of
+metadata to each node — open the edit button to the right of the host column
+in the list. You can also attach them on **first enroll**
+(`install-node.sh --alias/--tags`, see section 2):
 
 | | Alias | Tags |
 |--|------|------|

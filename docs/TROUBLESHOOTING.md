@@ -99,6 +99,27 @@ zhiwei-node --interval 60  # default is 30
 - **Cold start suppression**: Monitor waits 120s after restart before triggering `node_offline` alerts
 - **Check `last_seen`**: In the UI, check the node's last telemetry timestamp. If it's stale, the node isn't reaching the monitor
 
+### Start / stop / restart buttons do nothing (command channel down)
+
+The node appears online and reports telemetry, but **command buttons have
+no effect**. This means the node's command channel is broken — it never
+polls `/v1/commands` so ops-signed commands never reach it.
+
+Common causes:
+1. **Node enrolled before ops-server was running.** The node never
+   received `ops_public_key` at enroll time. Re-enroll to fetch it:
+   ```sh
+   curl -sSL https://<monitor>/install-node.sh | sudo bash -s -- --reinstall
+   ```
+2. **State restored from a backup taken before ops-server first started.**
+   Same symptom — `ops.pub` on disk is empty or stale. Re-enroll as above.
+3. **Clock drift > ±300s.** Signed commands are rejected by the node's
+   timestamp window. Sync NTP on both monitor and node.
+
+Verify the channel state in the UI: the node's detail page surfaces the
+last successful poll timestamp. If it's been minutes since the last poll
+despite recent telemetry, the channel is broken.
+
 ---
 
 ## Alerts
@@ -240,4 +261,4 @@ If the issue persists:
 2. Check logs for error context
 
 3. For bugs or feature requests, open an issue at:
-   https://github.com/hancic128/zhiwei/issues
+   https://github.com/zhiwei/zhiwei/issues

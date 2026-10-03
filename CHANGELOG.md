@@ -13,10 +13,6 @@ Nothing yet.
 
 First public release.
 
-> Note: the previously drafted `[0.1.0] - 2026-10-02` entry has been folded
-> back into `[Unreleased]` while the project is still being prepared for
-> public release. The actual published version is `0.0.1`.
-
 ### Highlights
 
 - **Single binary** Rust + SQLite + WAL, ~105 MB Docker image, 5-minute
@@ -90,16 +86,16 @@ First public release.
 ### Documentation
 
 - README + `docs/` covering architecture, deploy, service health,
-  probes, alerts, certificates, backup, troubleshooting, positioning,
-  and API reference
-- `SECURITY.md` with supported-versions table and a `proton.me` contact
+  probes, alerts, certificates, backup, troubleshooting, FAQ, and API
+  reference
+- `SECURITY.md` with supported-versions table and a `security@` contact
 - `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `GOVERNANCE.md`,
   `MAINTAINERS.md`, `SUPPORT.md`
 
 ### Known limitations
 
-- First-paint gzip is about 320 KB (over the 200 KB target in
-  `DESIGN.md`); switching ECharts to uPlot could shave ~130 KB but is
+- First-paint gzip is about 320 KB (over the 200 KB target tracked
+  internally); switching ECharts to uPlot could shave ~130 KB but is
   not in this release
 - The nonce-replay cache is in-process; running multiple monitor
   instances behind a load balancer requires a shared cache (planned)

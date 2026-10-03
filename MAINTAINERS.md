@@ -4,7 +4,7 @@
 
 | Name | GitHub | Role |
 | --- | --- | --- |
-| hancic128 | @hancic128 | BDFL / Project Lead |
+| ZhiWei maintainers | @zhiwei | BDFL / Project Lead |
 
 ## Responsibilities
 

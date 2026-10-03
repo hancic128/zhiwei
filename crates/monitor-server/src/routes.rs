@@ -755,8 +755,8 @@ async fn telemetry_handler(
     debug!(%node_id_str, %ts, interval, "telemetry batch stored");
 
     // Run alert rules after writing to the database (no rules = no DB query, overhead is negligible).
-    // Alert text uses the **display name** (alias if set), otherwise a hostname like VM-16-12-opencloudos
-    // is unrecognizable.
+    // Alert text uses the **display name** (alias if set), otherwise a hostname
+    // like an auto-generated cloud name is unrecognizable.
     let hostname = state
         .storage
         .nodes()
@@ -3966,9 +3966,9 @@ fn is_connection_refused(e: &std::io::Error) -> bool {
 
 /// The name used for a node in "human-facing" contexts: alias if set, otherwise the hostname.
 ///
-/// Used by alert text, notifications, todos — hostnames are often things like
-/// `VM-16-12-opencloudos` that don't tell the user which machine it is; aliases are
-/// user-chosen like "Beijing Edge".
+/// Used by alert text, notifications, todos — hostnames are often auto-generated
+/// names like `ip-10-0-0-5.ec2.internal` that don't tell the user which machine
+/// it is; aliases are user-chosen like "Beijing Edge".
 pub(crate) fn node_display_name(alias: &str, hostname: &str) -> String {
     let alias = alias.trim();
     if alias.is_empty() {

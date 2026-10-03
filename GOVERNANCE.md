@@ -4,14 +4,14 @@
 
 ## Overview
 
-ZhiWei is a personal open-source project maintained by hancic128. The project
+ZhiWei is a personal open-source project maintained by the ZhiWei maintainers. The project
 operates under a **benevolent dictator** model with a clear vision and scope.
 
 ## Project Maintainer
 
 | Role | Person | Responsibility |
 | --- | --- | --- |
-| BDFL / Maintainer | hancic128 | Final decision authority, security issues, releases |
+| BDFL / Maintainer | the ZhiWei maintainers | Final decision authority, security issues, releases |
 
 ## Decision Making
 
@@ -42,7 +42,7 @@ operates under a **benevolent dictator** model with a clear vision and scope.
 2. Recognized Contributor (invited)
    └─> Has merge rights for doc/bug fixes
            │
-3. Maintainer (hancic128)
+3. Maintainer (the ZhiWei maintainers)
        └─> Final say on all decisions
 ```
 
@@ -65,7 +65,7 @@ This is not unfriendly - it's how a single-maintainer project stays focused.
 
 - **Issues**: GitHub Issues
 - **Security**: See [SECURITY.md](./SECURITY.md)
-- **Email**: hancic128+conduct@proton.me (Code of Conduct matters only)
+- **Email**: conduct@zhiwei.example.invalid (Code of Conduct matters only)
 
 ## Changes to Governance
 
