@@ -446,16 +446,18 @@ fn transport(monitor: &str, state: &NodeState) -> anyhow::Result<http::HttpTrans
     http::HttpTransport::new(monitor, ca, false)
 }
 
-/// Take the top N processes by CPU usage.
 /// Convert byte counts to f64 for telemetry display.
 ///
-/// Telemetry bytes values are rounded to the nearest byte for UI display,
-/// so precision loss beyond 2^52 is acceptable (a single byte at that scale
-/// is meaningless). Using `as f64` here would trigger `clippy::cast_precision_loss`.
-fn bytes_to_f64(bytes: u64) -> f64 {
-    f64::from(u32::try_from(bytes).unwrap_or(u32::MAX))
+/// Byte counts must survive the full `u64` range: RAM and disk are routinely
+/// above 4 GiB, and capping at `u32::MAX` makes used/total collapse to 100%.
+/// Values are rounded for display, so precision loss beyond 2^52 is acceptable
+/// (a single byte at that scale is meaningless).
+#[allow(clippy::cast_precision_loss)] // display-only; 2^52 exceeds any real byte counter
+const fn bytes_to_f64(bytes: u64) -> f64 {
+    bytes as f64
 }
 
+/// Take the top N processes by CPU usage.
 fn snapshot_processes(sys: &sysinfo::System) -> ProcessSnapshot {
     const TOP_N: usize = 20;
 
