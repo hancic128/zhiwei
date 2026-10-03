@@ -196,7 +196,7 @@ function ChannelsSection() {
     app_id: "",
     receive_id: "",
     receive_id_type: "chat_id",
-    min_severity: "warning",
+    min_severity: "info",
   };
   const [dialogOpen, setDialogOpen] = React.useState(false);
   const [form, setForm] = React.useState(EMPTY);
@@ -206,6 +206,8 @@ function ChannelsSection() {
     null,
   );
   const [testing, setTesting] = React.useState(false);
+  /** App Secret 明文展示 */
+  const [secretRevealed, setSecretRevealed] = React.useState(false);
 
   const invalidate = () => void qc.invalidateQueries({ queryKey: ["channels"] });
 
@@ -220,16 +222,18 @@ function ChannelsSection() {
     app_id: c.app_id,
     receive_id: c.receive_id,
     receive_id_type: c.receive_id_type || "chat_id",
-    min_severity: c.min_severity || "warning",
+    min_severity: c.min_severity || "info",
   });
   const openCreate = () => {
     setEditing(null);
     setForm(EMPTY);
+    setSecretRevealed(false);
     setDialogOpen(true);
   };
   const openEdit = (c: NotifyChannel) => {
     setEditing(c);
     setForm(formOf(c));
+    setSecretRevealed(false);
     setDialogOpen(true);
   };
   const closeDialog = () => {
@@ -453,14 +457,21 @@ function ChannelsSection() {
         }
         footer={
           <>
-            <Button
-              variant="secondary"
-              loading={testing}
-              disabled={!canSubmit}
-              onClick={() => void test()}
-            >
-              {t("settings.chTest")}
-            </Button>
+            <div className="flex items-center gap-2 mr-auto">
+              <Button
+                variant="secondary"
+                loading={testing}
+                disabled={!canSubmit}
+                onClick={() => void test()}
+              >
+                {testing ? t("settings.chTesting") : t("settings.chTest")}
+              </Button>
+              {testing && (
+                <span className="text-xs text-ink-500 animate-pulse">
+                  {t("settings.chTestingHint")}
+                </span>
+              )}
+            </div>
             <Button variant="secondary" onClick={closeDialog}>
               {t("alerts.cancel")}
             </Button>
@@ -503,6 +514,7 @@ function ChannelsSection() {
                 }
                 aria-label={t("settings.chMinSeverity")}
               >
+                <option value="info">{t("alerts.info")}</option>
                 <option value="warning">{t("alerts.warning")}</option>
                 <option value="critical">{t("alerts.critical")}</option>
               </Select>
@@ -524,81 +536,132 @@ function ChannelsSection() {
                 placeholder="cli_xxxxxxxxxxxxxxxx"
                 autoComplete="off"
               />
-              <Field
-                label={t("settings.chAppSecret")}
-                value={form.app_secret}
-                onChange={(e) => setForm({ ...form, app_secret: e.target.value })}
-                type="password"
-                autoComplete="off"
-              />
-              <div className="grid grid-cols-2 gap-4">
-                <label className="block">
-                  <span className="block text-xs text-ink-500 mb-1">
-                    {t("settings.chReceiveIdType")}
-                  </span>
-                  <Select
-                    value={form.receive_id_type}
-                    onChange={(e) =>
-                      setForm({ ...form, receive_id_type: e.target.value })
-                    }
-                    aria-label={t("settings.chReceiveIdType")}
-                  >
-                    {RECEIVE_ID_TYPES.map((v) => (
-                      <option key={v} value={v}>
-                        {t(`settings.chRid_${v}`)}
-                      </option>
-                    ))}
-                  </Select>
+              <div>
+                <label className="block text-xs text-ink-500 mb-1">
+                  {t("settings.chAppSecret")}
                 </label>
-                <Field
-                  label={t("settings.chReceiveId")}
-                  value={form.receive_id}
-                  onChange={(e) => setForm({ ...form, receive_id: e.target.value })}
-                  placeholder={t("settings.chReceiveIdPlaceholder")}
-                />
+                <div className="relative">
+                  <Input
+                    type={secretRevealed ? "text" : "password"}
+                    value={form.app_secret}
+                    onChange={(e) => setForm({ ...form, app_secret: e.target.value })}
+                    autoComplete="off"
+                    className="pr-10"
+                  />
+                  <button
+                    type="button"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-ink-400 hover:text-ink-600"
+                    onClick={() => setSecretRevealed(!secretRevealed)}
+                    aria-label={secretRevealed ? t("settings.aiHide") : t("settings.aiReveal")}
+                  >
+                    {secretRevealed ? (
+                      <EyeOff className="w-4 h-4" />
+                    ) : (
+                      <Eye className="w-4 h-4" />
+                    )}
+                  </button>
+                </div>
               </div>
+              <div>
+                <label className="block text-xs text-ink-500 mb-1">
+                  {t("settings.chReceiveIdType")}
+                </label>
+                <Select
+                  value={form.receive_id_type}
+                  onChange={(e) =>
+                    setForm({ ...form, receive_id_type: e.target.value })
+                  }
+                  aria-label={t("settings.chReceiveIdType")}
+                >
+                  {RECEIVE_ID_TYPES.map((v) => (
+                    <option key={v} value={v}>
+                      {t(`settings.chRid_${v}`)}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+              <Field
+                label={t("settings.chReceiveId")}
+                value={form.receive_id}
+                onChange={(e) => setForm({ ...form, receive_id: e.target.value })}
+                placeholder={t("settings.chReceiveIdPlaceholder")}
+              />
               <p className="text-xs text-ink-400">{t("settings.chFeishuNote")}</p>
             </>
           ) : (
             <>
-              <Field
-                label={
-                  isSlack
+              <div>
+                <label className="block text-xs text-ink-500 mb-1">
+                  {isSlack
                     ? t("settings.chSlackUrl")
                     : isBluebird
                       ? t("settings.chBluebirdUrl")
-                      : t("settings.chWebhookUrl")
-                }
-                value={form.url}
-                onChange={(e) => setForm({ ...form, url: e.target.value })}
-                placeholder={
-                  isSlack
-                    ? t("settings.chSlackUrlPlaceholder")
-                    : isBluebird
-                      ? t("settings.chBluebirdUrlPlaceholder")
-                      : t("settings.chWebhookUrlPlaceholder")
-                }
-              />
+                      : t("settings.chWebhookUrl")}
+                </label>
+                <div className="relative">
+                  <Input
+                    type={secretRevealed ? "text" : "password"}
+                    value={form.url}
+                    onChange={(e) => setForm({ ...form, url: e.target.value })}
+                    placeholder={
+                      isSlack
+                        ? t("settings.chSlackUrlPlaceholder")
+                        : isBluebird
+                          ? t("settings.chBluebirdUrlPlaceholder")
+                          : t("settings.chWebhookUrlPlaceholder")
+                    }
+                    autoComplete="off"
+                    className="pr-10"
+                  />
+                  <button
+                    type="button"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-ink-400 hover:text-ink-600"
+                    onClick={() => setSecretRevealed(!secretRevealed)}
+                    aria-label={secretRevealed ? t("settings.aiHide") : t("settings.aiReveal")}
+                  >
+                    {secretRevealed ? (
+                      <EyeOff className="w-4 h-4" />
+                    ) : (
+                      <Eye className="w-4 h-4" />
+                    )}
+                  </button>
+                </div>
+              </div>
               {isSlack ? null : (
-                <Field
-                  label={
-                    isBluebird
-                      ? t("settings.chBluebirdToken")
-                      : t("settings.chToken")
-                  }
-                  value={form.secret}
-                  onChange={(e) => setForm({ ...form, secret: e.target.value })}
-                  placeholder={
-                    isBluebird
-                      ? t("settings.chBluebirdTokenPlaceholder")
-                      : t("settings.chTokenPlaceholder")
-                  }
-                  hint={
-                    isBluebird
-                      ? t("settings.chBluebirdTokenNote")
-                      : t("settings.chTokenNote")
-                  }
-                />
+                <div>
+                  <label className="block text-xs text-ink-500 mb-1">
+                    {isBluebird ? t("settings.chBluebirdToken") : t("settings.chToken")}
+                  </label>
+                  <div className="relative">
+                    <Input
+                      type={secretRevealed ? "text" : "password"}
+                      value={form.secret}
+                      onChange={(e) => setForm({ ...form, secret: e.target.value })}
+                      placeholder={
+                        isBluebird
+                          ? t("settings.chBluebirdTokenPlaceholder")
+                          : t("settings.chTokenPlaceholder")
+                      }
+                      autoComplete="off"
+                      className="pr-10"
+                    />
+                    <button
+                      type="button"
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-ink-400 hover:text-ink-600"
+                      onClick={() => setSecretRevealed(!secretRevealed)}
+                      aria-label={secretRevealed ? t("settings.aiHide") : t("settings.aiReveal")}
+                    >
+                      {secretRevealed ? (
+                        <EyeOff className="w-4 h-4" />
+                      ) : (
+                        <Eye className="w-4 h-4" />
+                      )}
+                    </button>
+                  </div>
+                  <p className="mt-1 text-xs text-ink-400">
+                    {isBluebird ? t("settings.chBluebirdTokenNote") : t("settings.chTokenNote")}
+                  </p>
+                </div>
               )}
               <p className="text-xs text-ink-400">
                 {isSlack
@@ -680,7 +743,6 @@ function passwordStrength(
 function CredentialSection() {
   const { t } = useTranslation();
   const toast = useToast();
-  const [open, setOpen] = React.useState(false);
   const [form, setForm] = React.useState({
     current: "",
     next: "",
@@ -699,7 +761,6 @@ function CredentialSection() {
       setToken(form.next);
       toast.push("success", t("settings.pwChanged"));
       setForm({ current: "", next: "", confirm: "" });
-      setOpen(false);
     },
     onError: (e) => toast.push("error", t(friendlyError(e))),
   });
@@ -710,56 +771,29 @@ function CredentialSection() {
         icon={<KeyRound className="w-5 h-5 text-brand-600" aria-hidden="true" />}
         title={t("settings.pwTitle")}
         description={t("settings.pwSubtitle")}
-        action={
-          <Button size="sm" onClick={() => setOpen(true)}>
-            {t("settings.pwChange")}
-          </Button>
-        }
       />
-      <CardBody compact>
-        <p className="text-xs text-ink-400">{t("settings.pwNote")}</p>
-      </CardBody>
-
-      <Dialog
-        open={open}
-        onClose={() => setOpen(false)}
-        size="md"
-        title={t("settings.pwChange")}
-        description={t("settings.pwNote")}
-        footer={
-          <>
-            <Button variant="secondary" onClick={() => setOpen(false)}>
-              {t("alerts.cancel")}
-            </Button>
-            <Button
-              loading={save.isPending}
-              disabled={!canSubmit}
-              onClick={() => save.mutate()}
-            >
-              {t("settings.pwSave")}
-            </Button>
-          </>
-        }
-      >
+      <CardBody>
         <div className="space-y-4">
-          <label className="block">
-            <span className="block text-xs text-ink-500 mb-1">
+          <div>
+            <label className="block text-xs text-ink-500 mb-1">
               {t("settings.pwCurrent")}
-            </span>
+            </label>
             <Input
               type="password"
               value={form.current}
               onChange={(e) => setForm({ ...form, current: e.target.value })}
+              autoComplete="off"
             />
-          </label>
-          <label className="block">
-            <span className="block text-xs text-ink-500 mb-1">
+          </div>
+          <div>
+            <label className="block text-xs text-ink-500 mb-1">
               {t("settings.pwNew")}
-            </span>
+            </label>
             <Input
               type="password"
               value={form.next}
               onChange={(e) => setForm({ ...form, next: e.target.value })}
+              autoComplete="off"
             />
             {strength ? (
               <div className="mt-2 space-y-1">
@@ -786,19 +820,30 @@ function CredentialSection() {
                 {tooShort ? t("settings.pwTooShort") : t("settings.pwMismatch")}
               </span>
             )}
-          </label>
-          <label className="block">
-            <span className="block text-xs text-ink-500 mb-1">
+          </div>
+          <div>
+            <label className="block text-xs text-ink-500 mb-1">
               {t("settings.pwConfirm")}
-            </span>
+            </label>
             <Input
               type="password"
               value={form.confirm}
               onChange={(e) => setForm({ ...form, confirm: e.target.value })}
+              autoComplete="off"
             />
-          </label>
+          </div>
+          <div className="flex justify-end">
+            <Button
+              loading={save.isPending}
+              disabled={!canSubmit}
+              onClick={() => save.mutate()}
+            >
+              {t("settings.pwSave")}
+            </Button>
+          </div>
         </div>
-      </Dialog>
+        <p className="text-xs text-ink-400 mt-4">{t("settings.pwNote")}</p>
+      </CardBody>
     </Card>
   );
 }

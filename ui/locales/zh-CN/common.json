@@ -800,6 +800,8 @@
     "chDeleteConfirmTitle": "删除通知渠道",
     "chDeleteConfirmMessage": "删除后该渠道不再接收告警，此操作不可恢复。",
     "chTest": "测试",
+    "chTesting": "测试中...",
+    "chTestingHint": "正在发送测试通知...",
     "chTestOk": "测试通知已发出，请到接收端确认",
     "chTestFail": "发送失败：{{detail}}",
     "uiTitle": "界面",

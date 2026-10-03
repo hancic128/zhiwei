@@ -801,6 +801,8 @@
     "chDeleteConfirmTitle": "Delete channel",
     "chDeleteConfirmMessage": "This channel will stop receiving alerts. This cannot be undone.",
     "chTest": "Test",
+    "chTesting": "Testing...",
+    "chTestingHint": "Sending test notification...",
     "chTestOk": "Test notification sent — check the receiving end",
     "chTestFail": "Send failed: {{detail}}",
     "uiTitle": "Interface",
