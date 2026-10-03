@@ -10,8 +10,6 @@ import {
   Network,
   Pencil,
   Plus,
-  Power,
-  RefreshCw,
   ShieldCheck,
   Trash2,
 } from "lucide-react";
@@ -52,6 +50,7 @@ import {
   Tr,
 } from "@/components/ui/table";
 import { useToast } from "@/components/ui/toast";
+import { Switch } from "@/components/ui/switch";
 import {
   cn,
   friendlyError,
@@ -203,8 +202,6 @@ export function Services() {
     id: string;
     name: string;
   } | null>(null);
-  // 探针启停确认
-  const [pendingToggle, setPendingToggle] = React.useState<ProbeView | null>(null);
 
   const servicesQ = useQuery({
     queryKey: ["services"],
@@ -396,21 +393,16 @@ export function Services() {
               </option>
             ))}
           </Select>
-          <Button
-            variant={showDisabled ? "secondary" : "ghost"}
-            size="sm"
-            onClick={() => setShowDisabled(!showDisabled)}
-          >
-            {showDisabled ? t("services.hideDisabled") : t("services.showDisabled")}
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            aria-label={t("action.refresh")}
-            onClick={() => void servicesQ.refetch()}
-          >
-            <RefreshCw className="w-5 h-5" aria-hidden="true" />
-          </Button>
+          <div className="flex items-center gap-2">
+            <Switch
+              checked={showDisabled}
+              onCheckedChange={setShowDisabled}
+              aria-label={t("services.showDisabled")}
+            />
+            <span className="text-sm text-ink-600 dark:text-ink-300">
+              {t("services.showDisabled")}
+            </span>
+          </div>
           <Button onClick={() => setServiceDialog({ open: true })}>
             <Plus className="w-4 h-4" aria-hidden="true" />
             {t("services.newService")}
@@ -562,19 +554,12 @@ export function Services() {
                         >
                           <Pencil className="w-4 h-4" aria-hidden="true" />
                         </Button>
-                        <Button
-                          size="icon"
-                          variant="ghost"
-                          aria-label={
-                            p.enabled ? t("action.disable") : t("action.enable")
-                          }
-                          onClick={() => setPendingToggle(p)}
-                          className={cn(
-                            !p.enabled && "text-emerald-600 dark:text-emerald-400"
-                          )}
-                        >
-                          <Power className="w-4 h-4" aria-hidden="true" />
-                        </Button>
+                        <Switch
+                          checked={p.enabled}
+                          onCheckedChange={() => toggleProbe.mutate(p)}
+                          disabled={toggleProbe.isPending}
+                          aria-label={p.name}
+                        />
                         <Button
                           size="icon"
                           variant="ghost"
@@ -619,28 +604,6 @@ export function Services() {
           onClose={() => setProbeDialog({ open: false })}
         />
       )}
-
-      {/* 探针启停确认对话框 */}
-      <ConfirmDialog
-        open={!!pendingToggle}
-        title={pendingToggle?.enabled ? t("services.disableProbeTitle") : t("services.enableProbeTitle")}
-        message={
-          pendingToggle?.enabled
-            ? t("services.disableProbeMessage", { name: pendingToggle?.name })
-            : t("services.enableProbeMessage", { name: pendingToggle?.name })
-        }
-        confirmLabel={pendingToggle?.enabled ? t("action.disable") : t("action.enable")}
-        cancelLabel={t("action.cancel")}
-        loading={toggleProbe.isPending}
-        onCancel={() => setPendingToggle(null)}
-        onConfirm={() => {
-          if (pendingToggle) {
-            toggleProbe.mutate(pendingToggle, {
-              onSettled: () => setPendingToggle(null),
-            });
-          }
-        }}
-      />
 
       <ConfirmDialog
         open={!!pendingDelete}

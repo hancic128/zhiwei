@@ -1,8 +1,8 @@
 import * as React from "react";
 import { useSearchParams } from "react-router-dom";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { Box, RefreshCw } from "lucide-react";
+import { Box } from "lucide-react";
 import {
   containerBucket,
   containerTone,
@@ -15,7 +15,6 @@ import {
 import { ContainerActions } from "@/components/container-actions";
 import { StatCards, type StatCard } from "@/components/stat-cards";
 import { Badge, DotBadge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { SearchInput } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { SortHeader, type SortDir } from "@/components/ui/sort-header";
@@ -36,10 +35,8 @@ import {
   Tr,
 } from "@/components/ui/table";
 import { TablePager, paginate, sortRows } from "@/components/ui/pager";
-import { Tooltip } from "@/components/ui/tooltip";
 import { UsageBar } from "@/components/usage-bar";
 import {
-  cn,
   containerStateLabel,
   containerStatusLabel,
   formatCpuLimit,
@@ -71,7 +68,6 @@ interface Row extends ContainerInfo {
 
 export function Containers() {
   const { t } = useTranslation();
-  const qc = useQueryClient();
   const [params, setParams] = useSearchParams();
 
   const [q, setQ] = React.useState("");
@@ -103,6 +99,7 @@ export function Containers() {
   const groupsQ = useQuery({
     queryKey: ["containers"],
     queryFn: containersApi.all,
+    refetchInterval: 15000,
   });
   const groups: ContainerGroup[] = groupsQ.data ?? [];
 
@@ -310,19 +307,6 @@ export function Containers() {
               onChange={(e) => setQ(e.target.value)}
               aria-label={t("action.search")}
             />
-            <Tooltip content={t("action.refresh")}>
-              <Button
-                variant="ghost"
-                size="icon"
-                aria-label={t("action.refresh")}
-                onClick={() => void qc.invalidateQueries({ queryKey: ["containers"] })}
-              >
-                <RefreshCw
-                  className={cn("w-4 h-4", refreshing && "animate-spin")}
-                  aria-hidden="true"
-                />
-              </Button>
-            </Tooltip>
           </div>
         </TableToolbar>
 

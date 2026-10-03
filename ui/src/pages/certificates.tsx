@@ -7,7 +7,6 @@ import {
   Info,
   Pencil,
   Plus,
-  RefreshCw,
   ShieldCheck,
   Trash2,
 } from "lucide-react";
@@ -540,22 +539,6 @@ export function Certificates() {
               onChange={(e) => setQ(e.target.value)}
               aria-label={t("action.search")}
             />
-            <Tooltip content={t("action.refresh")}>
-              <Button
-                variant="ghost"
-                size="icon"
-                aria-label={t("action.refresh")}
-                onClick={invalidate}
-              >
-                <RefreshCw
-                  className={cn(
-                    "w-4 h-4",
-                    (groupsQ.isFetching || sourcesQ.isFetching) && "animate-spin",
-                  )}
-                  aria-hidden="true"
-                />
-              </Button>
-            </Tooltip>
           </div>
         </TableToolbar>
 
