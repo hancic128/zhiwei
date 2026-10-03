@@ -4,6 +4,8 @@
 //! without introducing bollard. When P2-3 needs container start/stop / logs / stats,
 //! switch to bollard per D3 decision in DESIGN.md (can keep this module's public API unchanged).
 
+use std::time::Duration;
+
 use anyhow::Context;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -14,6 +16,14 @@ use serde::Deserialize;
 use zhiwei_proto::telemetry::Container;
 
 const SOCKET: &str = "/var/run/docker.sock";
+
+/// Upper bound on a Docker Engine API call.
+///
+/// A wedged Docker daemon accepts the socket connection but never replies. The
+/// node-agent's inventory path awaits these calls directly, so without a bound
+/// one stuck call stalls the whole agent (telemetry and command channel
+/// included). Bounding it here turns that into a skipped container snapshot.
+const DOCKER_CALL_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Deserialize)]
 struct DockerContainer {
@@ -262,37 +272,53 @@ async fn fetch_container_list() -> anyhow::Result<Option<Vec<DockerContainer>>> 
         Err(e) => return Err(e).context("failed to connect to docker socket"),
     };
 
-    let io = TokioIo::new(stream);
-    let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+    let exchange = async {
+        let io = TokioIo::new(stream);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+            .await
+            .context("docker socket HTTP handshake")?;
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("http://localhost/containers/json?all=1")
+            .header("Host", "localhost")
+            .body(Empty::<Bytes>::new())
+            .context("failed to construct docker request")?;
+
+        let response = sender
+            .send_request(request)
+            .await
+            .context("docker request failed")?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("docker API returned {}", response.status());
+        }
+
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .context("failed to read docker response")?
+            .to_bytes();
+
+        serde_json::from_slice::<Vec<DockerContainer>>(&body)
+            .context("failed to parse docker container list")
+    };
+
+    tokio::time::timeout(DOCKER_CALL_TIMEOUT, exchange)
         .await
-        .context("docker socket HTTP handshake")?;
-    tokio::spawn(async move {
-        let _ = conn.await;
-    });
-
-    let request = Request::builder()
-        .method("GET")
-        .uri("http://localhost/containers/json?all=1")
-        .header("Host", "localhost")
-        .body(Empty::<Bytes>::new())
-        .context("failed to construct docker request")?;
-
-    let response = sender.send_request(request).await.context("docker request failed")?;
-
-    if !response.status().is_success() {
-        anyhow::bail!("docker API returned {}", response.status());
-    }
-
-    let body = response
-        .into_body()
-        .collect()
-        .await
-        .context("failed to read docker response")?
-        .to_bytes();
-
-    let raw: Vec<DockerContainer> =
-        serde_json::from_slice(&body).context("failed to parse docker container list")?;
-    Ok(Some(raw))
+        .map_or_else(
+            |_| {
+                tracing::warn!(
+                    "docker container list timed out after {DOCKER_CALL_TIMEOUT:?}, skipping snapshot"
+                );
+                Ok(None)
+            },
+            |result| result.map(Some),
+        )
 }
 
 /// Inspect one listed container and merge runtime details into a `Container`.
@@ -552,33 +578,36 @@ async fn docker_get(path: &str) -> anyhow::Result<Vec<u8>> {
     if !std::path::Path::new(SOCKET).exists() {
         anyhow::bail!("docker socket not found");
     }
-    let stream = tokio::net::UnixStream::connect(SOCKET).await?;
-    let io = TokioIo::new(stream);
-    let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
-        .await
-        .context("docker socket HTTP handshake")?;
-    tokio::spawn(async move {
-        let _ = conn.await;
-    });
+    let exchange = async {
+        let stream = tokio::net::UnixStream::connect(SOCKET).await?;
+        let io = TokioIo::new(stream);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+            .await
+            .context("docker socket HTTP handshake")?;
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
 
-    let request = Request::builder()
-        .method("GET")
-        .uri(format!("http://localhost{path}"))
-        .header("Host", "localhost")
-        .body(Empty::<Bytes>::new())?;
-    let response = sender.send_request(request).await?;
-    let status = response.status();
-    let body = response.into_body().collect().await?.to_bytes();
-    if !status.is_success() {
-        // Docker's error response has its own message ("No such container: xxx", etc.).
-        // Just returning "docker API returned 404" makes it impossible to tell why the container
-        // couldn't be fetched -- common when getting logs/usage and the snapshot container was deleted.
-        anyhow::bail!(
-            "{}",
-            docker_error_message(status.as_u16(), &String::from_utf8_lossy(&body))
-        );
-    }
-    Ok(body.to_vec())
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("http://localhost{path}"))
+            .header("Host", "localhost")
+            .body(Empty::<Bytes>::new())?;
+        let response = sender.send_request(request).await?;
+        let status = response.status();
+        let body = response.into_body().collect().await?.to_bytes();
+        if !status.is_success() {
+            // Docker's error response has its own message ("No such container: xxx", etc.).
+            // Just returning "docker API returned 404" makes it impossible to tell why the container
+            // couldn't be fetched -- common when getting logs / usage and the snapshot container was deleted.
+            anyhow::bail!(
+                "{}",
+                docker_error_message(status.as_u16(), &String::from_utf8_lossy(&body))
+            );
+        }
+        Ok(body.to_vec())
+    };
+    with_docker_timeout(exchange).await
 }
 
 /// Docker calls that need write actions (start / stop / restart / remove).
@@ -587,29 +616,43 @@ async fn docker_write(method: &str, path: &str) -> anyhow::Result<(u16, String)>
     if !std::path::Path::new(SOCKET).exists() {
         anyhow::bail!("docker socket not found");
     }
-    let stream = tokio::net::UnixStream::connect(SOCKET).await?;
-    let io = TokioIo::new(stream);
-    let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
-        .await
-        .context("docker socket HTTP handshake")?;
-    tokio::spawn(async move {
-        let _ = conn.await;
-    });
+    let exchange = async {
+        let stream = tokio::net::UnixStream::connect(SOCKET).await?;
+        let io = TokioIo::new(stream);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+            .await
+            .context("docker socket HTTP handshake")?;
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
 
-    let request = Request::builder()
-        .method(method)
-        .uri(format!("http://localhost{path}"))
-        .header("Host", "localhost")
-        .body(Empty::<Bytes>::new())?;
-    let response = sender.send_request(request).await?;
-    let status = response.status().as_u16();
-    let body = response
-        .into_body()
-        .collect()
-        .await
-        .map(|b| String::from_utf8_lossy(&b.to_bytes()).to_string())
-        .unwrap_or_default();
-    Ok((status, body))
+        let request = Request::builder()
+            .method(method)
+            .uri(format!("http://localhost{path}"))
+            .header("Host", "localhost")
+            .body(Empty::<Bytes>::new())?;
+        let response = sender.send_request(request).await?;
+        let status = response.status().as_u16();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .map(|b| String::from_utf8_lossy(&b.to_bytes()).to_string())
+            .unwrap_or_default();
+        Ok((status, body))
+    };
+    with_docker_timeout(exchange).await
+}
+
+/// Bound an arbitrary Docker exchange, turning a wedged daemon into an error
+/// instead of an unbounded await.
+async fn with_docker_timeout<T>(
+    exchange: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    match tokio::time::timeout(DOCKER_CALL_TIMEOUT, exchange).await {
+        Ok(result) => result,
+        Err(_) => anyhow::bail!("docker API call timed out after {DOCKER_CALL_TIMEOUT:?}"),
+    }
 }
 
 #[cfg(test)]

@@ -9,6 +9,7 @@
 
 use std::fmt::Write as _;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{bail, Context};
 use rustls::pki_types::{CertificateDer, ServerName};
@@ -17,6 +18,12 @@ use tokio::io::AsyncWriteExt;
 use tokio_rustls::TlsConnector;
 use zhiwei_common::auth::{HEADER_NODE, HEADER_NONCE, HEADER_SIGNATURE, HEADER_TIMESTAMP};
 use zhiwei_common::{KeyPair, SignedHeaders};
+
+/// Upper bound on a full request (connect + TLS handshake + write + read).
+/// Telemetry payloads are small and the monitor is normally local, so this is
+/// generous — its job is to turn a wedged connection into a retryable error
+/// instead of a permanently hung agent.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct HttpTransport {
     host: String,
@@ -141,7 +148,35 @@ impl HttpTransport {
     }
 
     /// Low-level send: `headers` are additional headers beyond Host/Content-Length/Content-Type
+    ///
+    /// The whole exchange (connect → TLS → write → read) is bounded by
+    /// [`REQUEST_TIMEOUT`]. Without it, a monitor that accepts the TCP
+    /// connection but never responds leaves the single-threaded agent parked on
+    /// this future forever, freezing telemetry and the command channel alike.
     async fn send(
+        &self,
+        method: &str,
+        path_and_query: &str,
+        body: &[u8],
+        headers: &[(&str, String)],
+        content_type: &str,
+    ) -> anyhow::Result<(u16, Vec<u8>)> {
+        match tokio::time::timeout(
+            REQUEST_TIMEOUT,
+            self.send_inner(method, path_and_query, body, headers, content_type),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => anyhow::bail!(
+                "request to {} timed out after {:?}",
+                self.authority,
+                REQUEST_TIMEOUT
+            ),
+        }
+    }
+
+    async fn send_inner(
         &self,
         method: &str,
         path_and_query: &str,
