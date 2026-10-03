@@ -42,7 +42,7 @@ proto/**:
       - any-glob-to-any-file: 'proto/**'
 
 # Configuration
-*.toml:
+"*.toml":
   - changed-files:
       - any-glob-to-any-file: '*.toml'
 
