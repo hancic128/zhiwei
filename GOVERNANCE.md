@@ -28,7 +28,8 @@ operates under a **benevolent dictator** model with a clear vision and scope.
 ### How to Influence Decisions
 
 1. **Open an issue first** for significant changes
-2. **Read the positioning document** ([docs/POSITIONING.md](./docs/POSITIONING.md))
+2. **Skim [README.md](./README.md)** for what the project does and does not
+   aim to be — the "explicitly won't do" section is the source of truth
 3. **Align with the project's goals**: single operator, multi-machine management
 4. **Be patient**: this is a one-person project
 

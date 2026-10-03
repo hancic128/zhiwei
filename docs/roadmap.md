@@ -49,7 +49,7 @@ Completed:
 
 ## Not Planned
 
-These are explicitly out of scope (see [docs/POSITIONING.md](./docs/POSITIONING.md)):
+These are explicitly out of scope:
 
 | Won't Do | Reason |
 | --- | --- |
