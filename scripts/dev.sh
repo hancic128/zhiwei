@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 #
-# 知微本地试验环境
+# 知微本地试验环境（前后端一体）
 #
-#   ./scripts/dev.sh start    Build and start monitor, auto-enroll a local node
+#   ./scripts/dev.sh start    构建并启动后端 + 前端开发服务器
 #   ./scripts/dev.sh query    List enrolled nodes
-#   ./scripts/dev.sh watch     Poll latest telemetry for a node (default 2s interval)
+#   ./scripts/dev.sh watch    Poll latest telemetry for a node (default 2s interval)
 #   ./scripts/dev.sh index    GET / overview
 #   ./scripts/dev.sh token    Print new bootstrap token (10 minutes)
 #   ./scripts/dev.sh status   Process and log status
-#   ./scripts/dev.sh stop     Stop monitor and node
-#   ./scripts/dev.sh reset    Reset: stop, delete data, restart from scratch
-#   ./scripts/dev.sh clean    Stop and delete local data (including CA)
+#   ./scripts/dev.sh stop     停止后端和前端
+#   ./scripts/dev.sh reset    重置：停止、删除数据、重启
+#   ./scripts/dev.sh clean    停止并删除所有数据（包括 CA）
 #
 # Default uses plain HTTP (TLS terminated by edge), same as managed platform deployment.
 # To try built-in TLS: ZHIWEI_DEV_TLS=1 ./scripts/dev.sh start
@@ -31,6 +31,7 @@ MONITOR_LOG="$DATA_DIR/monitor.log"
 OPS_LOG="$DATA_DIR/ops.log"
 NODE_LOG="$DATA_DIR/node.log"
 TOKEN_FILE="$DATA_DIR/admin.token"
+UI_LOG="$DATA_DIR/ui.log"
 
 say() { printf '\033[36m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[31mError:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -47,12 +48,48 @@ need_token() {
 q() { need_token; curl -s -H "Authorization: Bearer $(cat "$TOKEN_FILE")" "$@"; }
 
 build() {
-  say "Building (incremental, usually 1-3 seconds)"
+  say "Building Rust (incremental, usually 1-3 seconds)"
   cargo build --quiet --bin zhiwei-monitor --bin zhiwei-node --bin zhiwei-ops
+}
+
+build_ui() {
+  say "Building UI"
+  cd "$ROOT/ui" && npm run build 2>&1 | tail -5
+  cd "$ROOT"
+}
+
+start_ui() {
+  # 不管是不是我们启的，先把所有 vite / esbuild 全杀掉，
+  # 否则旧的 5173 端口占用者会一直响应，新代码进不来
+  pkill -f 'node.*vite' 2>/dev/null || true
+  pkill -f '@esbuild/darwin' 2>/dev/null || true
+  sleep 1
+  # 5173 端口上若有遗留进程（其他方式启动的），按端口杀掉
+  local port_pid
+  port_pid="$(lsof -ti :5173 2>/dev/null || true)"
+  if [ -n "$port_pid" ]; then
+    kill -9 $port_pid 2>/dev/null || true
+    sleep 1
+  fi
+
+  mkdir -p "$DATA_DIR"
+  cd "$ROOT/ui"
+  nohup npm run dev >"$UI_LOG" 2>&1 &
+  cd "$ROOT"
+  say "UI dev server starting → http://localhost:5173"
+  sleep 3
+  if pgrep -f 'node.*vite' >/dev/null 2>&1; then
+    say "UI dev server running"
+  else
+    say "UI dev server failed to start, check $UI_LOG"
+    tail -10 "$UI_LOG"
+  fi
 }
 
 cmd_start() {
   build
+  build_ui
+
   # ops-server starts first: it generates signing key and ops.pub, monitor distributes to nodes during enroll
   if pgrep -f 'zhiwei-ops --data-dir' >/dev/null 2>&1; then
     say "ops-server already running"
@@ -102,6 +139,7 @@ cmd_start() {
     say "To enroll a node manually:"
     echo "  ZHIWEI_MONITOR_URL=$(url) ZHIWEI_BOOTSTRAP_TOKEN=\$(./scripts/dev.sh token) \\"
     echo "    cargo run --bin zhiwei-node -- --state-dir $DATA_DIR/node --interval $INTERVAL"
+    start_ui
     return
   fi
 
@@ -118,7 +156,10 @@ cmd_start() {
     say "node enrolled (reporting every ${INTERVAL}s)"
   fi
 
+  start_ui
   cmd_status
+  echo
+  say "Access the console at http://localhost:5173"
   echo
   say "Try these:"
   echo "  ./scripts/dev.sh query"
@@ -168,6 +209,7 @@ cmd_status() {
   else
     say "node:    stopped"
   fi
+  say "ui:      $(pgrep -f 'node.*vite' >/dev/null && echo running || echo stopped)"
   [ -f "$MONITOR_LOG" ] && say "Recent monitor log:" && tail -3 "$MONITOR_LOG"
   [ -f "$NODE_LOG" ] && say "Recent node log:" && tail -3 "$NODE_LOG"
 }
@@ -176,7 +218,9 @@ cmd_stop() {
   pkill -f 'zhiwei-monitor --data-dir' 2>/dev/null || true
   pkill -f 'zhiwei-node --state-dir '"$DATA_DIR/node"'' 2>/dev/null || true
   pkill -f 'zhiwei-ops --data-dir' 2>/dev/null || true
-  say "Stopped local processes"
+  pkill -f 'node.*vite' 2>/dev/null || true
+  pkill -f '@esbuild/darwin' 2>/dev/null || true
+  say "Stopped all processes"
 }
 
 cmd_reset() {
