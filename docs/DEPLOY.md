@@ -92,7 +92,7 @@ ZhiWei uses **Ed25519 request signing** instead:
 | Self-hosted | Default (monitor terminates TLS) | `https://monitor.example.com` |
 | Render / Railway / Northflank | `--plain-http` or `ZHIWEI_PLAIN_HTTP=1` | Platform-issued `https://<app>.onrender.com` |
 
-### Auto-Detection (v0.1.0+)
+### Auto-Detection (v0.0.1+)
 
 Without explicit `--plain-http`, monitor auto-detects managed platforms:
 

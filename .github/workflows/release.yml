@@ -1,6 +1,6 @@
 name: release
 
-# 打 tag（v0.1.0 这种）就出预编译二进制，供 scripts/install.sh 下载。
+# 打 tag（v0.0.1 这种）就出预编译二进制，供 scripts/install.sh 下载。
 # 也支持手动触发，用来验证矩阵是否还能编过。
 on:
   push:
@@ -84,7 +84,6 @@ jobs:
           cp "$dir/zhiwei-ops" "$staging/"
           # 分开 copy 并逐个判存在：`cp README.md LICENSE dest/` 在 LICENSE
           # 缺失时会整条失败，可能连 README 都拷不进去（各平台 cp 行为不一致）。
-          # 本仓库当前没有 LICENSE 文件，所以这条路径是常态而非异常。
           for f in README.md LICENSE NOTICE; do
             if [ -f "$f" ]; then cp "$f" "$staging/"; fi
           done

@@ -4288,9 +4288,12 @@ mod enroll_token_tests {
     fn enroll_scheme_stays_https_for_public_and_local_tls() {
         for host in [
             "example.com",
-            "monitor.hancic.site",
-            "49.232.168.161:8443",
-            "170.106.103.36",
+            // TODO(open-source): replace personal domain with a neutral test fixture
+            // (e.g. "monitor.example.test") before tagging the public release.
+            "monitor.example.test",
+            // RFC 2606 / 5737 reserved ranges — neutral test fixtures.
+            "192.0.2.1:8443",
+            "203.0.113.1",
         ] {
             let h = headers_with(&[("host", host)]);
             assert_eq!(enroll_url_scheme(&h, false), "https", "host={host}");

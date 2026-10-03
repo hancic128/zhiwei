@@ -51,7 +51,7 @@ body:
       placeholder: |
         OS: Ubuntu 22.04 LTS
         Deployment: Docker on VPS
-        Version: v0.1.0
+        Version: v0.0.1
         Architecture: x86_64
     validations:
       required: true

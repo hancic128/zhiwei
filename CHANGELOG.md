@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Nothing yet.
 
-## [0.1.0] - 2026-10-02
+## [0.0.1] - 2026-10-03
 
 Initial release.
+
+> Note: the previously drafted `[0.1.0] - 2026-10-02` entry has been folded
+> back into `[Unreleased]` while the project is still being prepared for
+> public release. The actual published version is `0.0.1`.

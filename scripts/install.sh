@@ -9,17 +9,16 @@
 # 环境变量 / 参数（参数优先）：
 #   ZHIWEI_BIN          node | monitor | ops   默认 node。装哪个二进制；
 #                       monitor 会连带装 zhiwei-ops（命令通道的控制平面）。
-#   ZHIWEI_VERSION      latest | 0.1.0      默认 latest。
+#   ZHIWEI_VERSION      latest | 0.0.1      默认 latest。
 #   ZHIWEI_INSTALL_DIR  /usr/local/bin      默认 /usr/local/bin；不可写时自动 sudo。
 #   ZHIWEI_LIBC         musl | gnu          Linux 专用，默认 musl（静态、不挑 glibc）。
 #   ZHIWEI_BASE_URL     自定义下载前缀     给镜像站 / 内网分发用；默认走 GitHub Release。
 #                       已知可用值：
 #                         - https://artifacts.hancic.site/releases/hancic128/zhiwei
 #                           （自建制品仓库，国内直连，由 CI 每次 tag 同步）
-#   GITHUB_TOKEN        私有仓库下载用      仓库公开后不需要。
 #
 # 例：
-#   ... | sh -s -- --bin monitor --version 0.1.0
+#   ... | sh -s -- --bin monitor --version 0.0.1
 #
 # 例（走自建制品仓库，国内加速）：
 #   ZHIWEI_BASE_URL=https://artifacts.hancic.site/releases/hancic128/zhiwei \
