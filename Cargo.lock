@@ -3677,7 +3677,7 @@ dependencies = [
 
 [[package]]
 name = "zhiwei-common"
-version = "0.1.7"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -3697,7 +3697,7 @@ dependencies = [
 
 [[package]]
 name = "zhiwei-monitor-server"
-version = "0.1.7"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3739,7 +3739,7 @@ dependencies = [
 
 [[package]]
 name = "zhiwei-node-agent"
-version = "0.1.7"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3776,7 +3776,7 @@ dependencies = [
 
 [[package]]
 name = "zhiwei-ops-server"
-version = "0.1.7"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3799,7 +3799,7 @@ dependencies = [
 
 [[package]]
 name = "zhiwei-proto"
-version = "0.1.7"
+version = "0.0.1"
 dependencies = [
  "prost",
  "prost-build",
@@ -3810,7 +3810,7 @@ dependencies = [
 
 [[package]]
 name = "zhiwei-storage"
-version = "0.1.7"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
