@@ -31,6 +31,6 @@ pub enum Error {
 
 impl From<anyhow::Error> for Error {
     fn from(err: anyhow::Error) -> Self {
-        Error::Other(err.to_string())
+        Self::Other(err.to_string())
     }
 }

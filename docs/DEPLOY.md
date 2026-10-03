@@ -92,7 +92,7 @@ ZhiWei uses **Ed25519 request signing** instead:
 | Self-hosted | Default (monitor terminates TLS) | `https://monitor.example.com` |
 | Render / Railway / Northflank | `--plain-http` or `ZHIWEI_PLAIN_HTTP=1` | Platform-issued `https://<app>.onrender.com` |
 
-### Auto-Detection (v0.1.0+)
+### Auto-Detection (v0.0.1+)
 
 Without explicit `--plain-http`, monitor auto-detects managed platforms:
 
@@ -182,7 +182,7 @@ Linux (x86_64/aarch64 × musl/gnu) and macOS (arm64/x86_64).
 The install script auto-detects OS and architecture, verifies SHA256:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hancic128/zhiwei/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/zhiwei/zhiwei/main/scripts/install.sh | sh
 ```
 
 Default installs `zhiwei-node`; use `-s -- --bin monitor` to install monitor.
@@ -190,8 +190,8 @@ Default installs `zhiwei-node`; use `-s -- --bin monitor` to install monitor.
 **China / isolated networks**: set `ZHIWEI_BASE_URL` to your own mirror:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hancic128/zhiwei/main/scripts/install.sh \
-  | ZHIWEI_BASE_URL=https://artifacts.hancic.site/releases/hancic128/zhiwei sh
+curl -fsSL https://raw.githubusercontent.com/zhiwei/zhiwei/main/scripts/install.sh \
+  | ZHIWEI_BASE_URL=https://mirror.example.com/releases/zhiwei/zhiwei sh
 ```
 
 ### Enroll
@@ -208,7 +208,7 @@ To set up as a systemd/launchd service (auto-restart on boot), use the
 install script:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hancic128/zhiwei/main/scripts/install-node-service.sh \
+curl -fsSL https://raw.githubusercontent.com/zhiwei/zhiwei/main/scripts/install-node-service.sh \
   | sudo sh -s -- --token zhi-bt-xxxxxxxx
 ```
 

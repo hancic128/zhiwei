@@ -1,15 +1,16 @@
 import { cn } from "@/lib/utils";
 
 /**
- * 知微标识 = public/favicon.svg 里的那条折线本身。
+ * ZhiWei mark = the polyline itself from public/favicon.svg.
  *
- * 标识只有折线：不加底板、不加描边。界面里用 currentColor —— 颜色由调用点给的
- * `text-brand-*` 决定，跟着主题色（朱砂/靛蓝/翡翠…）与明暗走；标签页图标由
- * `lib/favicon.ts` 按同一套规则（浅色 brand-600 / 深色 brand-500）重画，
- * 两边始终同色。折线若改，favicon.svg 与 lib/favicon.ts 的 GLYPH 要一起改。
+ * The mark is just a polyline: no plate, no outline. The interface uses currentColor — the color is decided by
+ * the `text-brand-*` class at the call site, following the theme color (vermilion / indigo / emerald...) and light/dark;
+ * the tab icon is redrawn by `lib/favicon.ts` using the same rules (light brand-600 / dark brand-500),
+ * so both stay in sync. If the polyline changes, favicon.svg and the GLYPH in lib/favicon.ts must change together.
  *
- * viewBox 比 32x32 的方形画布窄一圈：去掉底板后，原来为底板留的空白会让 logo
- * 悬在左上角、偏小。这里裁到折线本身（含 2.4 描边的一半）留一点呼吸。
+ * The viewBox is one inset tighter than the 32x32 square canvas: after removing the plate, the original padding
+ * for the plate would leave the logo floating in the top-left corner, looking too small. Here we crop to the
+ * polyline itself (including half of the 2.4 stroke) to leave a bit of breathing room.
  */
 const GLYPH = "M7 21.5h4.5l2.5-6 3 11 3-14.5 2.5 9.5H25";
 

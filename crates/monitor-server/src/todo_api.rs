@@ -1,10 +1,10 @@
-//! 待办（`GET /v1/todo`）——默认页。
+//! Todo (`GET /v1/todo`) — default page.
 //!
-//! 定位（`docs/POSITIONING.md`）要求「认知轻」：系统给的不是曲线，是
-//! 「今天要我处理的几件事」。本模块把多个数据源汇成一条流：
-//! 指标告警 · 服务探活 · 证书到期 · 节点离线。
+//! Design principle: the system gives you not curves, but "the few things I
+//! need to handle today". This module combines multiple data sources into one
+//! stream: metric alerts · service probes · certificate expiry · node offline.
 //!
-//! 设计：`docs/superpowers/specs/2026-09-19-product-structure-design.md` §4。
+//! Design: `docs/superpowers/specs/2026-09-19-product-structure-design.md` §4.
 
 use axum::{
     extract::State,
@@ -13,39 +13,47 @@ use axum::{
     Json,
 };
 use serde::Serialize;
+use zhiwei_storage::alerts_repo::Alert;
+use zhiwei_storage::node_repo::NodeRecord;
 
 use crate::routes::{err, read_auth_ok};
 use crate::state::AppState;
 
-/// 节点多久没上报算离线——和后台 liveness 巡检共用同一个常量（见 alerts::NODE_OFFLINE_AFTER_MS），
-/// 避免出现「控制台显示在线 / 后台已经在告警」这种不一致。
-pub(crate) use crate::alerts::NODE_OFFLINE_AFTER_MS;
+/// How long a node can go silent before considered offline — shares the same
+/// constant with the background liveness check (see `alerts::NODE_OFFLINE_AFTER_MS`),
+/// avoiding "console shows online / background already alerts" inconsistency.
+pub use crate::alerts::NODE_OFFLINE_AFTER_MS;
 
-/// 已恢复的留痕条数——留痕是建立信任用的，不需要长
+/// Number of recovered-history entries kept — history is for trust, doesn't
+/// need to be long
 const RECOVERED_LIMIT: i64 = 5;
 
-/// 分档：按「要不要现在动手」，不按监控的严重级别
+/// Buckets: by "do I need to act now", not by severity
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bucket {
-    /// 已经坏了，现在就要处理
+    /// Already broken, needs action now
     Now,
-    /// 还没坏，但会坏——要留意
+    /// Not broken yet, but will be — keep an eye on it
     Watch,
 }
 
-/// 分档规则。
+/// Bucketing rules.
 ///
-/// 关键点：**不看 severity，看「坏了没有」**。
-/// - `probe`：服务已经探不到了 → 现在要处理（哪怕规则标的是 warning）
-/// - `node_offline`：节点已经联系不上 → 现在要处理
-/// - `command_channel`：节点在线但控制面是坏的（启停 / 日志全是死按钮）→ 现在要处理
-/// - `cert` / `rule`：由 severity 决定——但这两个来源的 severity 语义恰好就是
-///   「坏了没有」：证书是「已过期 / 快到期」，指标规则是「超阈值 / 接近阈值」
+/// Key point: **doesn't look at severity, looks at "is it broken"**.
+/// - `probe`: service already unreachable → act now (even if rule is "warning")
+/// - `node_offline`: node already unreachable → act now
+/// - `command_channel`: node online but control plane is broken (start / log
+///   buttons are dead) → act now
+/// - `cert` / `rule`: severity decides — but for these two sources the
+///   severity semantics happen to be "is it broken": cert is "expired /
+///   expiring soon", metric rule is "above threshold / approaching threshold"
 pub fn bucket_of(source: &str, severity: &str) -> Bucket {
     match source {
-        // 已经坏了：服务探不到 / 节点联系不上 / 命令通道是死的（点了没反应）
+        // Already broken: service unreachable / node unreachable / command
+        // channel dead (clicks have no effect)
         "probe" | "node_offline" | "command_channel" => Bucket::Now,
-        // 指标规则与证书：严重程度由来源自己定（语义见上）
+        // Metric rules and certs: severity decided by the source itself
+        // (semantics above)
         _ => {
             if severity == "critical" {
                 Bucket::Now
@@ -56,7 +64,8 @@ pub fn bucket_of(source: &str, severity: &str) -> Bucket {
     }
 }
 
-/// 每条待办要带「下一步做什么」——返回 i18n 键，文案在前端语言包里。
+/// Each todo item carries "what to do next" — returns an i18n key, the text
+/// lives in the frontend's language pack.
 pub fn hint_key(source: &str, metric: &str) -> &'static str {
     match source {
         "probe" => "probe",
@@ -79,29 +88,31 @@ pub fn hint_key(source: &str, metric: &str) -> &'static str {
     }
 }
 
-/// 静默 = 「这段时间别告诉我」。静默期内的告警不进待办，到期后自动回来。
-/// 边界：`until == now` 算已过期，应当回到待办。
-pub fn is_silenced(silenced_until_unix_nano: Option<i64>, now_ns: i64) -> bool {
+/// Silence = "don't tell me about it for this period". Alerts within the
+/// silence window don't enter the todo; they auto-return when the window ends.
+/// Boundary: `until == now` is already expired, should return to the todo.
+pub const fn is_silenced(silenced_until_unix_nano: Option<i64>, now_ns: i64) -> bool {
     matches!(silenced_until_unix_nano, Some(until) if until > now_ns)
 }
 
-/// 一条待办。`title` / `detail` 里，告警类的文案来自库里的规则名与 message；
-/// 节点离线这类由前端用 `hint_key` + 时间自己拼（保证中英双语）。
+/// One todo item. For `title` / `detail`, alert-class text comes from the
+/// stored rule name and message; for things like node offline, the frontend
+/// composes its own display via `hint_key` + time (so bilingual works).
 #[derive(Debug, Serialize)]
 pub struct TodoItem {
     pub id: String,
-    /// rule | probe | cert | node_offline | command_channel
+    /// rule | probe | cert | `node_offline` | `command_channel`
     pub source: String,
     pub severity: String,
     pub title: String,
     pub detail: String,
-    /// 下一步做什么（i18n 键）
+    /// What to do next (i18n key)
     pub hint_key: &'static str,
     pub node_id: String,
     pub hostname: String,
     pub since_unix_nano: i64,
     pub resolved_at_unix_nano: Option<i64>,
-    /// 前端「去看看」的落点
+    /// Frontend "go look" target
     pub link: String,
 }
 
@@ -109,16 +120,17 @@ pub struct TodoItem {
 pub struct Summary {
     pub nodes_online: i64,
     pub nodes_total: i64,
-    /// 健康探针数（按探针维度，不是按服务分组）
+    /// Number of healthy probes (per-probe, not per-service grouping)
     pub probes_healthy: i64,
-    /// 探针总数
+    /// Total probes
     pub probes_total: i64,
     pub certs_total: i64,
     pub containers_total: i64,
     pub containers_failed: i64,
 }
 
-/// `GET /v1/todo` —— 默认页：把「今天要处理的事」汇成一条流。
+/// `GET /v1/todo` — default page: combines "things to handle today" into one
+/// stream.
 pub async fn todo_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if !read_auth_ok(&state, &headers).await {
         return err(
@@ -128,12 +140,7 @@ pub async fn todo_handler(State(state): State<AppState>, headers: HeaderMap) -> 
     }
 
     let now_ns = zhiwei_common::Timestamp::now().unix_nano();
-    let now_ms = now_ns / 1_000_000;
-    let is_online = |last_seen: Option<i64>| {
-        last_seen
-            .map(|ts| now_ms - ts / 1_000_000 < NODE_OFFLINE_AFTER_MS)
-            .unwrap_or(false)
-    };
+    let now_epoch_ms = now_ns / 1_000_000;
 
     let nodes = match state.storage.nodes().list_all().await {
         Ok(n) => n,
@@ -145,55 +152,14 @@ pub async fn todo_handler(State(state): State<AppState>, headers: HeaderMap) -> 
         }
     };
 
-    // 待办里的节点名一律用「显示名」（有别名用别名）——主机名往往是
-    // VM-16-12-opencloudos 这种，看不出是哪台；别名是用户自己起的名字。
-    // 节点已删除时退回告警落库时记下的主机名。
-    let display_of = |id: &str, fallback: &str| -> String {
-        nodes
-            .iter()
-            .find(|n| n.id == id)
-            .map(|n| crate::routes::node_display_name(&n.alias, &n.hostname))
-            .unwrap_or_else(|| fallback.to_string())
-    };
-
     let (services_healthy, services_total) = state
         .storage
         .probes()
         .probe_counts()
         .await
         .unwrap_or((0, 0));
-
-    // 证书与容器来自各节点最新快照
-    let mut certs_total = 0i64;
-    let mut containers_total = 0i64;
-    let mut containers_failed = 0i64;
-    for n in &nodes {
-        let id = zhiwei_common::NodeId::from_string(n.id.clone());
-        let row = match state.storage.inventory().find(&id).await {
-            Ok(Some(r)) => r,
-            _ => continue,
-        };
-        let certs: Vec<serde_json::Value> =
-            serde_json::from_str(&row.certificates_json).unwrap_or_default();
-        certs_total += certs
-            .iter()
-            .filter(|c| {
-                !c.get("parse_error")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-            })
-            .count() as i64;
-        let containers: Vec<serde_json::Value> =
-            serde_json::from_str(&row.containers_json).unwrap_or_default();
-        for c in &containers {
-            containers_total += 1;
-            let st = c.get("state").and_then(|v| v.as_str()).unwrap_or("");
-            let status = c.get("status").and_then(|v| v.as_str()).unwrap_or("");
-            if crate::probes_api::container_is_failed(st, status) {
-                containers_failed += 1;
-            }
-        }
-    }
+    let (certs_total, containers_total, containers_failed) =
+        inventory_counters(&state, &nodes).await;
 
     let open_alerts = state
         .storage
@@ -208,107 +174,24 @@ pub async fn todo_handler(State(state): State<AppState>, headers: HeaderMap) -> 
         .await
         .unwrap_or_default();
 
-    let mut now_items: Vec<TodoItem> = Vec::new();
-    let mut watch_items: Vec<TodoItem> = Vec::new();
-    let mut silenced = 0i64;
+    let (mut now_items, mut watch_items, silenced) =
+        bucket_open_alerts(&open_alerts, &nodes, now_ns);
+    now_items.extend(command_channel_items(&state, &nodes, now_epoch_ms));
 
-    for a in &open_alerts {
-        // 静默期内的不进待办——静默就是「这段时间别告诉我」
-        if is_silenced(a.silenced_until_unix_nano, now_ns) {
-            silenced += 1;
-            continue;
-        }
-        let item = TodoItem {
-            id: format!("alert-{}", a.id),
-            source: a.source.clone(),
-            severity: a.severity.clone(),
-            title: a.rule_name.clone(),
-            detail: a.message.clone(),
-            hint_key: hint_key(&a.source, &a.metric),
-            node_id: a.node_id.clone(),
-            hostname: display_of(&a.node_id, &a.hostname),
-            since_unix_nano: a.started_at_unix_nano,
-            resolved_at_unix_nano: None,
-            link: format!("/nodes/{}", a.node_id),
-        };
-        match bucket_of(&a.source, &a.severity) {
-            Bucket::Now => now_items.push(item),
-            _ => watch_items.push(item),
-        }
-    }
-
-    // 节点离线：来自 alerts 表的真实告警（见 `alerts::on_node_liveness_change`）。
-    // 这里不再合成——真实告警的好处是：能走通知渠道、能按 ID 静默、历史在「已恢复」里能看到。
-
-    // 命令通道：节点在线，却一直不来拉命令 —— 控制台上的启停 / 重启 / 日志
-    // 点下去没有任何反应，而节点页看起来一切正常。这是本项目最难自查的一类
-    // 故障（没有 ops 公钥的老节点一个请求都不发，日志里只有一行 warn）。
-    // 节点离线的那种不在这里报：上面那条已经说了，同一个根因别报两遍。
-    for n in &nodes {
-        let last_poll_ms = state.control_polls.last(&n.id);
-        let channel = crate::control_channel::channel_state(
-            n.last_seen_unix_nano.map(|ns| ns / 1_000_000),
-            last_poll_ms,
-            now_ms - state.started_at_ms,
-            now_ms,
-        );
-        if channel != crate::control_channel::Channel::Down {
-            continue;
-        }
-        // 「坏了多久」：最后一次拉取就是最后一次能用；一次都没拉过的
-        // （入网早于 ops 公钥分发）用入网时刻——对它来说通道从来没通过。
-        let since_ms = last_poll_ms.unwrap_or(n.enrolled_at_unix_nano / 1_000_000);
-        now_items.push(TodoItem {
-            id: format!("command-channel-{}", n.id),
-            source: "command_channel".into(),
-            severity: "critical".into(),
-            title: display_of(&n.id, &n.hostname),
-            // 文案由前端按 hint_key 拼，保证中英双语
-            detail: String::new(),
-            hint_key: "commandChannel",
-            node_id: n.id.clone(),
-            hostname: display_of(&n.id, &n.hostname),
-            since_unix_nano: since_ms * 1_000_000,
-            resolved_at_unix_nano: None,
-            link: format!("/nodes/{}", n.id),
-        });
-    }
-
-    // 急的先看；同档里拖得久的排前面
-    let sort_items = |items: &mut Vec<TodoItem>| {
-        items.sort_by(|a, b| {
-            let rank = |s: &str| if s == "critical" { 0 } else { 1 };
-            rank(&a.severity)
-                .cmp(&rank(&b.severity))
-                .then(a.since_unix_nano.cmp(&b.since_unix_nano))
-        });
-    };
+    // Urgent first; within the same bucket, longer-standing items come first
     sort_items(&mut now_items);
     sort_items(&mut watch_items);
 
-    let recovered: Vec<TodoItem> = resolved_alerts
-        .iter()
-        .map(|a| TodoItem {
-            id: format!("alert-{}", a.id),
-            source: a.source.clone(),
-            severity: a.severity.clone(),
-            title: a.rule_name.clone(),
-            detail: a.message.clone(),
-            hint_key: hint_key(&a.source, &a.metric),
-            node_id: a.node_id.clone(),
-            hostname: display_of(&a.node_id, &a.hostname),
-            since_unix_nano: a.started_at_unix_nano,
-            resolved_at_unix_nano: a.resolved_at_unix_nano,
-            link: format!("/nodes/{}", a.node_id),
-        })
-        .collect();
+    let recovered = recovered_items(&resolved_alerts, &nodes);
 
     let summary = Summary {
         nodes_online: nodes
             .iter()
-            .filter(|n| is_online(n.last_seen_unix_nano))
-            .count() as i64,
-        nodes_total: nodes.len() as i64,
+            .filter(|n| is_online(n.last_seen_unix_nano, now_epoch_ms))
+            .count()
+            .try_into()
+            .unwrap_or(i64::MAX),
+        nodes_total: i64::try_from(nodes.len()).unwrap_or(i64::MAX),
         probes_healthy: services_healthy,
         probes_total: services_total,
         certs_total,
@@ -332,13 +215,181 @@ pub async fn todo_handler(State(state): State<AppState>, headers: HeaderMap) -> 
     .into_response()
 }
 
+/// Whether a node last seen at `last_seen_unix_nano` is considered online at `now_epoch_ms`.
+fn is_online(last_seen_unix_nano: Option<i64>, now_epoch_ms: i64) -> bool {
+    last_seen_unix_nano.is_some_and(|ts| now_epoch_ms - ts / 1_000_000 < NODE_OFFLINE_AFTER_MS)
+}
+
+/// Node names in the todo always use the "display name" (alias if set) —
+/// hostnames tend to look like auto-generated cloud names and you can't tell
+/// which machine it is; aliases are user-chosen names. When a node is deleted,
+/// fall back to the hostname recorded when the alert was stored.
+fn node_display(nodes: &[NodeRecord], id: &str, fallback: &str) -> String {
+    nodes.iter().find(|n| n.id == id).map_or_else(
+        || fallback.to_string(),
+        |n| crate::routes::node_display_name(&n.alias, &n.hostname),
+    )
+}
+
+/// Map a stored alert row into a todo item. `resolved` selects whether the
+/// resolved timestamp is carried (open alerts have none).
+fn alert_item(a: &Alert, nodes: &[NodeRecord], resolved: bool) -> TodoItem {
+    TodoItem {
+        id: format!("alert-{}", a.id),
+        source: a.source.clone(),
+        severity: a.severity.clone(),
+        title: a.rule_name.clone(),
+        detail: a.message.clone(),
+        hint_key: hint_key(&a.source, &a.metric),
+        node_id: a.node_id.clone(),
+        hostname: node_display(nodes, &a.node_id, &a.hostname),
+        since_unix_nano: a.started_at_unix_nano,
+        resolved_at_unix_nano: if resolved {
+            a.resolved_at_unix_nano
+        } else {
+            None
+        },
+        link: format!("/nodes/{}", a.node_id),
+    }
+}
+
+/// Split open alerts into `now` / `watch` buckets, skipping silenced ones.
+/// Returns the two item lists plus the silenced count.
+fn bucket_open_alerts(
+    open_alerts: &[Alert],
+    nodes: &[NodeRecord],
+    now_ns: i64,
+) -> (Vec<TodoItem>, Vec<TodoItem>, i64) {
+    let mut now_items = Vec::new();
+    let mut watch_items = Vec::new();
+    let mut silenced = 0i64;
+    for a in open_alerts {
+        // Within the silence window → don't enter the todo — silence means
+        // "don't tell me about it for this period"
+        if is_silenced(a.silenced_until_unix_nano, now_ns) {
+            silenced += 1;
+            continue;
+        }
+        let item = alert_item(a, nodes, false);
+        match bucket_of(&a.source, &a.severity) {
+            Bucket::Now => now_items.push(item),
+            Bucket::Watch => watch_items.push(item),
+        }
+    }
+    (now_items, watch_items, silenced)
+}
+
+/// Certificates and containers come from each node's latest snapshot.
+async fn inventory_counters(state: &AppState, nodes: &[NodeRecord]) -> (i64, i64, i64) {
+    let mut certs_total = 0i64;
+    let mut containers_total = 0i64;
+    let mut containers_failed = 0i64;
+    for n in nodes {
+        let id = zhiwei_common::NodeId::from_string(n.id.clone());
+        let Ok(Some(row)) = state.storage.inventory().find(&id).await else {
+            continue;
+        };
+        let certs: Vec<serde_json::Value> =
+            serde_json::from_str(&row.certificates_json).unwrap_or_default();
+        certs_total += i64::try_from(
+            certs
+                .iter()
+                .filter(|c| {
+                    !c.get("parse_error")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                })
+                .count(),
+        )
+        .unwrap_or(i64::MAX);
+        let containers: Vec<serde_json::Value> =
+            serde_json::from_str(&row.containers_json).unwrap_or_default();
+        for c in &containers {
+            containers_total += 1;
+            let st = c.get("state").and_then(|v| v.as_str()).unwrap_or("");
+            let status = c.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            if crate::probes_api::container_is_failed(st, status) {
+                containers_failed += 1;
+            }
+        }
+    }
+    (certs_total, containers_total, containers_failed)
+}
+
+/// Command channel: node appears online but never polls for commands — start
+/// / stop / logs buttons in the console do nothing while the Nodes page looks
+/// normal. This is the hardest class of failure to spot in this project
+/// (an old node without the ops pub key never sends a single request; the
+/// log only has one warn line).
+///
+/// The "node offline" case is not raised here: it's already raised in
+/// [`bucket_open_alerts`]; reporting the same root cause twice would be noise.
+fn command_channel_items(
+    state: &AppState,
+    nodes: &[NodeRecord],
+    now_epoch_ms: i64,
+) -> Vec<TodoItem> {
+    let mut items = Vec::new();
+    for n in nodes {
+        let last_poll_ms = state.control_polls.last(&n.id);
+        let channel = crate::control_channel::channel_state(
+            n.last_seen_unix_nano.map(|ns| ns / 1_000_000),
+            last_poll_ms,
+            now_epoch_ms - state.started_at_ms,
+            now_epoch_ms,
+        );
+        if channel != crate::control_channel::Channel::Down {
+            continue;
+        }
+        // "How long has it been broken": the last successful poll is the last
+        // time the channel worked. Nodes that never polled (enrolled before
+        // ops pub key distribution) use the enrollment timestamp — for them
+        // the channel has never worked.
+        let since_ms = last_poll_ms.unwrap_or(n.enrolled_at_unix_nano / 1_000_000);
+        items.push(TodoItem {
+            id: format!("command-channel-{}", n.id),
+            source: "command_channel".into(),
+            severity: "critical".into(),
+            title: node_display(nodes, &n.id, &n.hostname),
+            // The wording is composed by the frontend via hint_key, so both
+            // en-US and zh-CN are covered.
+            detail: String::new(),
+            hint_key: "commandChannel",
+            node_id: n.id.clone(),
+            hostname: node_display(nodes, &n.id, &n.hostname),
+            since_unix_nano: since_ms * 1_000_000,
+            resolved_at_unix_nano: None,
+            link: format!("/nodes/{}", n.id),
+        });
+    }
+    items
+}
+
+/// Urgent first; within the same bucket, longer-standing items come first.
+fn sort_items(items: &mut [TodoItem]) {
+    items.sort_by(|a, b| {
+        let rank = |s: &str| i32::from(s != "critical");
+        rank(&a.severity)
+            .cmp(&rank(&b.severity))
+            .then(a.since_unix_nano.cmp(&b.since_unix_nano))
+    });
+}
+
+fn recovered_items(resolved_alerts: &[Alert], nodes: &[NodeRecord]) -> Vec<TodoItem> {
+    resolved_alerts
+        .iter()
+        .map(|a| alert_item(a, nodes, true))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn probe_outage_is_act_now_even_when_severity_is_warning() {
-        // 探活失败意味着服务已经不可用，不该因为规则标了 warning 就降级成「留意」
+        // A probe failure means the service is unreachable — it should not be
+        // demoted to "watch" just because the rule is tagged warning.
         assert_eq!(bucket_of("probe", "warning"), Bucket::Now);
         assert_eq!(bucket_of("probe", "critical"), Bucket::Now);
     }
@@ -350,10 +401,11 @@ mod tests {
 
     #[test]
     fn expired_cert_is_act_now_but_expiring_soon_is_only_watch() {
-        // 证书告警的 severity 语义就是「过没过期」——见 alerts.rs:
+        // The certificate-alert severity is literally "expired or not" — see alerts.rs:
         //   let severity = if expired { "critical" } else { "warning" };
-        // 已过期 = HTTPS 现在就是坏的 → 现在要处理；快到期 = 还没坏 → 留意。
-        // 这条是浏览器验收时抓出来的：把已过期 961 天的证书放进了「留意」。
+        // Expired = HTTPS is broken right now -> handle now. Expiring soon =
+        // not yet broken -> watch. Caught during browser QA: a cert expired
+        // 961 days ago had landed in "watch" before this fix.
         assert_eq!(bucket_of("cert", "critical"), Bucket::Now);
         assert_eq!(bucket_of("cert", "warning"), Bucket::Watch);
     }
@@ -380,7 +432,8 @@ mod tests {
 
     #[test]
     fn dead_command_channel_is_act_now() {
-        // 节点在线却拉不动命令：启停 / 日志全是死按钮，别降级成「留意」
+        // Node is online but the command channel is dead: start / stop / logs
+        // are dead buttons; do not demote to "watch".
         assert_eq!(bucket_of("command_channel", "critical"), Bucket::Now);
         assert_eq!(bucket_of("command_channel", "warning"), Bucket::Now);
     }
@@ -388,7 +441,7 @@ mod tests {
     #[test]
     fn hint_narrows_metric_rules_by_metric() {
         assert_eq!(hint_key("rule", "host.disk.usage"), "disk");
-        // 播种规则里的真实指标名是 host.mem.usage（见 alerts.rs）
+        // The seeded alert rule's metric is host.mem.usage (see alerts.rs)
         assert_eq!(hint_key("rule", "host.mem.usage"), "memory");
         assert_eq!(hint_key("rule", "host.cpu.usage"), "cpu");
     }
@@ -404,7 +457,7 @@ mod tests {
         assert!(!is_silenced(None, now));
         assert!(is_silenced(Some(now + 1), now));
         assert!(!is_silenced(Some(now - 1), now));
-        // 刚好到点：算已过期，应当回到待办
+        // Exactly at the boundary: counts as already expired and should reappear in the todo
         assert!(!is_silenced(Some(now), now));
     }
 }

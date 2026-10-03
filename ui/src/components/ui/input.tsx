@@ -17,7 +17,7 @@ export const Input = React.forwardRef<
 ));
 Input.displayName = "Input";
 
-/** 规范 7.4.2：搜索输入，左侧 Search 图标 */
+/** Spec 7.4.2: search input, Search icon on the left */
 export const SearchInput = React.forwardRef<
   HTMLInputElement,
   React.InputHTMLAttributes<HTMLInputElement>

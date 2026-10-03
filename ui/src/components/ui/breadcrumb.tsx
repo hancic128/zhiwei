@@ -5,15 +5,15 @@ import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 
 /**
- * 顶部 header 里的面包屑。
+ * Breadcrumb in the top header.
  *
- * 页面把「当前层级」写进 context，header 里的 <BreadcrumbOutlet/> 负责渲染——
- * App 的 header 在 <Routes> 之外，页面拿不到它的位置，只能这样反向投递。
- * 最深层（叶子）是当前页，不可点；更浅的层级渲染成路由链接。
- * 叶子允许放任意节点（节点详情页要把状态徽章、入网时间一起放进 header）。
+ * The page writes "current level" into context, and <BreadcrumbOutlet/> in the header renders it —
+ * App's header is outside <Routes>, pages can't reach it, so we push from the page side.
+ * The deepest level (leaf) is the current page and is not clickable; shallower levels render as route links.
+ * The leaf allows arbitrary nodes (the node detail page puts status badge, enroll time, etc. into the header).
  */
 export interface BreadcrumbSegment {
-  /** 链接目标；省略 = 当前页（叶子） */
+  /** Link target; omitted = current page (leaf) */
   to?: string;
   label: React.ReactNode;
 }
@@ -23,15 +23,15 @@ const SetContext = React.createContext<(segments: BreadcrumbSegment[]) => void>(
 );
 const ReadContext = React.createContext<BreadcrumbSegment[]>([]);
 
-/** 页面侧：投递 / 清空面包屑。没有 Provider（登录页等）时是 no-op。 */
+/** Page side: push / clear breadcrumb. No-op without a Provider (e.g. login page). */
 export function useBreadcrumb() {
   return React.useContext(SetContext);
 }
 
-// ---- header 操作区（页面工具栏的反向投递）----
-// 页面把工具栏 portal 进 header 里的 <HeaderActions/>。之所以用 portal 而不是
-// 把 ReactNode 存进 state：工具栏跟着页面状态频繁重渲染，节点身份每次都是新的，
-// 存 state 会变成「effect → setState → 再渲染」的死循环。
+// ---- header actions area (reverse push of page toolbar) ----
+// Pages portal the toolbar into <HeaderActions/> in the header. Why portal instead of
+// storing the ReactNode in state: the toolbar re-renders frequently with page state, every render produces
+// a new node identity, and storing in state would create an "effect → setState → re-render" infinite loop.
 const ActionsHostContext = React.createContext<HTMLElement | null>(null);
 const SetActionsHostContext = React.createContext<
   React.Dispatch<React.SetStateAction<HTMLElement | null>>
@@ -53,13 +53,13 @@ export function BreadcrumbProvider({ children }: { children: React.ReactNode }) 
   );
 }
 
-/** header 里的操作区占位；页面用 useHeaderActions 往里投递工具栏。 */
+/** Placeholder for the actions area in the header; pages use useHeaderActions to push toolbars into it. */
 export function HeaderActions({ className }: { className?: string }) {
   const setHost = React.useContext(SetActionsHostContext);
   return <div ref={setHost} className={cn("flex items-center min-w-0", className)} />;
 }
 
-/** 页面侧：把工具栏投递到 header 的操作区。必须把返回值渲染出来（portal 元素）。 */
+/** Page side: pushes the toolbar into the header actions area. Must render the return value (the portal element). */
 export function useHeaderActions(node: React.ReactNode) {
   const host = React.useContext(ActionsHostContext);
   return host ? createPortal(node, host) : null;

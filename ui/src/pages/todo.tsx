@@ -1,9 +1,11 @@
 /**
- * 待办（默认页）。
+ * Todo (default page).
  *
- * 定位（docs/POSITIONING.md）：系统给的不是曲线，是「今天要我处理的几件事」。
- * 四条约束见 docs/superpowers/specs/2026-09-19-product-structure-design.md §4：
- * 每条带下一步 / 按「要不要现在动手」分档 / 空得有底气 / 已恢复留痕。
+ * Positioning (docs/POSITIONING.md): the system delivers not curves but
+ * "a few things for me to handle today". The four constraints are in
+ * docs/superpowers/specs/2026-09-19-product-structure-design.md §4: each item
+ * has a next step, items are tiered by "do I need to act now", empty must
+ * feel confident, and recovered items leave a trail.
  */
 import * as React from "react";
 import { Link } from "react-router-dom";
@@ -28,7 +30,7 @@ import { StatCards, type StatCard } from "@/components/stat-cards";
 import { useToast } from "@/components/ui/toast";
 import { cn, friendlyError, relativeTime } from "@/lib/utils";
 
-/** 每条待办的来源图标——一眼看出「这是哪一类事」 */
+/** Source icon for each todo item — see at a glance "which kind of thing is this" */
 function SourceIcon({ source, className }: { source: string; className?: string }) {
   switch (source) {
     case "probe":
@@ -48,9 +50,10 @@ function TodoRow({ item, muted = false }: { item: TodoItem; muted?: boolean }) {
   const { t } = useTranslation();
   const qc = useQueryClient();
   const toast = useToast();
-  // 告警项的 id 形如 alert-12；节点离线 / 命令通道这类由系统算出来的项
-  // 没有对应的告警，不能静默（原本只放过 node_offline，其余一律 Number()，
-  // 别的来源一旦进来就会静默一个 NaN）
+  // Alert item ids look like alert-12; items computed by the system such as
+  // node offline / command channel have no corresponding alert and must not
+  // be silenced (the previous code only let node_offline through and ran
+  // Number() on the rest, which would silence NaN for any other source)
   const alertId = item.id.startsWith("alert-") ? Number(item.id.slice(6)) : null;
   const [silenceOpen, setSilenceOpen] = React.useState(false);
   const [resolveOpen, setResolveOpen] = React.useState(false);
@@ -64,7 +67,7 @@ function TodoRow({ item, muted = false }: { item: TodoItem; muted?: boolean }) {
     },
     onError: (e) => toast.push("error", t(friendlyError(e))),
   });
-  // 手动关闭告警
+  // Manually resolve an alert
   const resolve = useMutation({
     mutationFn: () => alertsApi.resolve(alertId as number),
     onSuccess: () => {
@@ -74,7 +77,8 @@ function TodoRow({ item, muted = false }: { item: TodoItem; muted?: boolean }) {
     },
     onError: (e) => toast.push("error", t(friendlyError(e))),
   });
-  // 节点离线的文案由前端拼：保证中英双语（后端只给时间）
+  // The copy for node offline is assembled in the UI to keep both Chinese and
+  // English in sync (the backend only provides the timestamp)
   const detail = item.detail
     ? item.detail
     : item.source === "node_offline"
@@ -224,10 +228,11 @@ function Bucket({
 }
 
 /**
- * 顶部四张大字卡片：整卡可点，跳对应页面。
+ * Top four large cards: each card is clickable and navigates to its page.
  *
- * 空待办不是空白页——这几张卡让「没事」这件事本身是可见的，
- * 也是从仪表盘切到待办时唯一需要的过渡（设计 §4 第 3 条）。
+ * An empty todo is not a blank page — these cards make "nothing to do" itself
+ * visible, and they are the only transition needed when switching from the
+ * dashboard to todo (design §4 item 3).
  */
 function StatusCards({ summary }: { summary: TodoSummary }) {
   const { t } = useTranslation();

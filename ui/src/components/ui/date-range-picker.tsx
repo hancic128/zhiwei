@@ -9,10 +9,10 @@ import { usePrefs } from "@/components/prefs-provider";
 import { cn } from "@/lib/utils";
 
 /**
- * 快捷范围：原需求点名的 8 档，加两档长窗口。
+ * Quick ranges: the 8 presets named in the original requirements, plus two long windows.
  *
- * 90d / 365d 走小时聚合（原始 10 秒数据只保留 14 天，见
- * crates/monitor-server/src/retention.rs）——这是「能看三个月趋势」的前提。
+ * 90d / 365d use hourly aggregation (raw 10-second data is only retained 14 days, see
+ * crates/monitor-server/src/retention.rs) — this is the prerequisite for "see three months of trends".
  */
 export const RANGE_PRESETS = [
   { key: "30m", minutes: 30 },
@@ -30,7 +30,7 @@ export const RANGE_PRESETS = [
 export type RangePresetKey = (typeof RANGE_PRESETS)[number]["key"];
 
 export interface TimeRange {
-  /** 预设档位；有值时 from/to 由调用方按「当前时刻」滚动计算，图表才会跟着刷新走 */
+  /** Preset slot; when set, the caller rolls from/to forward to "now", so charts follow the refresh */
   preset?: RangePresetKey;
   from: number;
   to: number;
@@ -41,7 +41,7 @@ export const presetRange = (key: RangePresetKey): TimeRange => {
   return { preset: key, from, to };
 };
 
-/** 预设档位在 `now` 时刻的起止（调用方按刷新频率重算，范围就跟着现在走） */
+/** Preset slot's bounds at `now` (caller recomputes by refresh rate, range stays current) */
 export const presetBounds = (key: RangePresetKey, now: number) => {
   const preset = RANGE_PRESETS.find((p) => p.key === key)!;
   return { from: now - preset.minutes * 60_000, to: now };
@@ -50,10 +50,11 @@ export const presetBounds = (key: RangePresetKey, now: number) => {
 const MINUTE_STEPS = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55];
 
 /**
- * 时间范围控件（规范：日期范围必须带左侧快捷范围列，禁止原生日期控件）。
+ * Time range control (spec: date ranges must have a left-side quick-ranges column, native date controls forbidden).
  *
- * 左列快捷范围；右侧月历自定义起止——标题点一次进月份视图、再点一次进年份视图，
- * 与「日/月/年三级快速跳转」的要求对应。起止时刻各带时:分下拉。
+ * Left column quick ranges; right side calendar customizes start/end — click the title once to enter month view,
+ * once more to enter year view, corresponding to the "day / month / year three-level quick jump" requirement.
+ * Start and end times each have their own hour:minute dropdowns.
  */
 export function TimeRangePicker({
   value,
@@ -72,7 +73,7 @@ export function TimeRangePicker({
   const [draftFrom, setDraftFrom] = React.useState<number | null>(value.from);
   const [draftTo, setDraftTo] = React.useState<number | null>(value.to);
 
-  // 打开面板时把草稿对齐到当前取值，避免上次未应用的改动残留
+  // When opening the panel, sync the draft to the current value to avoid lingering unapplied changes from last time
   React.useEffect(() => {
     if (!open) return;
     setDraftFrom(value.from);
@@ -126,7 +127,7 @@ export function TimeRangePicker({
             "shadow-lg animate-panel-slide p-4 flex flex-col sm:flex-row gap-4",
           )}
         >
-          {/* 左：快捷范围列 */}
+          {/* Left: quick ranges column */}
           <div className="sm:w-32 shrink-0">
             <p className="text-xs font-semibold text-ink-400 uppercase tracking-wider mb-2">
               {t("range.quick")}
@@ -153,7 +154,7 @@ export function TimeRangePicker({
             </div>
           </div>
 
-          {/* 右：自定义范围（月历 + 时:分） */}
+          {/* Right: custom range (calendar + hour:minute) */}
           <div>
             <div className="flex items-center justify-between gap-2 mb-2">
               <Button
@@ -303,7 +304,7 @@ function DayGrid({
 }) {
   const { t } = useTranslation();
   const first = cursor.startOf("month");
-  // 周一开头：dayjs 的 day() 周日是 0
+  // Monday-first: dayjs's day() has Sunday as 0
   const lead = (first.day() + 6) % 7;
   const start = first.subtract(lead, "day");
   const days = Array.from({ length: 42 }, (_, i) => start.add(i, "day"));

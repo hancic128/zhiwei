@@ -12,7 +12,7 @@
   cargo clippy --all-targets -- -D warnings
   cargo test
   ```
-- [ ] For UI changes: `cd ui && npm run build && npm run lint`
+- [ ] For UI changes: `cd ui && npm run build` (includes locale check + tsc)
 - [ ] My changes generate no new warnings
 
 ## Description

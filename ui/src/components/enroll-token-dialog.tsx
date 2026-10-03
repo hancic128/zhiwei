@@ -11,13 +11,14 @@ import { useToast } from "@/components/ui/toast";
 import { cn, copyText, friendlyError } from "@/lib/utils";
 
 /**
- * 生成一次性入网命令对话框。
+ * One-time enroll command generation dialog.
  *
- * 三档 TTL（1h / 24h / 7d，默认 24h）。提交成功展示整段可直接粘贴的
- * `curl | bash` 命令；过期时间走「n 小时 / n 天」相对描述，避免
- * 在用户跨时区时算不准。
+ * Three TTL tiers (1h / 24h / 7d, default 24h). On success, display the full
+ * paste-ready `curl | bash` command. Expiration is rendered as a relative
+ * "n hours / n days" phrase to avoid time-zone math mistakes by the user.
  *
- * 复用现有 `<Dialog>` 模板（7.10 节）：遮罩 + 标题 + 关闭按钮 + 危险操作提示。
+ * Reuses the existing `<Dialog>` template (section 7.10): backdrop + title +
+ * close button + danger-action hint.
  */
 const TTL_OPTIONS = [
   { value: 3600, key: "ttl1h" },
@@ -25,7 +26,7 @@ const TTL_OPTIONS = [
   { value: 7 * 86_400, key: "ttl7d" },
 ] as const;
 
-/** 用相对时长短语表达「N 小时 / N 天后过期」 */
+/** Express "expires in N hours / N days" using a relative duration phrase */
 function formatExpiresIn(seconds: number): string {
   if (seconds <= 0) return "0";
   if (seconds < 3600) {
@@ -48,8 +49,9 @@ export function EnrollTokenDialog({
   open: boolean;
   onClose: () => void;
   /**
-   * 「接入帮助」用：打开即用默认 TTL 生成命令并自动复制，省掉
-   * 「选 TTL → 点创建 → 再点复制」三步。普通入口仍走表单。
+   * Used by "enroll help": on open, generate a command with the default TTL
+   * and auto-copy it, skipping the "choose TTL -> click create -> click copy"
+   * three-step flow. The normal entry point still uses the form.
    */
   autoCreate?: boolean;
 }) {
@@ -59,7 +61,7 @@ export function EnrollTokenDialog({
   const [label, setLabel] = React.useState("");
   const [created, setCreated] = React.useState<EnrollTokenCreated | null>(null);
 
-  // 关闭时清掉输入 + 已展示的命令，避免下次打开还看见上一份结果
+  // On close, clear the input and any displayed command so reopening doesn't show stale results
   React.useEffect(() => {
     if (!open) {
       setLabel("");
@@ -82,7 +84,7 @@ export function EnrollTokenDialog({
       toast.push(ok ? "success" : "error", ok ? okMsg : t("toast.copyFailed")),
     );
 
-  // 自动生成：只在每次打开后触发一次（ref 挡住 effect 的重复执行）
+  // Auto-generate: only triggers once per open (the ref blocks the effect from re-running)
   const autoStarted = React.useRef(false);
   React.useEffect(() => {
     if (!open) {
@@ -92,11 +94,12 @@ export function EnrollTokenDialog({
     if (!autoCreate || autoStarted.current) return;
     autoStarted.current = true;
     create.mutate();
-    // create.mutate 在 react-query v5 里是稳定引用，不必进依赖
+    // create.mutate is a stable reference in react-query v5; no need to add it as a dep
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, autoCreate]);
 
-  // 自动复制：命令生成后立刻写入剪贴板，失败也不阻断（弹窗里还有复制按钮）
+  // Auto-copy: once the command is generated, write it to the clipboard
+  // immediately; failure doesn't block (the dialog still has a copy button)
   const autoCopied = React.useRef(false);
   React.useEffect(() => {
     if (!open) {
@@ -194,7 +197,7 @@ export function EnrollTokenDialog({
           <p className="text-xs text-ink-400">
             {t("dialog.enrollTokenSecretWarn")}
           </p>
-          {/* 节点侧也能自带别名 / 标签，这里点一句，免得用户装完再一台台补 */}
+          {/* The node side can carry its own alias / labels; mention this so users don't have to fill them in one machine at a time after install */}
           <p className="text-xs text-ink-400">
             {t("dialog.enrollOptionalMeta")}
           </p>

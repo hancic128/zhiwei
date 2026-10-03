@@ -1,31 +1,35 @@
-//! 「新建 / 编辑探针」时的一次性测试：控制台侧立刻把探针跑一遍，不落库。
+//! One-shot test when "create / edit probe": run the probe immediately on
+//! the console side, don't persist.
 //!
-//! 判定分层与节点侧（`crates/node-agent/src/probes.rs`）保持一致：
-//!   - 连不上 / 超时 / 状态码不符 / TLS 握手失败 → `down`
-//!   - 能连上但响应体、banner、延迟或证书有效期不符 → `degraded`
-//!   - 其余 → `ok`
+//! Judgment layers match the node side (`crates/node-agent/src/probes.rs`):
+//!   - Can't connect / timeout / wrong status / TLS handshake fails → `down`
+//!   - Connects but body, banner, latency, or cert validity fails → `degraded`
+//!   - Otherwise → `ok`
 //!
-//! 这里之所以自己实现一份而不是复用节点侧代码：节点侧的探活依赖它的运行时
-//! （`IoStream` 抽象 + monitor CA pinning），而控制台要能在「探针还没绑定节点」
-//! 时先测一次，所以只能由 monitor 自己发起连接。两边的判定规则改动时要一起改。
+//! Why we implement our own instead of reusing node-side code: the node-side
+//! probe depends on its runtime (`IoStream` abstraction + monitor CA pinning),
+//! while the console needs to test before "the probe is bound to a node", so
+//! only the monitor itself can initiate the connection. When the judgment
+//! rules change, both sides must be updated together.
 //!
-//! 结论里的 `reason` / `args` 是给前端做多语言的——monitor 不产出人类文案。
+//! The `reason` / `args` in the result are machine-readable; the frontend
+//! picks display text — the monitor does not produce human-readable strings.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-/// 响应体最多读取的字节数（避免大响应把内存吃满），与节点侧一致
+/// Max bytes read from response body (avoid memory blowup from huge responses),
+/// matches node side
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct Outcome {
-    /// ok / degraded / down
     pub state: &'static str,
     pub latency_ms: Option<f64>,
     pub status_code: Option<i64>,
-    /// 机器可读的原因，前端据此选文案
+    /// Machine-readable reason; the frontend picks display text based on this
     pub reason: &'static str,
     pub args: Value,
 }
@@ -41,7 +45,7 @@ impl Outcome {
         }
     }
 
-    fn degraded(
+    const fn degraded(
         latency_ms: Option<f64>,
         status_code: Option<i64>,
         reason: &'static str,
@@ -56,7 +60,7 @@ impl Outcome {
         }
     }
 
-    fn down(reason: &'static str, args: Value) -> Self {
+    const fn down(reason: &'static str, args: Value) -> Self {
         Self {
             state: "down",
             latency_ms: None,
@@ -75,11 +79,11 @@ fn str_field(v: &Value, key: &str) -> String {
         .to_string()
 }
 
-/// 软失败：延迟超过 `expect.max_latency_ms`
+/// Soft failure: latency exceeds `expect.max_latency_ms`
 fn latency_verdict(expect: &Value, latency_ms: f64, status_code: Option<i64>) -> Option<Outcome> {
     let max = expect
         .get("max_latency_ms")
-        .and_then(|v| v.as_f64())
+        .and_then(serde_json::Value::as_f64)
         .unwrap_or(f64::MAX);
     if latency_ms > max {
         return Some(Outcome::degraded(
@@ -93,7 +97,8 @@ fn latency_verdict(expect: &Value, latency_ms: f64, status_code: Option<i64>) ->
 }
 
 pub async fn run(kind: &str, target: &Value, expect: &Value, timeout_ms: i64) -> Outcome {
-    let timeout = Duration::from_millis(timeout_ms.clamp(100, 60_000) as u64);
+    let timeout =
+        Duration::from_millis(u64::try_from(timeout_ms.clamp(100, 60_000)).unwrap_or(100));
     match kind {
         "http" => tokio::time::timeout(timeout, probe_http(target, expect))
             .await
@@ -125,15 +130,15 @@ async fn probe_http(target: &Value, expect: &Value) -> Outcome {
     };
     let tls_verify = expect
         .get("tls_verify")
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
 
     let builder = reqwest::Client::builder()
-        // 与节点侧一致：不跟随跳转，3xx 本身就按「成功」判定
+        // Matches node side: don't follow redirects, 3xx itself counts as "ok"
         .redirect(reqwest::redirect::Policy::none())
         .danger_accept_invalid_certs(!tls_verify)
         .user_agent("zhiwei-probe/0.1")
-        // 外层 run() 已经用 probe 的 timeout 兜住；这里再留一个上限
+        // Outer run() already caps with probe timeout; leave a second cap here
         .timeout(Duration::from_millis(60_000));
 
     let client = match builder.build() {
@@ -161,7 +166,7 @@ async fn probe_http(target: &Value, expect: &Value) -> Outcome {
     }
 
     let started = Instant::now();
-    let res = match req.send().await {
+    let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
             let reason = if e.is_timeout() { "timeout" } else { "connect" };
@@ -169,11 +174,11 @@ async fn probe_http(target: &Value, expect: &Value) -> Outcome {
             return Outcome::down(reason, json!({ "target": url, "detail": detail }));
         }
     };
-    let status = res.status().as_u16();
+    let status = resp.status().as_u16();
     let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
-    let status_code = Some(status as i64);
+    let status_code = Some(i64::from(status));
 
-    let body = match res.bytes().await {
+    let body = match resp.bytes().await {
         Ok(b) => String::from_utf8_lossy(&b[..b.len().min(MAX_BODY_BYTES)]).to_string(),
         Err(e) => {
             return Outcome::down(
@@ -186,12 +191,12 @@ async fn probe_http(target: &Value, expect: &Value) -> Outcome {
     let expected: Vec<i64> = expect
         .get("status")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_i64()).collect())
+        .map(|a| a.iter().filter_map(serde_json::Value::as_i64).collect())
         .unwrap_or_default();
     let status_ok = if expected.is_empty() {
         (200..400).contains(&status)
     } else {
-        expected.contains(&(status as i64))
+        expected.contains(&i64::from(status))
     };
     if !status_ok {
         return Outcome {
@@ -224,7 +229,13 @@ async fn probe_http(target: &Value, expect: &Value) -> Outcome {
 
 async fn probe_tcp(target: &Value, expect: &Value) -> Outcome {
     let host = str_field(target, "host");
-    let port = target.get("port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+    let port = u16::try_from(
+        target
+            .get("port")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+    )
+    .unwrap_or(0);
     if host.is_empty() || port == 0 {
         return Outcome::down("bad_url", json!({}));
     }
@@ -245,10 +256,10 @@ async fn probe_tcp(target: &Value, expect: &Value) -> Outcome {
         let read = tokio::time::timeout(Duration::from_millis(500), stream.read(&mut buf))
             .await
             .ok()
-            .and_then(|r| r.ok())
+            .and_then(std::result::Result::ok)
             .unwrap_or(0);
         let banner = String::from_utf8_lossy(&buf[..read]).to_string();
-        // 拿不到 banner 不算失败（很多服务不主动说话）
+        // No banner is not a failure (many services don't speak first)
         if read > 0 && !banner.contains(needle) {
             let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
             return Outcome::degraded(
@@ -268,7 +279,13 @@ async fn probe_tcp(target: &Value, expect: &Value) -> Outcome {
 
 async fn probe_tls(target: &Value, expect: &Value) -> Outcome {
     let host = str_field(target, "host");
-    let port = target.get("port").and_then(|v| v.as_u64()).unwrap_or(443) as u16;
+    let port = u16::try_from(
+        target
+            .get("port")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(443),
+    )
+    .unwrap_or(0);
     if host.is_empty() || port == 0 {
         return Outcome::down("bad_url", json!({}));
     }
@@ -282,7 +299,7 @@ async fn probe_tls(target: &Value, expect: &Value) -> Outcome {
     };
     let verify = expect
         .get("verify")
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
 
     let started = Instant::now();
@@ -295,14 +312,15 @@ async fn probe_tls(target: &Value, expect: &Value) -> Outcome {
             )
         }
     };
-    let cfg = match client_config(!verify) {
-        Ok(c) => c,
-        Err(e) => return Outcome::down("tls", json!({ "detail": e.to_string() })),
-    };
-    let connector = tokio_rustls::TlsConnector::from(Arc::new(cfg));
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config(!verify)));
     let name = match rustls::pki_types::ServerName::try_from(sni.clone()) {
         Ok(n) => n,
-        Err(e) => return Outcome::down("tls", json!({ "detail": format!("Invalid SNI {sni}: {e}") })),
+        Err(e) => {
+            return Outcome::down(
+                "tls",
+                json!({ "detail": format!("Invalid SNI {sni}: {e}") }),
+            )
+        }
     };
     let tls_stream = match connector.connect(name, stream).await {
         Ok(s) => s,
@@ -310,7 +328,7 @@ async fn probe_tls(target: &Value, expect: &Value) -> Outcome {
     };
     let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
 
-    // 叶子证书剩余有效期：与节点侧同一算法
+    // Leaf cert remaining validity: same algorithm as node side
     let days_left = tls_stream
         .get_ref()
         .1
@@ -336,7 +354,7 @@ async fn probe_tls(target: &Value, expect: &Value) -> Outcome {
         }
         let min_days = expect
             .get("min_days_valid")
-            .and_then(|v| v.as_i64())
+            .and_then(serde_json::Value::as_i64)
             .unwrap_or(30);
         if days < min_days {
             return Outcome::degraded(
@@ -351,21 +369,22 @@ async fn probe_tls(target: &Value, expect: &Value) -> Outcome {
     latency_verdict(expect, latency_ms, None).unwrap_or_else(|| Outcome::ok(latency_ms, None))
 }
 
-fn client_config(skip_verify: bool) -> anyhow::Result<rustls::ClientConfig> {
+fn client_config(skip_verify: bool) -> rustls::ClientConfig {
     if skip_verify {
-        return Ok(rustls::ClientConfig::builder()
+        return rustls::ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(NoVerify))
-            .with_no_client_auth());
+            .with_no_client_auth();
     }
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    Ok(rustls::ClientConfig::builder()
+    rustls::ClientConfig::builder()
         .with_root_certificates(roots)
-        .with_no_client_auth())
+        .with_no_client_auth()
 }
 
-/// `tls_verify = false` 时的「不校验」：测试用，只影响这一次连接。
+/// "No verification" when `tls_verify = false`: testing only, affects this
+/// one connection.
 #[derive(Debug)]
 struct NoVerify;
 
@@ -411,11 +430,11 @@ impl rustls::client::danger::ServerCertVerifier for NoVerify {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
     async fn tcp_reports_down_for_closed_port() {
-        // 端口 1 在本机必然拒绝连接
+        // Port 1 on the local host will definitely refuse connection
         let out = run(
             "tcp",
             &json!({ "host": "127.0.0.1", "port": 1 }),
@@ -455,7 +474,6 @@ mod tests {
                 };
                 tokio::spawn(async move {
                     let mut buf = [0u8; 1024];
-                    use tokio::io::AsyncReadExt;
                     let _ = sock.read(&mut buf).await;
                     let _ = sock
                         .write_all(

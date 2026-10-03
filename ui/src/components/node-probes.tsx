@@ -9,12 +9,12 @@ import { EmptyState, ErrorState, Skeleton } from "@/components/ui/feedback";
 import { cn, friendlyError, relativeTime } from "@/lib/utils";
 
 /**
- * 节点详情页的「服务探针」：这台机器上跑着哪些探针、现在什么状态。
+ * Node detail page's "service probes": which probes run on this node and their current state.
  *
- * 服务页是按服务组织的（正向视图），这里是按节点组织（反向视图）——
- * 排一台机器的问题时，需要知道「它到底在替谁探什么」。
- * 只显示绑定了本节点的探针；`node_ids` 为空的探针会在任意节点上执行，
- * 放在某一台节点的详情里会误导，因此不列。
+ * The services page is organized by service (forward view), here it's organized by node (reverse view) —
+ * when troubleshooting a single machine, you need to know "what is it actually probing on whose behalf".
+ * Only shows probes bound to this node; probes with empty `node_ids` execute on any node,
+ * and listing them under a specific node would be misleading, so they're excluded.
  */
 export function NodeProbes({ nodeId, refreshMs }: { nodeId: string; refreshMs: number }) {
   const { t } = useTranslation();
@@ -141,7 +141,7 @@ export function NodeProbes({ nodeId, refreshMs }: { nodeId: string; refreshMs: n
   );
 }
 
-/** 探针状态 → Badge 语义色（与状态常量 ok / degraded / down / unknown 对齐） */
+/** Probe state → Badge semantic color (aligns with state constants ok / degraded / down / unknown) */
 function probeTone(state: string): "success" | "warn" | "danger" | "neutral" {
   if (state === "ok") return "success";
   if (state === "degraded") return "warn";

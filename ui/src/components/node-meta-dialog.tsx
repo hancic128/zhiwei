@@ -10,30 +10,32 @@ import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
 import { friendlyError } from "@/lib/utils";
 
-/** 与后端 crates/monitor-server/src/routes.rs 的上限保持一致 */
+/** Keep the upper bound in sync with crates/monitor-server/src/routes.rs */
 const MAX_ALIAS_CHARS = 10;
 const MAX_TAGS = 10;
 const MAX_TAG_CHARS = 24;
 /**
- * 输入标签时的分隔符：空白 / 英文逗号 / 中文逗号 / 顿号。
+ * Tag input separators: whitespace / ASCII comma / full-width comma / Chinese enumeration comma.
  *
- * 只在**提交**（回车 / 失焦）时按它切分，不在 `onChange` 里边输边切——
- * 中文输入法在拼音候选期间也会逐字触发 change，边输边切会把「还没上屏的词」
- * 拆成几个标签（用户报的 bug）。
+ * Split only on **commit** (Enter / blur), not on every `onChange` keystroke —
+ * CJK input methods fire change events one character at a time during pinyin
+ * composition. Splitting eagerly would chop the not-yet-confirmed word into
+ * multiple tags (user-reported bug).
  */
-const TAG_SEPARATORS = /[\s,，、]/;
+const TAG_SEPARATORS = /[\s,,、]/;
 
 /**
- * 编辑节点的别名与标签。
+ * Edit a node's alias and tags.
  *
- * 别名是「一眼认出来」的短名（≤10 字符），列表与下拉框优先显示它；
- * 标签用于过滤（≤10 个）。hostname 由节点自报，不在这里改。
+ * The alias is a short recognizable name (≤10 chars), shown preferentially
+ * in lists and dropdowns. Tags are used for filtering (≤10). Hostname is
+ * self-reported by the node and not editable here.
  */
 export function NodeMetaDialog({
   node,
   onClose,
 }: {
-  /** null = 关闭 */
+  /** null = closed */
   node: NodeView | null;
   onClose: () => void;
 }) {
@@ -45,16 +47,18 @@ export function NodeMetaDialog({
   const [tags, setTags] = React.useState<string[]>([]);
   const [draft, setDraft] = React.useState("");
   /**
-   * 输入法是否正在组词。
+   * Whether the IME is currently composing a word.
    *
-   * 组词期间按回车是在「选候选字」，不是在「提交标签」——必须放行，
-   * 否则一次中文输入会先被切开、又把没上屏的内容吞掉。
-   * `isComposing` 在 Chrome 的 keydown 上可靠，Safari 需要靠组合事件兜底，
-   * 所以两者都看。
+   * While composing, pressing Enter selects a candidate character — it is
+   * not "submit tags". We must let it through; otherwise one Chinese input
+   * gets split open AND swallows the uncommitted text.
+   * `isComposing` is reliable on Chrome's keydown, but Safari needs the
+   * composition events as fallback, so we check both.
    */
   const composing = React.useRef(false);
 
-  // 每次打开都从节点现值重新初始化，避免上一次编辑残留
+  // Re-initialize from the node's current values every time the dialog opens,
+  // so leftover edits from a previous open don't carry over.
   React.useEffect(() => {
     if (!node) return;
     setAlias(node.alias ?? "");
@@ -62,7 +66,7 @@ export function NodeMetaDialog({
     setDraft("");
   }, [node]);
 
-  /** 把一批原始输入并进标签列表：去空白、去重、按上限截断 */
+  /** Merge a batch of raw tag inputs into the tag list: trim whitespace, dedupe, truncate to the limit */
   const mergeTags = React.useCallback(
     (current: string[], additions: string[]) => {
       const out = [...current];
@@ -84,7 +88,7 @@ export function NodeMetaDialog({
     [t, toast],
   );
 
-  /** 把输入框里的草稿按分隔符拆开并成标签（回车 / 失焦时调用） */
+  /** Split the input draft by separators and merge into the tag list (called on Enter / blur) */
   const commitDraft = React.useCallback(() => {
     setTags((cur) => mergeTags(cur, draft.split(TAG_SEPARATORS)));
     setDraft("");
@@ -94,8 +98,9 @@ export function NodeMetaDialog({
     mutationFn: () =>
       api.updateNode(node!.id, {
         alias: alias.trim(),
-        // 输入框里还没回车的草稿也要一并带上：点「保存」时 onBlur 的 setState
-        // 还没生效，只读 tags 会把刚打完的最后一个标签丢掉。
+        // The not-yet-Entered draft must be carried along too: when the user
+        // clicks Save, the onBlur setState hasn't taken effect yet, so reading
+        // `tags` would silently drop the just-typed last tag.
         tags: mergeTags(tags, draft.split(TAG_SEPARATORS))
           .map((x) => x.trim())
           .filter(Boolean),
@@ -131,7 +136,7 @@ export function NodeMetaDialog({
           <span className="block text-xs text-ink-500 mb-1">
             {t("nodeMeta.aliasLabel")}
           </span>
-          {/* 宽度固定但足够长：别名上限 10 个字符，w-64 能整段显示不被截断 */}
+          {/* Fixed but generous width: alias limit is 10 chars, w-64 fits the whole string without truncation */}
           <Input
             className="w-64"
             value={alias}
@@ -180,7 +185,7 @@ export function NodeMetaDialog({
                 composing.current = false;
               }}
               onKeyDown={(e) => {
-                // 组词中的回车 / 空格是输入法在选字，绝不能当成分隔
+                // Enter / Space during composition is the IME selecting a candidate — never treat it as a separator
                 if (composing.current || e.nativeEvent.isComposing) return;
                 if (e.key === "Enter") {
                   e.preventDefault();
@@ -201,7 +206,7 @@ export function NodeMetaDialog({
   );
 }
 
-/** 标签列表（只读展示），列表页 / 详情页共用；统一用徽章样式 */
+/** Tag list (read-only display), shared by list page / detail page; uniform badge style */
 export function TagList({
   tags,
   className,

@@ -1029,7 +1029,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots 1.0.9",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -2002,7 +2002,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "webpki-roots 1.0.9",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -2089,15 +2089,6 @@ dependencies = [
  "rustls-webpki",
  "subtle",
  "zeroize",
-]
-
-[[package]]
-name = "rustls-pemfile"
-version = "2.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
-dependencies = [
- "rustls-pki-types",
 ]
 
 [[package]]
@@ -3186,15 +3177,6 @@ dependencies = [
 
 [[package]]
 name = "webpki-roots"
-version = "0.26.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
-dependencies = [
- "webpki-roots 1.0.9",
-]
-
-[[package]]
-name = "webpki-roots"
 version = "1.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
@@ -3677,7 +3659,7 @@ dependencies = [
 
 [[package]]
 name = "zhiwei-common"
-version = "0.1.7"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -3697,7 +3679,7 @@ dependencies = [
 
 [[package]]
 name = "zhiwei-monitor-server"
-version = "0.1.7"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3716,7 +3698,6 @@ dependencies = [
  "reqwest",
  "ring",
  "rustls",
- "rustls-pemfile",
  "serde",
  "serde_json",
  "sqlx",
@@ -3730,7 +3711,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "webpki-roots 0.26.11",
+ "webpki-roots",
  "x509-parser",
  "zhiwei-common",
  "zhiwei-proto",
@@ -3739,7 +3720,7 @@ dependencies = [
 
 [[package]]
 name = "zhiwei-node-agent"
-version = "0.1.7"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3758,7 +3739,6 @@ dependencies = [
  "rand 0.8.8",
  "rcgen",
  "rustls",
- "rustls-pemfile",
  "serde",
  "serde_json",
  "sysinfo",
@@ -3768,7 +3748,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
- "webpki-roots 0.26.11",
+ "webpki-roots",
  "x509-parser",
  "zhiwei-common",
  "zhiwei-proto",
@@ -3776,7 +3756,7 @@ dependencies = [
 
 [[package]]
 name = "zhiwei-ops-server"
-version = "0.1.7"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3799,7 +3779,7 @@ dependencies = [
 
 [[package]]
 name = "zhiwei-proto"
-version = "0.1.7"
+version = "0.0.1"
 dependencies = [
  "prost",
  "prost-build",
@@ -3810,7 +3790,7 @@ dependencies = [
 
 [[package]]
 name = "zhiwei-storage"
-version = "0.1.7"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "async-trait",

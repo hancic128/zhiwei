@@ -4,7 +4,7 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.1.x   | :white_check_mark: |
+| 0.0.x   | :white_check_mark: |
 
 ## Reporting a Vulnerability
 
@@ -16,7 +16,7 @@ please report it responsibly.
 **Please DO NOT file a public GitHub issue** for security vulnerabilities.
 Instead, please email us directly:
 
-- **Email**: hancic128+security@proton.me
+- **Email**: security@zhiwei.example.invalid
 
 ### What to Include
 

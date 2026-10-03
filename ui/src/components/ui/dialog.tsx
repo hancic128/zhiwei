@@ -5,8 +5,8 @@ import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
 
 /**
- * 通用对话框（规范 7.10/7.14：必须有 backdrop-blur 遮罩、标题、关闭按钮）。
- * 只读信息（基本信息、容器日志）用它，需要确认的破坏性操作用 ConfirmDialog。
+ * Generic dialog (spec 7.10/7.14: must have backdrop-blur mask, title, close button).
+ * Use this for read-only info (basic info, container logs); for destructive operations needing confirmation, use ConfirmDialog.
  */
 export function Dialog({
   open,
@@ -24,7 +24,7 @@ export function Dialog({
   description?: React.ReactNode;
   children: React.ReactNode;
   footer?: React.ReactNode;
-  /** 追加到主体容器上的类（如 `space-y-4`），默认主体只有内边距 */
+  /** Classes appended to the body container (e.g. `space-y-4`); by default the body only has padding */
   bodyClassName?: string;
   size?: "md" | "lg" | "xl";
 }) {
@@ -35,8 +35,8 @@ export function Dialog({
     <DialogPrimitive.Root open={open} onOpenChange={(o) => !o && onClose()}>
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className="fixed inset-0 z-[70] bg-ink-900/50 backdrop-blur-sm animate-panel-slide" />
-        {/* 定位与动画拆到两层：animate-panel-slide 的 transform 会覆盖
-            -translate-* 的居中式，放同一元素上会让对话框跑到视口外 */}
+        {/* Positioning and animation split across two layers: animate-panel-slide's transform overrides
+            the -translate-* centering; putting them on the same element pushes the dialog off-screen */}
         <DialogPrimitive.Content
           className={cn(
             "fixed left-1/2 top-1/2 z-[70] w-full -translate-x-1/2 -translate-y-1/2 outline-none",

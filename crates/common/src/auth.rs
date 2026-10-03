@@ -1,19 +1,21 @@
-//! 节点身份：Ed25519 请求签名（取代 mTLS 双向证书）。
+//! Node identity: Ed25519 request signing (replaces mTLS mutual certificates).
 //!
-//! 为什么不用 mTLS：托管平台在边缘终止 TLS，不会把客户端证书转发进
-//! 容器，所以「用客户端证书认节点」这条路在 PaaS 上走不通。改成
-//! 「用签名认节点」后，任何能跑 HTTP 的地方都能部署——这也正是
-//! DESIGN.md 原则 #3「签名而非凭据」的字面含义。
+//! Why not mTLS: managed platforms terminate TLS at the edge and do not
+//! forward client certificates into containers, so the "authenticate nodes via
+//! client certificates" approach won't work on `PaaS`. After switching to
+//! "authenticate nodes via signatures", it can be deployed anywhere that can
+//! run HTTP — which is also the literal meaning of
+//! DESIGN.md principle #3 "signatures instead of credentials".
 //!
-//! 签名覆盖：方法 + 路径(含 query) + 时间戳 + nonce + 原始请求体。
-//! 服务端校验签名、时间窗与 nonce 未重放，三者缺一不可。
+//! Signature covers: method + path (with query) + timestamp + nonce + raw request body.
+//! Server verifies signature, time window, and nonce non-replay -- all three required.
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 use crate::{KeyPair, PublicKey, Result, Signature};
 
-/// 协议版本，写进待签名字符串，便于日后演进时区分
+/// Protocol version, written into string to sign, facilitates future protocol evolution
 const SCHEME: &[u8] = b"zhiwei-v1\n";
 
 pub const HEADER_NODE: &str = "x-zhiwei-node";
@@ -21,14 +23,15 @@ pub const HEADER_TIMESTAMP: &str = "x-zhiwei-timestamp";
 pub const HEADER_NONCE: &str = "x-zhiwei-nonce";
 pub const HEADER_SIGNATURE: &str = "x-zhiwei-signature";
 
-/// 允许的时钟偏差（秒）。跨境链路 + 未同步时钟也要能过。
+/// Allowed clock skew (seconds). Cross-region links + unsynced clocks must still work.
 pub const MAX_SKEW_SECONDS: i64 = 300;
 
-/// 规范化待签名内容。
+/// Canonicalize content to sign.
 ///
-/// 结构：`zhiwei-v1\n<method>\n<path_and_query>\n<ts_nanos>\n<nonce_b64>\n<body>`
-/// 前三项都不含换行（路径中的换行会被 URL 编码），且 body 放在最后，
-/// 因此这个拼接是无歧义的，不需要额外做哈希。
+/// Format: `zhiwei-v1\n<method>\n<path_and_query>\n<ts_nanos>\n<nonce_b64>\n<body>`
+/// First three fields contain no newlines (newlines in path are URL-encoded), and body comes last,
+/// so this concatenation is unambiguous, no extra hashing needed.
+#[must_use]
 pub fn canonical(
     method: &str,
     path_and_query: &str,
@@ -50,7 +53,7 @@ pub fn canonical(
     out
 }
 
-/// 节点侧生成的一组签名头
+/// Headers signed by the node side
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignedHeaders {
     pub node_id: String,
@@ -60,7 +63,8 @@ pub struct SignedHeaders {
 }
 
 impl SignedHeaders {
-    /// 用节点私钥对一次请求签名
+    /// Sign one request using the node's private key
+    #[must_use]
     pub fn sign(
         key: &KeyPair,
         node_id: &str,
@@ -84,8 +88,13 @@ impl SignedHeaders {
         }
     }
 
-    /// 服务端校验：时间窗 → 签名。nonce 去重由调用方用 NonceCache 负责
-    /// （需要跨请求状态，不适合放在这里）。
+    /// Server verification: time window -> signature. Nonce deduplication is caller's responsibility via `NonceCache`
+    /// (requires cross-request state, not suitable here).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::Invalid` if the timestamp is outside the allowed skew window,
+    /// the signature is not valid base64, or signature verification fails.
     pub fn verify(
         &self,
         public_key: &PublicKey,
@@ -111,23 +120,23 @@ impl SignedHeaders {
     }
 }
 
-/// 已用 nonce 的短期缓存，用于防重放。
+/// Short-term cache of used nonces, for replay protection.
 ///
-/// 时间窗内 nonce 只能用一次；过期条目会被顺带清理。
-/// 注意：当前是进程内存储。多实例部署时需要换成共享存储
-/// （否则同一 nonce 打到不同实例会被各自接受）。
+/// Nonce within time window can only be used once; expired entries are cleaned up together.
+/// Note: currently in-process storage. Multi-instance deployments need shared storage
+/// (otherwise same nonce hitting different instances will each accept it).
 #[derive(Default)]
 pub struct NonceCache {
     inner: parking_lot::Mutex<std::collections::HashMap<String, i64>>,
 }
 
 impl NonceCache {
-    /// 记下 nonce；若在有效期内已出现过则返回 false（判定为重放）
+    /// Record a nonce; returns false if it was already seen within validity window (replay detected)
     pub fn accept(&self, nonce: &str, now_unix_nano: i64) -> bool {
         let ttl_ns = MAX_SKEW_SECONDS.saturating_mul(1_000_000_000);
         let mut map = self.inner.lock();
 
-        // 顺带清理过期项，避免无界增长
+        // Clean up expired entries while we're here, avoid unbounded growth
         if map.len() > 4096 {
             map.retain(|_, ts| now_unix_nano - *ts <= ttl_ns);
         }
@@ -158,7 +167,7 @@ mod tests {
         let signed = SignedHeaders::sign(&k, "node-1", "POST", "/v1/telemetry", body);
         signed
             .verify(&k.public_key(), "POST", "/v1/telemetry", body)
-            .expect("同一条请求应当验签通过");
+            .expect("same request should pass verification");
     }
 
     #[test]
@@ -167,15 +176,15 @@ mod tests {
         let signed = SignedHeaders::sign(&k, "node-1", "POST", "/v1/telemetry", b"original");
         let pub_key = k.public_key();
 
-        // 换 body
+        // Change body
         assert!(signed
             .verify(&pub_key, "POST", "/v1/telemetry", b"forged")
             .is_err());
-        // 换路径
+        // Change path
         assert!(signed
             .verify(&pub_key, "POST", "/v1/commands", b"original")
             .is_err());
-        // 换方法
+        // Change method
         assert!(signed
             .verify(&pub_key, "GET", "/v1/telemetry", b"original")
             .is_err());
@@ -195,7 +204,7 @@ mod tests {
     fn stale_timestamp_is_rejected() {
         let k = key();
         let signed = SignedHeaders::sign(&k, "node-1", "POST", "/v1/telemetry", b"x");
-        let mut stale = signed.clone();
+        let mut stale = signed;
         stale.timestamp -= (MAX_SKEW_SECONDS + 30) * 1_000_000_000;
         assert!(stale
             .verify(&k.public_key(), "POST", "/v1/telemetry", b"x")
@@ -207,14 +216,23 @@ mod tests {
         let cache = NonceCache::default();
         let now = Timestamp::now().unix_nano();
 
-        assert!(cache.accept("nonce-a", now), "首次出现应当放行");
+        assert!(
+            cache.accept("nonce-a", now),
+            "first occurrence should be accepted"
+        );
         assert!(
             !cache.accept("nonce-a", now + 1),
-            "同一时间窗内重复应当拒绝"
+            "same window repeat should be rejected"
         );
-        assert!(cache.accept("nonce-b", now), "不同 nonce 互不影响");
+        assert!(
+            cache.accept("nonce-b", now),
+            "different nonces don't affect each other"
+        );
 
         let after_window = now + (MAX_SKEW_SECONDS + 1) * 1_000_000_000;
-        assert!(cache.accept("nonce-a", after_window), "过期后允许复用");
+        assert!(
+            cache.accept("nonce-a", after_window),
+            "reuse allowed after expiry"
+        );
     }
 }

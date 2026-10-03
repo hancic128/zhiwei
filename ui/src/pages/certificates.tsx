@@ -7,7 +7,6 @@ import {
   Info,
   Pencil,
   Plus,
-  RefreshCw,
   ShieldCheck,
   Trash2,
 } from "lucide-react";
@@ -67,7 +66,7 @@ type SortKey = "domain" | "node" | "expiry" | "days";
 interface FlatCert extends CertInfo {
   nodeId: string;
   hostname: string;
-  /** 显示用节点名（别名优先）。hostname 是节点自报的，不随别名变。 */
+  /** Display label for the node (alias preferred). hostname is what the node self-reports and does not follow alias changes. */
   label: string;
   days: number;
 }
@@ -90,7 +89,7 @@ export function Certificates() {
   const [page, setPage] = React.useState(1);
   const [pageSize, setPageSize] = React.useState(10);
 
-  // 概览卡片会带 ?filter=expiring 进来，这里按 query 初始化筛选
+  // Overview cards arrive with ?filter=expiring; initialize filter from the query
   const [filter, setFilter] = React.useState<Filter>(() => {
     const raw = (searchParams.get("filter") ?? "").toLowerCase();
     return raw === "expiring" || raw === "expired" ? (raw as Filter) : "all";
@@ -115,7 +114,8 @@ export function Certificates() {
 
   const groups: NodeCertsGroup[] = groupsQ.data ?? [];
   const sources: CertSourceView[] = sourcesQ.data ?? [];
-  // 「测试」要真发命令，默认挑最近还在线的节点（离线机器只会等回执超时）
+  // The "test" action actually sends a command, so by default pick the most
+  // recently seen node (offline machines will only wait for a receipt timeout)
   const nodes = React.useMemo(
     () =>
       [...(nodesQ.data ?? [])].sort(
@@ -124,8 +124,9 @@ export function Certificates() {
     [nodesQ.data],
   );
 
-  // 证书接口只带 hostname，别名要回节点列表里取一次：
-  // 证书页的「节点」列与别名显示保持一致，不然同一个节点会有两个名字。
+  // The cert API only carries hostname, so we need to look up the alias from
+  // the node list: keep the "node" column on the certs page consistent with
+  // the alias display, otherwise the same node would show two names.
   const labelByNodeId = React.useMemo(() => {
     const m = new Map<string, string>();
     for (const n of nodesQ.data ?? []) m.set(n.id, nodeLabel(n));
@@ -146,7 +147,7 @@ export function Certificates() {
             days: daysLeft(c.not_after_unix_nano),
           })),
         )
-        .sort((a, b) => a.days - b.days), // 最紧急的在前
+        .sort((a, b) => a.days - b.days), // most urgent first
     [groups, labelByNodeId],
   );
 
@@ -159,7 +160,7 @@ export function Certificates() {
     };
   }, [flat]);
 
-  /** 证书条目 → 来源路径（老节点不带 source_id 时按路径规则兜底匹配） */
+  /** Certificate entry -> source path (old nodes without source_id fall back to path-based matching) */
   const sourcePathOf = React.useCallback(
     (c: FlatCert): string | null => {
       const byId = sources.find(
@@ -210,14 +211,14 @@ export function Certificates() {
     [filtered, sortDir, sortKey],
   );
 
-  // 过滤 / 搜索 / 排序变化后回到第 1 页，否则会停在空页
+  // After filter / search / sort changes, reset to page 1, otherwise we may stop on an empty page
   React.useEffect(() => {
     setPage(1);
   }, [q, filter, pageSize, sortKey, sortDir]);
 
   const { pageCount, current, visible } = paginate(sorted, page, pageSize);
 
-  /** 来源列表里按 id 取一条（详情里显示这条证书属于哪个来源） */
+  /** Look up a source entry by id (used to show which source a certificate belongs to in detail) */
   const sourceOf = (c: FlatCert): CertSourceView | undefined =>
     sources.find(
       (s) => s.id === c.source_id && (s.all_nodes || s.node_id === c.nodeId),
@@ -262,7 +263,7 @@ export function Certificates() {
 
   return (
     <div className="space-y-4 md:space-y-6">
-      {/* 顶部大字卡片：按到期紧急度分桶，点一下就地筛选下面的列表 */}
+      {/* Large header cards: bucketed by expiry urgency; click to filter the list below in place */}
       <StatCards
         cards={[
           {
@@ -303,7 +304,7 @@ export function Certificates() {
         ]}
       />
 
-      {/* 证书路径（来源）配置 */}
+      {/* Certificate path (source) configuration */}
       <TableShell>
         <TableToolbar>
           <div>
@@ -481,7 +482,7 @@ export function Certificates() {
         )}
       </TableShell>
 
-      {/* 证书列表 */}
+      {/* Certificate list */}
       <TableShell>
         <TableToolbar>
           <div>
@@ -540,22 +541,6 @@ export function Certificates() {
               onChange={(e) => setQ(e.target.value)}
               aria-label={t("action.search")}
             />
-            <Tooltip content={t("action.refresh")}>
-              <Button
-                variant="ghost"
-                size="icon"
-                aria-label={t("action.refresh")}
-                onClick={invalidate}
-              >
-                <RefreshCw
-                  className={cn(
-                    "w-4 h-4",
-                    (groupsQ.isFetching || sourcesQ.isFetching) && "animate-spin",
-                  )}
-                  aria-hidden="true"
-                />
-              </Button>
-            </Tooltip>
           </div>
         </TableToolbar>
 
@@ -774,9 +759,10 @@ export function Certificates() {
 }
 
 /**
- * 与后端 `zhiwei_common::certpath` 同一套规则的路径匹配。
- * 只用于**老版本节点**（证书条目不带 source_id）的来源反查：
- * 目录展开为证书后缀 glob，文件与 glob 原样匹配。
+ * Path matching with the same rules as the backend `zhiwei_common::certpath`.
+ * Used only for **legacy nodes** (certificate entries without source_id) to
+ * reverse-lookup the source: directories are expanded into certificate
+ * extension globs; files and globs are matched as-is.
  */
 const CERT_EXTS = ["pem", "crt", "cer", "cert"];
 

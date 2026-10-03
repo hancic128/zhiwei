@@ -21,10 +21,11 @@ import { cn, friendlyError, nodeLabel } from "@/lib/utils";
 const MAX_RENDER = 20_000;
 
 /**
- * 按需拉取日志（容器 / 文件）。
+ * On-demand log fetch (container / file).
  *
- * 日志菜单已下线，文件日志能力收进这个对话框：容器页工具栏的
- * 「查看文件日志」与容器行的「查看最新日志」共用同一套命令通道。
+ * The standalone logs menu has been retired; file-log capability lives in this
+ * dialog. The containers page toolbar's "view file logs" and a container row's
+ * "view latest logs" share the same command channel.
  */
 export function LogFetchDialog({
   open,
@@ -43,7 +44,8 @@ export function LogFetchDialog({
   const toast = useToast();
 
   const nodesQ = useQuery({ queryKey: ["nodes"], queryFn: api.nodes, enabled: open });
-  // 默认尽量挑「最近还在线的」节点：排在最前的若是离线机器，用户点拉取会一直等回执
+  // Default to a node that was recently online: if the top of the list is an
+  // offline machine, the user clicks fetch and waits forever for the receipt.
   const nodes = React.useMemo(
     () =>
       [...(nodesQ.data ?? [])].sort(
@@ -61,11 +63,12 @@ export function LogFetchDialog({
   const [busy, setBusy] = React.useState(false);
   const [follow, setFollow] = React.useState(false);
   const [lastAt, setLastAt] = React.useState<number | null>(null);
-  // 让「N 秒前更新」自己走字（跟随中每秒重渲染一次）
+  // Let "N seconds ago" tick by itself (re-renders every second while following)
   const [, setTick] = React.useState(0);
   const [row, setRow] = React.useState<CommandHistoryRow | null>(null);
 
-  // 每次打开时按调用方给的目标重置（同一个节点连续看两个容器不会串）
+  // Reset to the caller's target every time the dialog opens (viewing two
+  // containers back-to-back on the same node won't cross-contaminate).
   React.useEffect(() => {
     if (!open) return;
     setNodeId(defaultNodeId ?? "");
@@ -92,7 +95,7 @@ export function LogFetchDialog({
     setContainer(containers[0]?.name ?? "");
   }, [containers, container]);
 
-  /** silent = 自动刷新那一轮：不清空已有输出、不显示 loading，避免画面闪烁 */
+  /** silent = an auto-refresh round: don't clear existing output, don't show loading — avoids flicker. */
   const fetchLogs = React.useCallback(async (silent = false) => {
     if (!nodeId) return;
     if (!silent) {
@@ -117,18 +120,22 @@ export function LogFetchDialog({
     } finally {
       if (!silent) setBusy(false);
     }
-    // path 必须在依赖里：漏了它会闭包住旧值（文件日志会一直报「需要 path」）
+    // path must be in the deps: missing it closes over a stale value (file logs
+    // would keep reporting "path required").
   }, [nodeId, source, container, path, tail, timestamps, t, toast]);
 
   /**
-   * 自动刷新：**上一轮完成后再等 5 秒发下一轮**，不做固定间隔的并发拉取。
-   * 命令通道要等节点轮询（10s 一次）+ 执行 + 回执，一轮本身就要几秒；
-   * 固定 2 秒间隔只会把命令堆在队列里，反而更慢。
+   * Auto-refresh: **wait 5 seconds after the previous round completes before
+   * firing the next one**. No fixed-interval concurrent fetches.
+   * The command channel has to wait for the node's 10-second poll + execution
+   * + receipt — a single round already takes several seconds. A fixed 2-second
+   * interval just queues commands up, which is actually slower.
    */
   const followRef = React.useRef(false);
   followRef.current = follow;
   const inFlight = React.useRef(false);
-  // 用 ref 拿最新的 fetchLogs：否则「边打字边跟随」会每敲一个字符就重启循环、各发一条命令
+  // Use a ref to get the latest fetchLogs: otherwise "follow while typing"
+  // restarts the loop on every keystroke and fires a separate command each time.
   const fetchRef = React.useRef(fetchLogs);
   fetchRef.current = fetchLogs;
   React.useEffect(() => {
@@ -154,7 +161,8 @@ export function LogFetchDialog({
     };
   }, [follow]);
 
-  // 对话框关闭 / 切目标时停止跟随，别在后台一直发命令
+  // Stop following when the dialog closes / the target changes — don't keep
+  // firing commands in the background.
   React.useEffect(() => {
     if (!open) setFollow(false);
   }, [open]);
@@ -179,7 +187,7 @@ export function LogFetchDialog({
       description={t("logs.subtitle")}
     >
       <div className="space-y-4">
-        {/* 规范 08/10：节点列表加载失败不静默——就地给友好文案 + 重试 */}
+        {/* Spec 08/10: node-list load failure must not be silent — show a friendly message + retry inline */}
         {nodesQ.isError && (
           <ErrorState
             compact
@@ -189,7 +197,7 @@ export function LogFetchDialog({
           />
         )}
         <div className="flex flex-wrap items-end gap-3">
-          {/* 固定宽度：别名/主机名都要能整段显示，但不随内容把弹窗撑宽 */}
+          {/* Fixed width: alias / hostname must display fully, but must not stretch the dialog with content */}
           <Field label={t("logs.node")} className="w-64 shrink-0">
             <Select
               value={nodeId}
@@ -332,7 +340,7 @@ export function LogFetchDialog({
           <EmptyState title={t("containers.logsEmpty")} />
         ) : (
           <>
-            {/* 拉到了多少行：日志是一屏一屏看的，先给个量级 */}
+            {/* How many lines we got: logs are read one screen at a time, give a quick magnitude */}
             {text.trim() && (
               <p className="text-xs text-ink-400">
                 {t("logs.lines", {

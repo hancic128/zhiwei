@@ -1,34 +1,38 @@
-//! 数据留存与降采样。
+//! Data retention and downsampling.
 //!
-//! 设计：`docs/superpowers/specs/2026-09-19-product-structure-design.md` §8
+//! Design: `docs/superpowers/specs/2026-09-19-product-structure-design.md` §8
 //!
-//! 两件事：
-//!   1. 把已封口的小时压成聚合行（原始 10 秒数据之后会滚掉，长趋势由它承载）；
-//!   2. 滚动删除过期的原始数据与聚合行。
+//! Two things:
+//!   1. Compress sealed hours into aggregate rows (raw 10s data rolls off
+//!      later; long-term trends live in these aggregates);
+//!   2. Rolling delete of expired raw data and aggregate rows.
 //!
-//! 为什么这件事本身属于「认知轻」：一个会把自己用户的磁盘填满的监控工具，
-//! 是最讽刺的失败方式。所以留存是自动的，而且**留存任务失败必须出现在待办里**。
+//! Why this itself is "cognitive-light": a monitoring tool that fills its
+//! users' disks is the most ironic kind of failure. So retention is
+//! automatic, and **retention task failures must show up in the todo list**.
 
-/// 原始数据保留天数。中心规模（10 节点）下约 224 MB；上限规模可下调到 7 天。
+/// Raw data retention in days. At central scale (10 nodes) ≈ 224 MB; at
+/// upper scale can lower to 7 days.
 pub const RAW_RETENTION_DAYS: i64 = 14;
 
-/// 小时聚合保留天数（约 2 年）。
+/// Hourly aggregate retention in days (≈ 2 years).
 pub const HOURLY_RETENTION_DAYS: i64 = 730;
 
-/// 一次留存运行最多处理多少个小时——防止长期停机后一次性补太多。
+/// Max hours processed in one retention run — prevents catching up too much
+/// after a long downtime.
 const MAX_HOURS_PER_RUN: i64 = 48;
 
-/// 没有历史聚合时的回溯窗口（小时）。
+/// Lookback window when no historical aggregation exists yet (hours).
 const INITIAL_LOOKBACK_HOURS: i64 = 24;
 
 pub const NANOS_PER_HOUR: i64 = 3_600_000_000_000;
 
-/// 向下取整到一个小时的起点。
-pub fn hour_start(ts_ns: i64) -> i64 {
+/// Floor down to the start of an hour.
+pub const fn hour_start(ts_ns: i64) -> i64 {
     ts_ns.div_euclid(NANOS_PER_HOUR) * NANOS_PER_HOUR
 }
 
-/// 一个 (节点, 小时, 指标) 的聚合结果。
+/// Aggregate result for one (node, hour, metric).
 #[derive(Debug, Clone, PartialEq)]
 pub struct MetricAgg {
     pub metric: String,
@@ -40,52 +44,53 @@ pub struct MetricAgg {
     pub samples: i64,
 }
 
-/// 把「按时间顺序排列的 (指标名, 值)」压成每个指标一条聚合。
+/// Compress "time-ordered (metric name, value) pairs" into one aggregate row
+/// per metric.
 ///
-/// 保留 first / last 是为了计数器类指标（网络字节数）还能还原速率：
-/// `rate = (last - first) / 3600`；只存 avg/min/max 的话计数器就没法还原了。
+/// Keeping first / last is so counter-type metrics (network bytes) can still
+/// recover rate: `rate = (last - first) / 3600`; storing only avg/min/max
+/// makes counters unrecoverable.
 pub fn aggregate(samples: &[(String, f64)]) -> Vec<MetricAgg> {
     let mut out: Vec<MetricAgg> = Vec::new();
     let mut index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     let mut sums: Vec<f64> = Vec::new();
 
     for (metric, value) in samples {
-        match index.get(metric.as_str()) {
-            Some(&i) => {
-                let a: &mut MetricAgg = &mut out[i];
-                a.min = a.min.min(*value);
-                a.max = a.max.max(*value);
-                a.last = *value;
-                a.samples += 1;
-                sums[i] += *value;
-            }
-            None => {
-                index.insert(metric.as_str(), out.len());
-                sums.push(*value);
-                out.push(MetricAgg {
-                    metric: metric.clone(),
-                    avg: 0.0, // 最后统一算
-                    min: *value,
-                    max: *value,
-                    first: *value,
-                    last: *value,
-                    samples: 1,
-                });
-            }
+        if let Some(&i) = index.get(metric.as_str()) {
+            let a: &mut MetricAgg = &mut out[i];
+            a.min = a.min.min(*value);
+            a.max = a.max.max(*value);
+            a.last = *value;
+            a.samples += 1;
+            sums[i] += *value;
+        } else {
+            index.insert(metric.as_str(), out.len());
+            sums.push(*value);
+            out.push(MetricAgg {
+                metric: metric.clone(),
+                avg: 0.0, // computed once at the end
+                min: *value,
+                max: *value,
+                first: *value,
+                last: *value,
+                samples: 1,
+            });
         }
     }
 
     for (i, a) in out.iter_mut().enumerate() {
-        a.avg = sums[i] / a.samples as f64;
+        a.avg = sums[i] / f64::from(i32::try_from(a.samples).unwrap_or(1));
     }
     out
 }
 
-/// 一批遥测里所有可聚合的 (指标名, 值)。
+/// All aggregatable (metric name, value) pairs in one batch.
 ///
-/// 除 `metrics[]` 之外，**网络累计量也要在这里补上**：它不在 `metrics[]` 里
-/// （每网卡一份），要跨网卡求和——与 `routes::extract_metric` 同一口径。
-/// 漏了这一步的症状是：最近的网络曲线正常，但长窗口（走小时聚合）是空的。
+/// In addition to `metrics[]`, **network cumulative values must be added here**:
+/// they're not in `metrics[]` (one per interface), they need to be summed
+/// across interfaces — same logic as `routes::extract_metric`. Symptom of
+/// skipping this step: recent network curves look normal, but long windows
+/// (using hourly aggregation) are empty.
 pub fn metrics_of(batch: &TelemetryBatch) -> Vec<(String, f64)> {
     let mut out: Vec<(String, f64)> = batch
         .metrics
@@ -100,7 +105,7 @@ pub fn metrics_of(batch: &TelemetryBatch) -> Vec<(String, f64)> {
     out
 }
 
-// ---------- 与存储、调度有关的实现 ----------
+// ---------- Storage and scheduling-related implementation ----------
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -120,11 +125,13 @@ use crate::state::AppState;
 
 const NANOS_PER_DAY: i64 = 86_400_000_000_000;
 
-/// 平台自身异常告警的 `source_ref`（一类问题一条，不按次堆积）。
+/// `source_ref` for platform-internal anomaly alerts (one per issue type,
+/// not stacked per occurrence).
 const RETENTION_SOURCE_REF: &str = "retention";
 
-/// `GET /v1/retention` —— 留存策略。设置页展示用：
-/// 数字只有 retention.rs 一处定义，前端不硬编码，避免两边漂移。
+/// `GET /v1/retention` — retention policy. For the settings page:
+/// the numbers are only defined in retention.rs, frontend doesn't hardcode,
+/// avoiding drift between the two sides.
 pub async fn retention_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if !read_auth_ok(&state, &headers).await {
         return err(
@@ -139,46 +146,51 @@ pub async fn retention_handler(State(state): State<AppState>, headers: HeaderMap
     .into_response()
 }
 
-/// 启动后先等一会儿再跑第一轮，避免和启动时的采集/迁移抢资源。
+/// Wait a bit after startup before running the first round, to avoid
+/// contention with startup-time collection / migrations.
 const BOOT_DELAY: Duration = Duration::from_secs(30);
 
-/// 两轮之间的间隔。留存不是实时任务，10 分钟足够。
+/// Interval between rounds. Retention isn't real-time, 10 minutes is plenty.
 const INTERVAL: Duration = Duration::from_secs(600);
 
 #[derive(Debug, Default)]
 pub struct Stats {
-    /// 处理了多少个 (节点, 小时)
+    /// How many (node, hour) buckets were processed
     pub buckets: i64,
-    /// 写入 / 覆盖了多少行聚合
+    /// How many aggregate rows were written / upserted
     pub rows: i64,
     pub raw_deleted: u64,
     pub hourly_deleted: u64,
 }
 
-/// 跑一轮留存：先把已封口的小时压成聚合，再滚掉过期数据。
+/// Run one retention round: compress sealed hours into aggregates, then roll
+/// off expired data.
 ///
-/// **不会删掉还没聚合的数据**：删除线取 `min(原始保留线, 已聚合到哪儿)`，
-/// 所以长期停机之后（水位线落后很多）会先补聚合、再恢复删除，
-/// 而不是把没来得及聚合的原始数据直接丢掉。
+/// **Does not delete data that hasn't been aggregated yet**: the deletion
+/// line is `min(raw retention line, how far aggregation got)`, so after a long
+/// downtime (watermark far behind) aggregation catches up first, then deletes
+/// resume — rather than throwing away raw data before it was aggregated.
 pub async fn run_once(state: &AppState, now_ns: i64) -> anyhow::Result<Stats> {
     let telemetry = state.storage.telemetry();
     let now_hour = hour_start(now_ns);
     let watermark = telemetry.max_hourly_ts().await?;
     let aggregated_through = watermark
-        .map(|w| w + NANOS_PER_HOUR)
-        .unwrap_or(now_hour - INITIAL_LOOKBACK_HOURS * NANOS_PER_HOUR);
+        .map_or(now_hour - INITIAL_LOOKBACK_HOURS * NANOS_PER_HOUR, |w| {
+            w + NANOS_PER_HOUR
+        });
 
-    // 只处理已经封口的小时（不含当前这一小时），一次最多 48 个
+    // Only process already-sealed hours (excluding the current hour),
+    // max 48 at a time
     let start = aggregated_through.max(now_hour - MAX_HOURS_PER_RUN * NANOS_PER_HOUR);
     let end = now_hour;
 
-    let mut stats = Stats::default();
+    let mut totals = Stats::default();
     if start < end {
         let rows = telemetry.batches_in_window(start, end).await?;
         let mut buckets: BTreeMap<(String, i64), Vec<(String, f64)>> = BTreeMap::new();
         for (node_id, ts, payload) in rows {
             let Ok(batch) = TelemetryBatch::decode(&payload[..]) else {
-                continue; // 解不开的旧数据不该拖垮整轮留存
+                continue; // undecodable legacy data shouldn't tank the whole retention round
             };
             let bucket = buckets.entry((node_id, hour_start(ts))).or_default();
             bucket.extend(metrics_of(&batch));
@@ -190,37 +202,39 @@ pub async fn run_once(state: &AppState, now_ns: i64) -> anyhow::Result<Stats> {
                         &node_id, hour, &a.metric, a.avg, a.min, a.max, a.first, a.last, a.samples,
                     )
                     .await?;
-                stats.rows += 1;
+                totals.rows += 1;
             }
-            stats.buckets += 1;
+            totals.buckets += 1;
         }
     }
 
     let raw_cutoff = now_ns - RAW_RETENTION_DAYS * NANOS_PER_DAY;
     let hourly_cutoff = now_ns - HOURLY_RETENTION_DAYS * NANOS_PER_DAY;
-    // 删除线不越过「已聚合到哪儿」，否则会丢掉还没聚合的原始数据
-    stats.raw_deleted = telemetry
+    // Deletion line doesn't cross "how far aggregation got" — otherwise raw
+    // data that hasn't been aggregated yet would be discarded.
+    totals.raw_deleted = telemetry
         .delete_raw_before(raw_cutoff.min(aggregated_through))
         .await?;
-    stats.hourly_deleted = telemetry.delete_hourly_before(hourly_cutoff).await?;
-    Ok(stats)
+    totals.hourly_deleted = telemetry.delete_hourly_before(hourly_cutoff).await?;
+    Ok(totals)
 }
 
-/// 后台循环。失败时开一条平台告警（会出现在待办里，并走既有 webhook 通知），
-/// 恢复后自动关闭——留存这件事本身也要被观测。
+/// Background loop. On failure, open a platform alert (which shows up in the
+/// todo list and goes through existing webhook notifications); auto-closes
+/// after recovery — retention itself also needs to be observed.
 pub fn spawn(state: AppState) {
     tokio::spawn(async move {
         tokio::time::sleep(BOOT_DELAY).await;
         loop {
             let now_ns = zhiwei_common::Timestamp::now().unix_nano();
             match run_once(&state, now_ns).await {
-                Ok(stats) => {
-                    if stats.rows > 0 || stats.raw_deleted > 0 || stats.hourly_deleted > 0 {
+                Ok(totals) => {
+                    if totals.rows > 0 || totals.raw_deleted > 0 || totals.hourly_deleted > 0 {
                         info!(
-                            buckets = stats.buckets,
-                            rows = stats.rows,
-                            raw_deleted = stats.raw_deleted,
-                            hourly_deleted = stats.hourly_deleted,
+                            buckets = totals.buckets,
+                            rows = totals.rows,
+                            raw_deleted = totals.raw_deleted,
+                            hourly_deleted = totals.hourly_deleted,
                             "Retention done"
                         );
                     }
@@ -256,6 +270,11 @@ pub fn spawn(state: AppState) {
 
 #[cfg(test)]
 mod tests {
+    // Tests assert exact computed averages (e.g. `(10+20+30)/3 == 20.0`,
+    // counter deltas `4_600 - 1_000 == 3_600`). Floating-point equality is
+    // intentional — values are integer-valued by construction.
+    #![allow(clippy::float_cmp)]
+
     use super::*;
 
     #[test]
@@ -266,9 +285,9 @@ mod tests {
             hour_start(t),
             1_789_826_096_000_000_000i64 / NANOS_PER_HOUR * NANOS_PER_HOUR
         );
-        // 正好在整点：不动
+        // Exactly on the hour: no change
         assert_eq!(hour_start(2 * NANOS_PER_HOUR), 2 * NANOS_PER_HOUR);
-        // 整点前 1 纳秒：落到上一个小时
+        // 1 ns before the hour: falls into the previous hour
         assert_eq!(hour_start(2 * NANOS_PER_HOUR - 1), NANOS_PER_HOUR);
     }
 
@@ -306,7 +325,8 @@ mod tests {
 
     #[test]
     fn aggregate_keeps_counter_first_and_last_for_rate() {
-        // 网络累计字节数：单调递增，first/last 决定这一小时的速率
+        // Cumulative network bytes: monotonically increasing, first/last
+        // determine this hour's rate
         let s = vec![
             ("host.net.rx_bytes".to_string(), 1_000.0),
             ("host.net.rx_bytes".to_string(), 4_600.0),
@@ -314,7 +334,8 @@ mod tests {
         let out = aggregate(&s);
         assert_eq!(out[0].first, 1_000.0);
         assert_eq!(out[0].last, 4_600.0);
-        // 不代表「这一小时总共传了 3600 字节」，而是可还原速率：
+        // Doesn't mean "3600 bytes transferred in this hour total", but
+        // enables rate recovery:
         assert_eq!(out[0].last - out[0].first, 3_600.0);
     }
 
@@ -332,15 +353,16 @@ mod tests {
 
     #[test]
     fn metrics_of_sums_network_counters_across_interfaces() {
-        // 网络累计量不在 metrics[] 里（每网卡一份），但长窗口也要画得出来；
-        // 漏掉这一步的症状是「最近正常、长窗口空曲线」。
+        // Network cumulative values aren't in metrics[] (one per interface),
+        // but long windows still need to draw them; symptom of skipping this
+        // step is "recent looks normal, long window empty curve".
         use zhiwei_proto::telemetry::{Metric, NetworkInterface, TelemetryBatch};
         let batch = TelemetryBatch {
             node_id: "n1".into(),
             metrics: vec![Metric {
                 name: "host.cpu.usage".into(),
                 value: 12.0,
-                labels: Default::default(),
+                labels: std::collections::HashMap::default(),
             }],
             network: vec![
                 NetworkInterface {

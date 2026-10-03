@@ -1,22 +1,31 @@
-# 服务健康度监控（Service Health）
+# Service Health Monitoring
 
-> v1/v2 的「服务健康」只支持 agent 本机 HTTP/HTTPS 探测 + 证书检查。
-> 知微把它扩展为完整的可观测能力：多探针类型、SLA 跟踪、状态页、事件管理。
+> v1/v2 "service health" only supports agent-local HTTP/HTTPS probes plus
+> certificate checks. ZhiWei extends this into a full observability capability:
+> multiple probe types, SLA tracking, public status pages, incident management.
 
-## 1. 设计目标
+> **Note on scope** — this document describes both the **current** capabilities
+> and the **design direction**. As of `0.0.1`, only **HTTP / HTTPS / TCP / TLS
+> probes** are implemented (sections 2.1–2.4 below). The remaining sections
+> (status pages, incidents, RBAC, multi-tenant) are **planned but not yet
+> shipped**; see [docs/roadmap.md](./roadmap.md) for the order they will land.
+> Items in the "ZhiWei Extension" column that aren't yet implemented are
+> marked `[planned]` in the table below.
 
-| 维度 | 旧方案 | 知微扩展 |
-| --- | --- | --- |
-| 探针类型 | HTTP / HTTPS | HTTP / HTTPS / TCP / gRPC / DNS / ICMP / TLS / 命令 / 多步 |
-| 探针执行方 | agent（单点） | agent / monitor / 外部（geo-distributed） |
-| 调度 | 单一间隔 | 间隔 + 重试 + 退避 + 维护窗口 |
-| 阈值 | 单一（异常/正常） | warning + critical（延迟、错误率、丢包率） |
-| SLA | 无 | uptime % + MTTR + MTBF + 错误预算 |
-| 状态页 | 无 | 公共/私有状态页 + 订阅 |
-| 事件 | 无 | 事故时间线 + 影响范围 + 事后总结 |
-| 多租户 | 无 | per-team 探针 + RBAC |
+## 1. Design Goals
 
-## 2. 探针类型
+| Dimension | Old Approach | ZhiWei Extension | Status |
+| --- | --- | --- | --- |
+| Probe types | HTTP / HTTPS | HTTP / HTTPS / TCP / gRPC / DNS / ICMP / TLS / command / multi-step | HTTP / HTTPS / TCP / TLS shipped; rest planned |
+| Probe executor | agent (single point) | agent / monitor / external (geo-distributed) | agent-only in 0.0.1 |
+| Scheduling | Single interval | interval + retries + backoff + maintenance windows | interval + failure_threshold only |
+| Thresholds | Single (ok / fail) | warning + critical (latency, error rate, packet loss) | severity on alerts only; probes are `ok`/`degraded`/`down` |
+| SLA | None | uptime % + MTTR + MTBF + error budget | `[planned]` |
+| Status page | None | public/private status pages + subscriptions | `[planned]` |
+| Incidents | None | incident timeline + blast radius + postmortems | `[planned]` |
+| Multi-tenant | None | per-team probes + RBAC | `[planned]` — ZhiWei is single-operator |
+
+## 2. Probe Types
 
 ### 2.1 HTTP / HTTPS
 
@@ -27,20 +36,20 @@ url: https://api.example.com/health
 headers:
   Authorization: "Bearer xxx"
   X-Region: us-west
-body: |                      # 可选，POST 时使用
+body: |                      # optional, used for POST
   {"ping": "ok"}
 expect:
-  status: [200, 204]         # 期望状态码（列表 = 任一即可）
-  body_match:                # 响应体包含（任一即通过）
+  status: [200, 204]         # expected status codes (any in the list passes)
+  body_match:                # response body must contain (any passes)
     - '"status":"ok"'
     - '"alive":true'
-  body_regex: '"version":\s*"[0-9]+\.[0-9]+"'  # 完整 regex
+  body_regex: '"version":\s*"[0-9]+\.[0-9]+"'  # full regex
   headers_match:
     Content-Type: application/json
-  max_latency_ms: 500        # warning 阈值
+  max_latency_ms: 500        # warning threshold
   min_latency_ms: 0
 tls:
-  verify: true               # false = 跳过证书校验（自签场景）
+  verify: true               # false = skip certificate validation (self-signed)
   sni: api.example.com
   min_tls_version: "1.2"
 auth:
@@ -56,7 +65,7 @@ type: tcp
 host: db.example.com
 port: 5432
 expect:
-  banner_match: "^.*PostgreSQL.*$"   # 可选 banner 正则
+  banner_match: "^.*PostgreSQL.*$"   # optional banner regex
   max_latency_ms: 200
 ```
 
@@ -65,12 +74,12 @@ expect:
 ```yaml
 type: grpc
 address: grpc.example.com:443
-service: grpc.health.v1.Health        # 标准 health check
+service: grpc.health.v1.Health        # standard health check
 method: Check
 metadata:
   Authorization: "Bearer xxx"
 expect:
-  status: SERVING                     # grpc-health 的标准状态
+  status: SERVING                     # standard grpc-health status
   max_latency_ms: 300
 tls:
   verify: true
@@ -80,16 +89,16 @@ tls:
 
 ```yaml
 type: dns
-server: 1.1.1.1                       # 可选，默认系统 resolver
+server: 1.1.1.1                       # optional; defaults to system resolver
 domain: example.com
 query_type: A                         # A / AAAA / CNAME / MX / TXT / NS / SOA
 expect:
-  answers_include: ["1.2.3.4"]        # 必须包含的记录
-  answers_exclude: ["0.0.0.0"]        # 必须不包含
+  answers_include: ["1.2.3.4"]        # records that must be present
+  answers_exclude: ["0.0.0.0"]        # records that must NOT be present
   max_latency_ms: 100
 ```
 
-### 2.5 ICMP（ping）
+### 2.5 ICMP (ping)
 
 ```yaml
 type: icmp
@@ -100,7 +109,7 @@ expect:
   max_avg_latency_ms: 50
 ```
 
-### 2.6 TLS handshake（独立检查）
+### 2.6 TLS Handshake (standalone)
 
 ```yaml
 type: tls
@@ -109,15 +118,15 @@ port: 443
 expect:
   min_tls_version: "1.2"
   cert_cn: api.example.com
-  cert_expires_in_days: 30            # warning 阈值（独立于 cert 监控）
+  cert_expires_in_days: 30            # warning threshold (independent of cert tracking)
   max_latency_ms: 500
 ```
 
-### 2.7 自定义命令
+### 2.7 Custom Command
 
 ```yaml
 type: command
-# 仅在指定 node 上执行（agent 白名单）
+# Only runs on the specified node (agent whitelist required)
 node: bj-1
 command: ["redis-cli", "-h", "localhost", "ping"]
 expect:
@@ -126,9 +135,10 @@ expect:
   max_latency_ms: 100
 ```
 
-> 自定义命令受 agent 白名单 + 服务端 RBAC 双重管控。详见 SECURITY.md。
+> Custom commands are gated by both the agent whitelist and server-side RBAC.
+> See SECURITY.md for details.
 
-### 2.8 多步组合（probe composition）
+### 2.8 Probe Composition (multi-step)
 
 ```yaml
 type: sequence
@@ -136,10 +146,10 @@ steps:
   - type: dns
     domain: api.example.com
     query_type: A
-    # 把答案提取到变量
+    # extract an answer into a variable
     extract: ip_address
   - type: http
-    url: "http://{{ .ip_address }}:8080/health"   # 用上一步的变量
+    url: "http://{{ .ip_address }}:8080/health"   # use the previous variable
     expect: { status: [200] }
   - type: tls
     host: "{{ .ip_address }}"
@@ -154,64 +164,64 @@ steps:
     url: https://api.example.com/cache
     expect: { status: [200] }
 aggregate:
-  # 全 ok 才 ok；任一 warning 则 degraded；任一 critical 则 critical
+  # all-ok is ok; any warning → degraded; any critical → critical
   strategy: worst_of
 ```
 
-## 3. 探针调度
+## 3. Probe Scheduling
 
 ```yaml
 schedule:
-  interval: 30s              # 检查频率
-  jitter: 5s                 # 随机抖动，避免惊群
-  timeout: 5s                # 单次超时
-  retries: 2                 # 失败重试次数（指数退避）
+  interval: 30s              # check frequency
+  jitter: 5s                 # random jitter to avoid thundering herds
+  timeout: 5s                # per-attempt timeout
+  retries: 2                 # retries on failure (exponential backoff)
   retry_backoff: exponential # fixed / linear / exponential
-  # 维护窗口：暂停探测 + 不告警
+  # maintenance windows: pause + suppress notifications
   maintenance_windows:
     - start: "2026-01-15T02:00:00Z"
       end:   "2026-01-15T04:00:00Z"
-      reason: "数据库迁移"
+      reason: "Database migration"
 ```
 
-## 4. 执行位置
+## 4. Execution Location
 
 ```yaml
 location:
-  # 三选一或多选（多选 = 多点探测）
-  agent: "lab-1"             # 在该 agent 上执行（适合内网）
-  monitor: true              # 在 monitor 进程内执行（适合公网/少量）
+  # pick one or more (multiple = multi-point probing)
+  agent: "lab-1"             # run on the named agent (good for intranet)
+  monitor: true              # run in the monitor process (good for public internet)
   external_probes:
-    - region: us-east-1      # 多地理区域
+    - region: us-east-1      # multiple geo regions
       url: https://probe-us-east.zhiwei.io
     - region: eu-west-1
       url: https://probe-eu-west.zhiwei.io
 ```
 
-多点探测结果聚合：
-- `best_of`：任一 ok 即 ok（公网可达性）
-- `worst_of`：全部 ok 才 ok（强一致）
-- `majority`：半数以上 ok 即 ok
-- `quorum`：自定义阈值
+Aggregation across multi-point probes:
+- `best_of`: any ok is ok (public reachability)
+- `worst_of`: all must be ok (strong consistency)
+- `majority`: more than half must be ok
+- `quorum`: custom threshold
 
-## 5. SLA 与 SLO
+## 5. SLA and SLO
 
-### 5.1 SLO 配置
+### 5.1 SLO Configuration
 
 ```yaml
 slo:
   availability:
-    target: 99.9%            # 月度目标
+    target: 99.9%            # monthly target
     window: 30d
-    error_budget: 43m        # 30 天允许多少停机
-  
+    error_budget: 43m        # allowed downtime in 30 days
+
   latency:
     p95_target: 200ms
     window: 7d
-    burn_rate_alert: 14.4x   # 多窗口 burn rate
+    burn_rate_alert: 14.4x   # multi-window burn rate
 ```
 
-### 5.2 实时计算
+### 5.2 Live Calculation
 
 ```
 uptime_pct = (checks_ok + checks_warning) / total_checks
@@ -219,14 +229,14 @@ error_budget_remaining = error_budget_total - downtime_paid
 burn_rate = (1 - current_availability) / (1 - target_availability)
 ```
 
-### 5.3 Burn rate 告警
+### 5.3 Burn-Rate Alerts
 
-参考 Google SRE workbook：
-- 2% 预算在 1h 内烧完 → page
-- 5% 预算在 6h 内烧完 → page
-- 10% 预算在 3d 内烧完 → ticket
+Referencing the Google SRE workbook:
+- 2% of the budget burned in 1h → page
+- 5% of the budget burned in 6h → page
+- 10% of the budget burned in 3d → ticket
 
-## 6. 状态机
+## 6. State Machine
 
 ```
             ┌─────────┐
@@ -235,104 +245,104 @@ burn_rate = (1 - current_availability) / (1 - target_availability)
                  │ check fails N times       │
                  ▼                           │
             ┌─────────┐                     │
-            │ DEGRADED│ warning 阈值         │
+            │ DEGRADED│ warning threshold    │
             └────┬────┘                     │
                  │ check fails more          │
                  ▼                           │
             ┌─────────┐                     │
-            │ DOWN    │ critical 阈值        │
+            │ DOWN    │ critical threshold   │
             └────┬────┘                     │
                  │ check recovers            │
-                 │ + 进入 cooldown           │
+                 │ + enter cooldown         │
                  ▼                           │
             ┌─────────┐                     │
             │ RECOVER │                     │
             └────┬────┘                     │
-                 │ cooldown 结束 + ok        │
+                 │ cooldown elapsed + ok     │
                  └──────────────────────────┘
 ```
 
-时间线：
+Timeline fields:
 - `last_state_change_at`
 - `consecutive_failures`
 - `total_downtime_in_window`
-- `incidents`（合并的连续故障事件）
+- `incidents` (merged contiguous failure events)
 
-## 7. 状态页
+## 7. Status Page
 
-### 7.1 内部状态页
+### 7.1 Internal Status Page
 
 ```
 /health/services
-  - 按 group / team / region 分组
-  - 当前状态 + 最近事件 + SLA 仪表盘
-  - RBAC 控制可见性
+  - group by team / region
+  - current state + recent incidents + SLA dashboard
+  - RBAC controls visibility
 ```
 
-### 7.2 公共状态页（可选）
+### 7.2 Public Status Page (optional)
 
 ```
 /status/<tenant>/
-  - 极简 UI（status.zhiwei.io 风格）
-  - 当前状态（up / degraded / down / maintenance）
-  - 90 天 uptime 柱状图
-  - 事故时间线
-  - 订阅：email / RSS / webhook / Slack
+  - minimal UI (statuspage.io style)
+  - current state (up / degraded / down / maintenance)
+  - 90-day uptime bars
+  - incident timeline
+  - subscribe: email / RSS / webhook / Slack
 ```
 
-### 7.3 嵌入
+### 7.3 Embedding
 
 ```html
-<iframe src="https://status.example.com/embed/services" 
+<iframe src="https://status.example.com/embed/services"
         width="100%" height="200"></iframe>
 ```
 
-## 8. 事故管理
+## 8. Incident Management
 
-### 8.1 自动开事故
+### 8.1 Automatic Incident Opening
 
 ```
-当 service 从 OK → DEGRADED/DOWN：
-  - 自动创建 incident（open）
-  - 通知 on-call（按 service 的 on-call schedule）
-  - 关联最近 N 条失败的探针数据
-当 service 回到 OK 且 cooldown 结束：
-  - incident 标记为 resolved
-  - 计算 downtime + 影响
-  - 生成 postmortem 草稿（可手动补充）
+When a service transitions OK → DEGRADED/DOWN:
+  - auto-create an incident (open)
+  - notify on-call (per the service's on-call schedule)
+  - link the most recent N failed probe results
+When the service returns to OK and the cooldown elapses:
+  - mark the incident resolved
+  - compute downtime + blast radius
+  - generate a postmortem draft (manual edits allowed)
 ```
 
-### 8.2 事后总结模板
+### 8.2 Postmortem Template
 
 ```markdown
 # Incident: <service> DOWN
 
 ## Summary
-- 开始：2026-01-15 02:14 UTC
-- 结束：2026-01-15 02:47 UTC
-- 持续：33 分钟
-- 影响：99.9% SLO 消耗 4% 错误预算
+- Start: 2026-01-15 02:14 UTC
+- End: 2026-01-15 02:47 UTC
+- Duration: 33 minutes
+- Impact: 99.9% SLO consumed 4% of the error budget
 
 ## Timeline
-- 02:14:00 探针连续失败 3 次
-- 02:14:30 alert 触发，page on-call
-- 02:18:00 on-call 确认，DB 主节点 CPU 100%
-- 02:32:00 杀掉长事务
-- 02:47:00 探针恢复
+- 02:14:00 Probe failed 3 times in a row
+- 02:14:30 Alert fired; on-call paged
+- 02:18:00 On-call acknowledged: DB primary CPU at 100%
+- 02:32:00 Long-running transaction killed
+- 02:47:00 Probes recovered
 
 ## Root Cause
-DB 主节点被一个未优化的批量查询占满 CPU。
+The DB primary was saturated by an unoptimized bulk query.
 
 ## Action Items
-- [ ] 给查询加索引（owner: alice, due: 2026-01-22）
-- [ ] 给 DB 加 CPU 阈值告警（owner: bob, due: 2026-01-18）
-- [ ] 复盘 runbook（owner: alice, due: 2026-01-25）
+- [ ] Add an index for the query (owner: alice, due: 2026-01-22)
+- [ ] Add a CPU threshold alert on the DB (owner: bob, due: 2026-01-18)
+- [ ] Write a runbook (owner: alice, due: 2026-01-25)
 ```
 
-## 9. 通知路由
+## 9. Notification Routing
 
 ```yaml
-# 与告警规则共享通知配置
+# shares notify config with alert rules
 notify:
   on_state_change:
     - from: ok
@@ -343,31 +353,31 @@ notify:
       to: ok
       severity: info
       receivers: [slack-incidents]
-  
+
   template: |
-    🔴 {{ .service.name }} 状态变更
+    {{ .service.name }} state changed
     {{ .from }} → {{ .to }}
-    持续：{{ .duration }}
-    最近一次检查：HTTP {{ .last_check.status }} · {{ .last_check.latency_ms }}ms
+    Duration: {{ .duration }}
+    Last check: HTTP {{ .last_check.status }} · {{ .last_check.latency_ms }}ms
 ```
 
 ## 10. RBAC
 
-> 2026-09-19 拍板：**不需要用户与角色**，本节不落地。见
-> [POSITIONING.md](./POSITIONING.md) 的排除清单。
+> Decision on 2026-09-19: **users and roles are not in scope** for v0.0.x; this
+> section is documentation only.
 
 ```
 roles:
   viewer:     list / status page / read SLA dashboards
-  editor:     创建/修改/启停探针 / 配置 SLO
-  oncall:     editor + 认领 incident / 触发 maintenance window
-  admin:      全部 + 删除 service / 管理 RBAC
+  editor:     create/edit/enable/disable probes / configure SLOs
+  oncall:     editor + claim incidents / trigger maintenance windows
+  admin:      all of the above + delete services / manage RBAC
 ```
 
-## 11. 数据模型
+## 11. Data Model
 
 ```sql
--- 探针定义
+-- probe definitions
 CREATE TABLE probes (
     id              TEXT PRIMARY KEY,
     name            TEXT NOT NULL UNIQUE,
@@ -383,7 +393,7 @@ CREATE TABLE probes (
     created_by      TEXT
 );
 
--- 服务（聚合多个探针）
+-- services (aggregate multiple probes)
 CREATE TABLE services (
     id              TEXT PRIMARY KEY,
     name            TEXT NOT NULL UNIQUE,
@@ -396,7 +406,7 @@ CREATE TABLE services (
     updated_at      INTEGER NOT NULL
 );
 
--- 检查结果（时序）
+-- check results (time series)
 CREATE TABLE probe_results (
     probe_id        TEXT NOT NULL,
     ts              INTEGER NOT NULL,         -- unix nanos
@@ -409,7 +419,7 @@ CREATE TABLE probe_results (
 ) WITHOUT ROWID;
 CREATE INDEX idx_probe_results_ts ON probe_results(ts);
 
--- SLA 计算结果（每天一行）
+-- SLA rollup (one row per day)
 CREATE TABLE probe_sla_daily (
     probe_id        TEXT NOT NULL,
     day             TEXT NOT NULL,            -- YYYY-MM-DD
@@ -425,7 +435,7 @@ CREATE TABLE probe_sla_daily (
     PRIMARY KEY (probe_id, day)
 );
 
--- 事故
+-- incidents
 CREATE TABLE incidents (
     id              TEXT PRIMARY KEY,
     service_id      TEXT NOT NULL,
@@ -441,7 +451,7 @@ CREATE TABLE incidents (
     timeline        TEXT NOT NULL DEFAULT '[]' -- JSON
 );
 
--- 维护窗口
+-- maintenance windows
 CREATE TABLE maintenance_windows (
     id              TEXT PRIMARY KEY,
     service_id      TEXT NOT NULL,
@@ -452,9 +462,9 @@ CREATE TABLE maintenance_windows (
 );
 ```
 
-## 12. 与告警引擎集成
+## 12. Integration with the Alert Engine
 
-服务健康是告警引擎的「数据源」之一：
+Service health is one of the alert engine's data sources:
 
 ```
 probe.state changes → alert engine evaluates rules → notify
@@ -466,37 +476,39 @@ probe.state changes → alert engine evaluates rules → notify
                      status page updates
 ```
 
-告警规则可基于：
+Alert rules can be based on:
 - `probe.state == "down"`
 - `probe.latency_ms > 500` for 5m
 - `sla.error_budget_remaining < 10%`
 - `incident.duration > 30m`
 
-## 13. 实施路线
+## 13. Implementation Roadmap
 
-| 阶段 | 内容 | 估时 |
+| Phase | Content | Estimate |
 | --- | --- | --- |
-| S-1 | 探针定义 + HTTP/TCP/gRPC 执行 + 结果入库 | 1.5w |
-| S-2 | 多步组合 + 阈值 + 状态机 | 1w |
-| S-3 | SLA 计算 + 状态页 + 公共订阅 | 1w |
-| S-4 | 事故管理 + 事后总结 | 0.5w |
-| S-5 | 与告警引擎、cert-manager 联动 | 0.5w |
+| S-1 | Probe definitions + HTTP/TCP/gRPC execution + result storage | 1.5w |
+| S-2 | Multi-step composition + thresholds + state machine | 1w |
+| S-3 | SLA calculation + status page + public subscriptions | 1w |
+| S-4 | Incident management + postmortems | 0.5w |
+| S-5 | Integration with alert engine and cert-manager | 0.5w |
 
-合计 ~ 4.5 周
+Total: ~4.5 weeks
 
-## 14. 与现有产品的差异化
+## 14. Differentiation
 
-| 产品 | 我们的差异化 |
+| Product | Our Edge |
 | --- | --- |
-| Prometheus blackbox_exporter | 我们：原生服务健康概念、SLA、状态页、事故管理；它：通用 metric |
-| Uptime Kuma | 我们：MCP + 证书管理 + 容器管理一体化；它：探针种类更多但轻量 |
-| Better Uptime / Statuspage | 我们：自托管 + 与监控/控制统一；它们：SaaS |
-| Datadog Synthetics | 我们：开源 + 单二进制；它：商业 |
-| Checkly | 我们：开源 + 自托管；它：商业 |
+| Prometheus blackbox_exporter | Us: native service-health concept, SLA, status pages, incidents. Them: generic metrics. |
+| Uptime Kuma | Us: MCP + certificate management + container management in one. Them: more probe types but lighter. |
+| Better Uptime / Statuspage | Us: self-hosted + unified with monitoring/control. Them: SaaS only. |
+| Datadog Synthetics | Us: open source + single binary. Them: commercial. |
+| Checkly | Us: open source + self-hosted. Them: commercial. |
 
-核心卖点：**「监控 + 服务健康 + 证书 + 事故 + 状态页」全部在一个二进制里**，不依赖外部 SaaS。
+Core pitch: **monitoring + service health + certificates + incidents + status
+page in a single binary**, with no external SaaS dependency.
 
 ---
 
-**总结**：服务健康度不再是旧方案的「附带功能」，而是知微的核心可观测能力之一。
-它从「HTTP 200 检测」扩展为完整的 SRE 实践闭环（探针 → 状态 → SLA → 事故 → 复盘）。
+**Summary**: Service health is no longer an "ancillary feature" — it's a core
+observability capability of ZhiWei. It extends from "HTTP 200 detection" to a
+full SRE practice loop (probe → state → SLA → incident → postmortem).

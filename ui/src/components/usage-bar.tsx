@@ -1,7 +1,7 @@
 /**
- * 用率进度条：节点 / 容器列表共用同一份语义与配色阈值。
- * >80 rose、>60 amber、其余 emerald；null/undefined/NaN 不渲染，避免「0% 长条」的误导。
- * 入参是 0..100 的百分比；超出会被夹到 0..100。
+ * Usage progress bar: shared semantics and color thresholds for node / container lists.
+ * >80 rose, >60 amber, else emerald; null/undefined/NaN don't render to avoid misleading "0% bar".
+ * Input is 0..100 percentage; values outside the range are clamped to 0..100.
  */
 export function UsageBar({ pct }: { pct: number | null | undefined }) {
   if (pct === null || pct === undefined || Number.isNaN(pct)) return null;

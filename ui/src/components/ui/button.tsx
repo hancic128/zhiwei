@@ -3,10 +3,10 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-/** 规范 7.1：仅 4 种 variant，禁止扩展。 */
+/** Spec 7.1: only 4 variants, no extension allowed. */
 const buttonVariants = cva(
-  // 规范 08：hover 变色 150ms + 点击 active:scale-95。
-  // 两个 transition 工具类会互相覆盖，这里显式列出需要的属性。
+  // Spec 08: hover color change 150ms + click active:scale-95.
+  // Two transition utility classes would override each other, so we list the needed properties explicitly.
   "inline-flex items-center justify-center gap-2 rounded-lg text-sm font-medium " +
     "transition-[color,background-color,border-color,transform] duration-150 " +
     "active:scale-95 " +
@@ -35,7 +35,7 @@ const buttonVariants = cva(
 export interface ButtonProps
   extends React.ButtonHTMLAttributes<HTMLButtonElement>,
     VariantProps<typeof buttonVariants> {
-  /** 规范 08：loading 时文字换成 Loader2 + animate-spin，按钮 disabled */
+  /** Spec 08: when loading, replace text with Loader2 + animate-spin, button disabled */
   loading?: boolean;
 }
 

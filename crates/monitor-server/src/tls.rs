@@ -8,12 +8,13 @@ use std::path::Path;
 
 use anyhow::Context;
 use rcgen::{CertificateParams, DistinguishedName, IsCa, KeyPair, SanType, SerialNumber};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
 use time::{Duration, OffsetDateTime};
 
 use crate::ca::Ca;
 
+#[allow(clippy::struct_field_names)] // `_pem` suffix is the point: these are PEM-encoded strings
 pub struct IssuedCert {
     pub cert_pem: String,
     pub key_pem: String,
@@ -77,27 +78,27 @@ pub fn ensure_server_cert(ca: &Ca, data_dir: &Path, cn: &str) -> anyhow::Result<
     })
 }
 
-/// Build a rustls ServerConfig.
+/// Build a rustls `ServerConfig`.
 ///
-/// 不要求客户端证书：节点身份由 Ed25519 请求签名承担（`routes::verify_node`），
-/// 这样部署到「边缘终止 TLS」的托管平台时也不会失效。自建部署仍由这里终结 TLS，
-/// 只是不再用传输层证书认节点。
+/// Does not require client certificates: node identity is carried by Ed25519
+/// request signatures (`routes::verify_node`), so this still works when
+/// deployed behind a "TLS-terminated at the edge" managed platform. Self-hosted
+/// deployments still have TLS terminated here, but transport-layer certs are
+/// no longer used to authenticate nodes.
 pub fn build_server_config(
     cert_pem: &str,
     key_pem: &str,
     _ca_pem: &str,
 ) -> anyhow::Result<ServerConfig> {
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_pem.as_bytes())
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
         .collect::<Result<Vec<_>, _>>()
         .context("parsing server cert chain")?;
-    let key = rustls_pemfile::pkcs8_private_keys(&mut key_pem.as_bytes())
-        .next()
-        .context("no PKCS#8 private key found")?
-        .context("parsing server private key")?;
-    let key = PrivateKeyDer::Pkcs8(key);
+    let key =
+        PrivateKeyDer::from_pem_slice(key_pem.as_bytes()).context("parsing server private key")?;
 
-    // 不再要求客户端证书：节点身份改由 Ed25519 请求签名承担，
-    // 这样部署到边缘终止 TLS 的托管平台时也不会失效。
+    // No longer requires client certificates: node identity is now carried
+    // by Ed25519 request signatures, so this still works when deployed behind
+    // edge-terminating TLS managed platforms.
     let mut cfg = ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
         .with_no_client_auth()
         .with_single_cert(certs, key)

@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { LogoMark } from "@/components/ui/logo";
 import { setToken } from "@/api";
 
-/** 规范 07-3.2 居中卡片布局 + 3.3 登录页通用规则（无导航栏，保留悬浮面板）。 */
+/** Spec 07-3.2 centered card layout + 3.3 login page common rules (no navbar, keep floating panel). */
 export function LoginPage({ onSubmit }: { onSubmit: () => void }) {
   const { t } = useTranslation();
   const [value, setValue] = React.useState("");
@@ -22,9 +22,10 @@ export function LoginPage({ onSubmit }: { onSubmit: () => void }) {
     setError("");
     setSubmitting(true);
     try {
-      // /v1 永不返回 401（仅靠 body.authenticated 区分鉴权结果），
-      // 用它做「先验证再放行」比直接进控制台等 401 友好得多——
-      // 也能挡住「粘贴了过期/错位 token」这种典型踩坑。
+      // /v1 never returns 401 (it only signals auth result via body.authenticated),
+      // using it for "verify before letting in" is much friendlier than entering
+      // the console and waiting for a 401 — and it also blocks the typical
+      // pitfall of pasting an expired or mismatched token.
       const res = await fetch("/v1", {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -42,7 +43,7 @@ export function LoginPage({ onSubmit }: { onSubmit: () => void }) {
   return (
     <div className="min-h-screen flex items-center justify-center px-4 bg-surface-2 dark:bg-ink-900">
       <div className="w-full max-w-sm">
-        {/* 与标签页图标 / 侧边栏同一枚标识：无底板、无边框，颜色随主题色 */}
+        {/* Same logo as the tab icon / sidebar: no backdrop, no border, color follows the theme */}
         <LogoMark className="w-12 h-12 mx-auto mb-8 text-brand-600 dark:text-brand-500" />
 
         <div className="bg-surface-0 dark:bg-ink-700 rounded-xl shadow-lg border border-surface-3 dark:border-ink-700 p-8">

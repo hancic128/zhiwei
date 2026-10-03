@@ -32,7 +32,7 @@ struct AlertRuleRow {
 
 impl From<AlertRuleRow> for AlertRule {
     fn from(r: AlertRuleRow) -> Self {
-        AlertRule {
+        Self {
             id: r.id,
             name: r.name,
             metric: r.metric,
@@ -63,13 +63,13 @@ pub struct Alert {
     pub started_at_unix_nano: i64,
     pub resolved_at_unix_nano: Option<i64>,
     pub silenced_until_unix_nano: Option<i64>,
-    /// rule = 指标规则告警；probe = 服务探针状态告警；cert = 证书到期告警
+    /// rule = metric rule alert; probe = service probe state alert; cert = cert expiry alert
     pub source: String,
-    /// source = probe 时是 probe_id；source = cert 时是 `{source_id}:{证书路径}`
+    /// when source = probe: `probe_id`; when source = cert: `{source_id}:{cert path}`
     pub source_ref: String,
 }
 
-/// 单个 (规则, 节点) 的评估状态
+/// Evaluation state for a single (rule, node) pair
 #[derive(Debug, Clone)]
 pub struct EvalState {
     pub breaching_since_unix_nano: Option<i64>,
@@ -83,22 +83,27 @@ pub struct NotifyChannel {
     pub name: String,
     /// `feishu` / `slack` / `bluebird` / `webhook`
     pub kind: String,
-    /// Slack / 通用 webhook 的投递地址；飞书不用（地址由 receive_id 决定）
+    /// Slack/generic webhook delivery address; Feishu doesn't use this (address determined by `receive_id`)
     pub url: String,
-    /// 按类型复用：飞书 = App Secret，通用 webhook = 投递 Token（Bearer）
+    /// Reused by type: Feishu = App Secret, generic webhook = delivery Token (Bearer)
     pub secret: String,
-    /// 飞书应用 App ID
+    /// Feishu app App ID
     pub app_id: String,
-    /// 飞书接收 ID（群 chat_id / 用户 open_id 等）
+    /// Feishu receive ID (group `chat_id` / user `open_id`, etc.)
     pub receive_id: String,
-    /// 飞书的 receive_id_type：chat_id / open_id / user_id / union_id / email
+    /// Feishu's `receive_id_type`: `chat_id` / `open_id` / `user_id` / `union_id` / email
     pub receive_id_type: String,
     pub enabled: bool,
     pub min_severity: String,
 }
 
-/// 新建渠道的入参。字段多、且大多只在某一种渠道类型下才有值，
-/// 聚成一个结构比一长串位置参数好读（调用点也不用数顺序）。
+/// Input for creating a new channel.
+///
+/// # Detailed
+///
+/// Many fields, most only apply to certain channel types; grouping into one
+/// struct is more readable than a long list of positional arguments (call sites
+/// don't need to count positions either).
 pub struct NewChannel<'a> {
     pub name: &'a str,
     pub kind: &'a str,
@@ -110,32 +115,38 @@ pub struct NewChannel<'a> {
     pub min_severity: &'a str,
 }
 
-/// alert_rules 行的裸形态（与 SELECT 列顺序一致）
+/// Bare form of `alert_rules` rows (matches SELECT column order)
 type RuleRow = (i64, String, String, String, f64, i64, String, i64, i64, i64);
 
-/// 内置规则（节点上下线）的对外形态。
-/// id 是稳定字符串（'node_offline' / 'node_online'），前端用它做 toggle 的 key。
+/// External form of builtin rules (node online/offline/service probes/containers/certs).
+///
+/// id is a stable string ('`node_offline`' / '`node_online`', etc.), frontend uses it as the toggle key.
+/// Supports editing threshold and `duration_seconds`.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct BuiltinAlertRule {
     pub id: String,
     pub name: String,
     pub enabled: bool,
+    pub threshold: f64,
+    pub duration_seconds: i64,
     pub updated_at_unix_nano: i64,
 }
 
-/// builtin_alert_rules 行的裸形态（与 SELECT 列顺序一致）
-type BuiltinRow = (String, String, i64, i64);
+/// Bare form of `builtin_alert_rules` rows (matches SELECT column order)
+type BuiltinRow = (String, String, i64, f64, i64, i64);
 
 fn builtin_from_row(r: BuiltinRow) -> BuiltinAlertRule {
     BuiltinAlertRule {
         id: r.0,
         name: r.1,
         enabled: r.2 != 0,
-        updated_at_unix_nano: r.3,
+        threshold: r.3,
+        duration_seconds: r.4,
+        updated_at_unix_nano: r.5,
     }
 }
 
-/// notify_channels 行的裸形态（与 SELECT 列顺序一致）
+/// Bare form of `notify_channels` rows (matches SELECT column order)
 type ChannelRow = (
     i64,
     String,
@@ -167,7 +178,7 @@ fn channel_from_row(r: ChannelRow) -> NotifyChannel {
     }
 }
 
-/// alerts 行的裸形态
+/// Bare form of alerts rows
 #[allow(clippy::type_complexity)]
 type AlertRow = (
     i64,
@@ -188,7 +199,7 @@ type AlertRow = (
     String,
 );
 
-/// alerts 行 → Alert（两处查询共用，避免列顺序写两遍）
+/// alerts row -> Alert (shared by two queries, avoid writing column order twice)
 fn alert_from_row(r: AlertRow) -> Alert {
     Alert {
         id: r.0,
@@ -216,17 +227,23 @@ pub struct AlertsRepo {
 }
 
 impl AlertsRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    #[must_use]
+    pub const fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 
-    // ---------- 规则 ----------
+    // ---------- Rules ----------
 
+    /// List all alert rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the database query fails.
     pub async fn list_rules(&self) -> anyhow::Result<Vec<AlertRule>> {
         let rows: Vec<RuleRow> = sqlx::query_as(
-            r#"SELECT id, name, metric, op, threshold, duration_seconds, severity, enabled,
+            r"SELECT id, name, metric, op, threshold, duration_seconds, severity, enabled,
                           created_at_unix_nano, updated_at_unix_nano
-                   FROM alert_rules ORDER BY id"#,
+                   FROM alert_rules ORDER BY id",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -247,6 +264,11 @@ impl AlertsRepo {
             .collect())
     }
 
+    /// List enabled rule definitions for the evaluator.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the underlying query fails.
     pub async fn enabled_rules(&self) -> anyhow::Result<Vec<AlertRule>> {
         Ok(self
             .list_rules()
@@ -256,6 +278,11 @@ impl AlertsRepo {
             .collect())
     }
 
+    /// Total number of user-defined alert rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the count query fails.
     pub async fn count_rules(&self) -> anyhow::Result<i64> {
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM alert_rules")
             .fetch_one(&self.pool)
@@ -264,6 +291,11 @@ impl AlertsRepo {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Insert a new user-defined rule and return its id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the insert fails.
     pub async fn create_rule(
         &self,
         name: &str,
@@ -275,10 +307,10 @@ impl AlertsRepo {
         now: i64,
     ) -> anyhow::Result<i64> {
         let r = sqlx::query(
-            r#"INSERT INTO alert_rules
+            r"INSERT INTO alert_rules
                (name, metric, op, threshold, duration_seconds, severity, enabled,
                 created_at_unix_nano, updated_at_unix_nano)
-               VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)"#,
+               VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)",
         )
         .bind(name)
         .bind(metric)
@@ -293,21 +325,31 @@ impl AlertsRepo {
         Ok(r.last_insert_rowid())
     }
 
+    /// Toggle a rule. Disabling also closes any open alerts for it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update or alert-resolution query fails.
     pub async fn set_rule_enabled(&self, id: i64, enabled: bool, now: i64) -> anyhow::Result<()> {
         sqlx::query("UPDATE alert_rules SET enabled = ?, updated_at_unix_nano = ? WHERE id = ?")
-            .bind(if enabled { 1 } else { 0 })
+            .bind(i32::from(enabled))
             .bind(now)
             .bind(id)
             .execute(&self.pool)
             .await?;
 
-        // 停用后评估会跳过该规则，若不处理，它的未解决告警会一直挂着
+        // After disabling, evaluation skips this rule; if not handled, its unresolved alerts stay open
         if !enabled {
             self.resolve_open_alerts_of_rule(id, now).await?;
         }
         Ok(())
     }
 
+    /// Look up a rule by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn get_rule(&self, id: i64) -> anyhow::Result<Option<AlertRule>> {
         let row = sqlx::query_as::<_, AlertRuleRow>(
             "SELECT id, name, metric, op, threshold, duration_seconds, severity, enabled, created_at_unix_nano, updated_at_unix_nano FROM alert_rules WHERE id = ?",
@@ -315,9 +357,14 @@ impl AlertsRepo {
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|r| r.into()))
+        Ok(row.map(std::convert::Into::into))
     }
 
+    /// Replace rule definition by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update fails.
     pub async fn update_rule(&self, id: i64, rule: &AlertRule) -> anyhow::Result<()> {
         sqlx::query(
             "UPDATE alert_rules SET name = ?, metric = ?, op = ?, threshold = ?, duration_seconds = ?, severity = ?, enabled = ?, updated_at_unix_nano = ? WHERE id = ?",
@@ -328,7 +375,7 @@ impl AlertsRepo {
         .bind(rule.threshold)
         .bind(rule.duration_seconds)
         .bind(&rule.severity)
-        .bind(if rule.enabled { 1 } else { 0 })
+        .bind(i32::from(rule.enabled))
         .bind(rule.updated_at_unix_nano)
         .bind(id)
         .execute(&self.pool)
@@ -336,7 +383,11 @@ impl AlertsRepo {
         Ok(())
     }
 
-    /// 关闭某条规则名下所有未解决的告警，并清空其评估状态
+    /// Close all unresolved alerts for a rule and clear its evaluation state
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update or delete query fails.
     pub async fn resolve_open_alerts_of_rule(&self, rule_id: i64, now: i64) -> anyhow::Result<()> {
         sqlx::query(
             "UPDATE alerts SET resolved_at_unix_nano = ?
@@ -353,8 +404,13 @@ impl AlertsRepo {
         Ok(())
     }
 
+    /// Delete a rule. Open alerts for the rule are closed first to avoid orphans.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the alert-resolution or delete query fails.
     pub async fn delete_rule(&self, id: i64, now: i64) -> anyhow::Result<()> {
-        // 先把未解决告警收尾，避免删除规则后留下一堆永远开着的历史告警
+        // First close unresolved alerts to avoid leaving behind forever-open historical alerts after deleting the rule
         self.resolve_open_alerts_of_rule(id, now).await?;
         sqlx::query("DELETE FROM alert_rules WHERE id = ?")
             .bind(id)
@@ -363,12 +419,17 @@ impl AlertsRepo {
         Ok(())
     }
 
-    // ---------- 内置规则（节点上下线）----------
+    // ---------- Builtin rules (node online/offline) ----------
 
-    /// 列出全部内置规则（按 id 字典序，UI 展示顺序稳定）
+    /// List all builtin rules (ordered by id lexicographically, UI display order is stable)
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn list_builtin_rules(&self) -> anyhow::Result<Vec<BuiltinAlertRule>> {
         let rows: Vec<BuiltinRow> = sqlx::query_as(
-            "SELECT id, name, enabled, updated_at_unix_nano
+            "SELECT id, name, enabled, COALESCE(threshold, 0) as threshold,
+                    COALESCE(duration_seconds, 300) as duration_seconds, updated_at_unix_nano
              FROM builtin_alert_rules ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -376,18 +437,70 @@ impl AlertsRepo {
         Ok(rows.into_iter().map(builtin_from_row).collect())
     }
 
-    /// 单条内置规则的当前 enabled 状态；不存在（迁移未跑）按 true 处理，
-    /// 这样老库（还没建表）也不会漏发节点离线告警。
+    /// List enabled builtin metric rules (`cpu_high`, `mem_high`, `disk_high`, etc.)
+    /// These are returned as `AlertRule` struct for compatibility with `evaluate()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
+    pub async fn enabled_builtin_rules(&self) -> anyhow::Result<Vec<AlertRule>> {
+        let rows: Vec<BuiltinRow> = sqlx::query_as(
+            "SELECT id, name, enabled, COALESCE(threshold, 0) as threshold,
+                    COALESCE(duration_seconds, 300) as duration_seconds, updated_at_unix_nano
+             FROM builtin_alert_rules
+             WHERE enabled = 1 AND (id = 'cpu_high' OR id = 'mem_high' OR id = 'disk_high')",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        // Convert BuiltinAlertRule to AlertRule for evaluate()
+        let rules: Vec<AlertRule> = rows
+            .into_iter()
+            .map(|r| {
+                let (id_str, name, enabled, threshold, duration_seconds, updated_at) =
+                    (r.0.clone(), r.1.clone(), r.2 != 0, r.3, r.4, r.5);
+                AlertRule {
+                    id: 0, // metric rules use 0 as placeholder
+                    name,
+                    metric: match id_str.as_str() {
+                        "cpu_high" => "host.cpu.usage".to_string(),
+                        "mem_high" => "host.mem.usage".to_string(),
+                        "disk_high" => "host.disk.usage".to_string(),
+                        _ => id_str,
+                    },
+                    op: "gt".to_string(),
+                    threshold,
+                    duration_seconds,
+                    severity: "warning".to_string(),
+                    enabled,
+                    created_at_unix_nano: updated_at,
+                    updated_at_unix_nano: updated_at,
+                }
+            })
+            .collect();
+        Ok(rules)
+    }
+
+    /// Current enabled state of a single builtin rule; if not exists (migration not run) defaults to true,
+    /// so old databases (table not created yet) still send node offline alerts.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn builtin_rule_enabled(&self, id: &str) -> anyhow::Result<bool> {
         let row: Option<(i64,)> =
             sqlx::query_as("SELECT enabled FROM builtin_alert_rules WHERE id = ?")
                 .bind(id)
                 .fetch_optional(&self.pool)
                 .await?;
-        Ok(row.map(|(e,)| e != 0).unwrap_or(true))
+        Ok(row.map_or(true, |(e,)| e != 0))
     }
 
-    /// 切换内置规则启用状态。返回新值；id 不存在时返回 None（UI 应按 404 处理）。
+    /// Toggle builtin rule enabled state. Returns new value; if id doesn't exist returns None (UI should handle as 404).
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update or alert-resolution query fails.
     pub async fn set_builtin_rule_enabled(
         &self,
         id: &str,
@@ -399,7 +512,7 @@ impl AlertsRepo {
              SET enabled = ?, updated_at_unix_nano = ?
              WHERE id = ?",
         )
-        .bind(if enabled { 1 } else { 0 })
+        .bind(i32::from(enabled))
         .bind(now)
         .bind(id)
         .execute(&self.pool)
@@ -409,11 +522,12 @@ impl AlertsRepo {
             return Ok(None);
         }
 
-        // 关闭某类内置事件时，把它的未解决告警一并关掉，避免停用了还挂着红。
-        // - node_offline：节点离线告警本身就是这一类事件的实例；
-        // - service_offline：探针告警（source = probe）全部产生于「服务探不到」；
-        // - container_stopped：容器停止告警（source = container）；
-        // - cert_expiring / cert_expired：证书告警按严重度拆成两档。
+        // When disabling a builtin rule type, also close its unresolved alerts to avoid red alerts
+        // after disabling. Examples:
+        // - node_offline: node offline alerts are instances of this event type;
+        // - service_offline: probe alerts (source = probe) all arise from "service unreachable";
+        // - container_stopped: container stop alerts (source = container);
+        // - cert_expiring / cert_expired: cert alerts split by severity.
         if !enabled {
             let resolve_sql = match id {
                 "node_offline" => Some(
@@ -445,8 +559,52 @@ impl AlertsRepo {
         Ok(Some(enabled))
     }
 
-    // ---------- 评估状态 ----------
+    /// Update builtin alert rule settings (threshold, `duration_seconds`, enabled).
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update or lookup query fails.
+    pub async fn update_builtin_rule(
+        &self,
+        id: &str,
+        threshold: f64,
+        duration_seconds: i64,
+        enabled: bool,
+        now: i64,
+    ) -> anyhow::Result<Option<BuiltinAlertRule>> {
+        let n = sqlx::query(
+            "UPDATE builtin_alert_rules
+             SET threshold = ?, duration_seconds = ?, enabled = ?, updated_at_unix_nano = ?
+             WHERE id = ?",
+        )
+        .bind(threshold)
+        .bind(duration_seconds)
+        .bind(i32::from(enabled))
+        .bind(now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if n == 0 {
+            return Ok(None);
+        }
+        let row: Option<BuiltinRow> = sqlx::query_as(
+            "SELECT id, name, enabled, COALESCE(threshold, 0), COALESCE(duration_seconds, 300), updated_at_unix_nano
+             FROM builtin_alert_rules WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(builtin_from_row))
+    }
 
+    // ---------- Evaluation state ----------
+
+    /// Load evaluation state for `(rule_id, node_id)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn get_state(&self, rule_id: i64, node_id: &str) -> anyhow::Result<EvalState> {
         let row: Option<(Option<i64>, i64, Option<i64>)> = sqlx::query_as(
             "SELECT breaching_since_unix_nano, firing, open_alert_id FROM alert_state WHERE rule_id = ? AND node_id = ?",
@@ -470,6 +628,11 @@ impl AlertsRepo {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Upsert evaluation state for `(rule_id, node_id)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn upsert_state(
         &self,
         rule_id: i64,
@@ -480,19 +643,19 @@ impl AlertsRepo {
         last_value: Option<f64>,
     ) -> anyhow::Result<()> {
         sqlx::query(
-            r#"INSERT INTO alert_state
+            r"INSERT INTO alert_state
                (rule_id, node_id, breaching_since_unix_nano, firing, open_alert_id, last_value)
                VALUES (?, ?, ?, ?, ?, ?)
                ON CONFLICT(rule_id, node_id) DO UPDATE SET
                  breaching_since_unix_nano = excluded.breaching_since_unix_nano,
                  firing = excluded.firing,
                  open_alert_id = excluded.open_alert_id,
-                 last_value = excluded.last_value"#,
+                 last_value = excluded.last_value",
         )
         .bind(rule_id)
         .bind(node_id)
         .bind(breaching_since)
-        .bind(if firing { 1 } else { 0 })
+        .bind(i32::from(firing))
         .bind(open_alert_id)
         .bind(last_value)
         .execute(&self.pool)
@@ -500,9 +663,14 @@ impl AlertsRepo {
         Ok(())
     }
 
-    // ---------- 告警实例 ----------
+    // ---------- Alert instances ----------
 
     #[allow(clippy::too_many_arguments)]
+    /// Insert a new alert row for a user-defined rule. Returns the alert id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the insert fails.
     pub async fn open_alert(
         &self,
         rule: &AlertRule,
@@ -513,10 +681,10 @@ impl AlertsRepo {
         now: i64,
     ) -> anyhow::Result<i64> {
         let r = sqlx::query(
-            r#"INSERT INTO alerts
+            r"INSERT INTO alerts
                (rule_id, rule_name, node_id, hostname, severity, metric, op, threshold, value,
                 message, started_at_unix_nano, source, source_ref)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'rule', '')"#,
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'rule', '')",
         )
         .bind(rule.id)
         .bind(&rule.name)
@@ -534,8 +702,12 @@ impl AlertsRepo {
         Ok(r.last_insert_rowid())
     }
 
-    /// 服务探针状态告警：来源标记为 probe，`source_ref = probe_id`。
-    /// rule_id 用 0（探针告警不走指标规则表）。
+    /// Service probe state alert: source marked as probe, `source_ref = probe_id`.
+    /// `rule_id` uses 0 (probe alerts don't go through the metric rule table).
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the insert fails.
     #[allow(clippy::too_many_arguments)]
     pub async fn open_probe_alert(
         &self,
@@ -548,10 +720,10 @@ impl AlertsRepo {
         now: i64,
     ) -> anyhow::Result<i64> {
         let r = sqlx::query(
-            r#"INSERT INTO alerts
+            r"INSERT INTO alerts
                (rule_id, rule_name, node_id, hostname, severity, metric, op, threshold, value,
                 message, started_at_unix_nano, source, source_ref)
-               VALUES (0, ?, ?, ?, ?, 'probe.state', 'eq', 0, 1, ?, ?, 'probe', ?)"#,
+               VALUES (0, ?, ?, ?, ?, 'probe.state', 'eq', 0, 1, ?, ?, 'probe', ?)",
         )
         .bind(rule_name)
         .bind(node_id)
@@ -565,7 +737,11 @@ impl AlertsRepo {
         Ok(r.last_insert_rowid())
     }
 
-    /// 关闭某个探针当前未解决的告警，返回关闭条数
+    /// Close current unresolved alert for a probe, returns number of closed alerts
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update fails.
     pub async fn resolve_open_probe_alerts(&self, probe_id: &str, now: i64) -> anyhow::Result<u64> {
         let r = sqlx::query(
             "UPDATE alerts SET resolved_at_unix_nano = ?
@@ -578,13 +754,17 @@ impl AlertsRepo {
         Ok(r.rows_affected())
     }
 
-    // ---------- 平台自身异常（source = platform） ----------
+    // ---------- Platform self anomalies (source = platform) ----------
 
-    /// 开一条平台自身异常的告警（留存清理失败等），node_id / hostname 为空。
+    /// Open an alert for platform self anomalies (retention cleanup failures, etc.), `node_id` / hostname empty.
     ///
-    /// 这类告警不该每次失败都堆一条：同 `source_ref` 已有未解决的就直接返回它。
-    /// 见 `docs/superpowers/specs/2026-09-19-product-structure-design.md` §8
-    /// ——「留存任务失败必须出现在待办里」。
+    /// These alerts should not stack on every failure: if the same `source_ref` already has an unresolved alert,
+    /// just return it. See `docs/superpowers/specs/2026-09-19-product-structure-design.md` §8
+    /// -- "retention task failure must appear in the todo list".
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn open_platform_alert(
         &self,
         source_ref: &str,
@@ -612,10 +792,10 @@ impl AlertsRepo {
         }
 
         let r = sqlx::query(
-            r#"INSERT INTO alerts
+            r"INSERT INTO alerts
                (rule_id, rule_name, node_id, hostname, severity, metric, op, threshold, value,
                 message, started_at_unix_nano, source, source_ref)
-               VALUES (0, ?, '', '', ?, 'platform.self', 'eq', 0, 1, ?, ?, 'platform', ?)"#,
+               VALUES (0, ?, '', '', ?, 'platform.self', 'eq', 0, 1, ?, ?, 'platform', ?)",
         )
         .bind(rule_name)
         .bind(severity)
@@ -627,7 +807,11 @@ impl AlertsRepo {
         Ok(r.last_insert_rowid())
     }
 
-    /// 关闭某类平台自身异常，返回关闭条数。
+    /// Close platform self anomalies of a given type, returns number closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update fails.
     pub async fn resolve_platform_alerts(&self, source_ref: &str, now: i64) -> anyhow::Result<u64> {
         let r = sqlx::query(
             "UPDATE alerts SET resolved_at_unix_nano = ?
@@ -640,10 +824,14 @@ impl AlertsRepo {
         Ok(r.rows_affected())
     }
 
-    // ---------- 证书到期告警（source = cert） ----------
+    // ---------- Certificate expiry alerts (source = cert) ----------
 
-    /// 新开一条证书到期告警。rule_id 用 0（不走指标规则表），
-    /// `source_ref = {source_id}:{证书路径}`，一张证书一条。
+    /// Open a new certificate expiry alert. `rule_id` uses 0 (not through metric rule table),
+    /// `source_ref = {source_id}:{cert path}`, one alert per certificate.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the insert fails.
     #[allow(clippy::too_many_arguments)]
     pub async fn open_cert_alert(
         &self,
@@ -652,17 +840,17 @@ impl AlertsRepo {
         node_id: &str,
         hostname: &str,
         severity: &str,
-        // 判定阈值 = 该来源配置的「到期前 N 天」（告警页直接显示这个数）
+        // Threshold = "days before expiry" from source config (alert page directly shows this number)
         threshold_days: f64,
         days_left: f64,
         message: &str,
         now: i64,
     ) -> anyhow::Result<i64> {
         let r = sqlx::query(
-            r#"INSERT INTO alerts
+            r"INSERT INTO alerts
                (rule_id, rule_name, node_id, hostname, severity, metric, op, threshold, value,
                 message, started_at_unix_nano, source, source_ref)
-               VALUES (0, ?, ?, ?, ?, 'cert.days_left', 'lte', ?, ?, ?, ?, 'cert', ?)"#,
+               VALUES (0, ?, ?, ?, ?, 'cert.days_left', 'lte', ?, ?, ?, ?, 'cert', ?)",
         )
         .bind(rule_name)
         .bind(node_id)
@@ -678,7 +866,11 @@ impl AlertsRepo {
         Ok(r.last_insert_rowid())
     }
 
-    /// 更新已开告警的严重度与文案（证书从「临期」走到「已过期」时用）
+    /// Update severity and message of an existing alert (used when cert goes from "approaching" to "expired")
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update fails.
     pub async fn update_alert_message(
         &self,
         id: i64,
@@ -696,14 +888,18 @@ impl AlertsRepo {
         Ok(())
     }
 
-    /// 某节点当前未解决的证书告警（评估时用来判断「是不是已经开过了」）
+    /// Current unresolved cert alerts for a node (used during evaluation to check "has this already been opened")
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn open_cert_alerts_for_node(&self, node_id: &str) -> anyhow::Result<Vec<Alert>> {
-        let sql = r#"SELECT id, rule_id, rule_name, node_id, hostname, severity, metric, op, threshold,
+        let sql = r"SELECT id, rule_id, rule_name, node_id, hostname, severity, metric, op, threshold,
                             value, message, started_at_unix_nano, resolved_at_unix_nano,
                             silenced_until_unix_nano, source, source_ref
                      FROM alerts
                      WHERE source = 'cert' AND resolved_at_unix_nano IS NULL AND node_id = ?
-                     ORDER BY started_at_unix_nano DESC"#;
+                     ORDER BY started_at_unix_nano DESC";
         let rows: Vec<AlertRow> = sqlx::query_as(sql)
             .bind(node_id)
             .fetch_all(&self.pool)
@@ -711,15 +907,19 @@ impl AlertsRepo {
         Ok(rows.into_iter().map(alert_from_row).collect())
     }
 
-    /// 关闭某条来源（或整条来源下某张证书）的未解决证书告警，返回关闭条数。
-    /// `cert_path` 为空表示整条来源。
+    /// Close unresolved cert alerts for a source (or a specific certificate under a source), returns count closed.
+    /// `cert_path` empty means the entire source.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update fails.
     pub async fn resolve_open_cert_alerts(
         &self,
         source_id: &str,
         cert_path: Option<&str>,
         now: i64,
     ) -> anyhow::Result<u64> {
-        // 用 instr 而不是 LIKE：证书路径里可能有 % / _ 这类通配字符
+        // Uses instr instead of LIKE: cert paths may contain % / _ wildcards
         let sql = if cert_path.is_some() {
             "UPDATE alerts SET resolved_at_unix_nano = ?
              WHERE source = 'cert' AND source_ref = ? AND resolved_at_unix_nano IS NULL"
@@ -727,10 +927,7 @@ impl AlertsRepo {
             "UPDATE alerts SET resolved_at_unix_nano = ?
              WHERE source = 'cert' AND instr(source_ref, ?) = 1 AND resolved_at_unix_nano IS NULL"
         };
-        let key = match cert_path {
-            Some(p) => format!("{source_id}:{p}"),
-            None => format!("{source_id}:"),
-        };
+        let key = cert_path.map_or_else(|| format!("{source_id}:"), |p| format!("{source_id}:{p}"));
         let r = sqlx::query(sql)
             .bind(now)
             .bind(key)
@@ -739,10 +936,14 @@ impl AlertsRepo {
         Ok(r.rows_affected())
     }
 
-    // ---------- 节点离线告警（source = node_offline） ----------
+    // ---------- Node offline alerts (source = node_offline) ----------
 
-    /// 这台节点当前是否还有未解决的离线告警？
-    /// 用 `source_ref = node_id` 做幂等键——一个节点同时只允许有一条离线告警开着。
+    /// Does this node currently have an unresolved offline alert?
+    /// Uses `source_ref = node_id` as idempotency key -- only one offline alert allowed per node at a time.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn open_node_offline_alert_id(&self, node_id: &str) -> anyhow::Result<Option<i64>> {
         let id: Option<i64> = sqlx::query_scalar(
             "SELECT id FROM alerts
@@ -755,11 +956,15 @@ impl AlertsRepo {
         Ok(id)
     }
 
-    /// 开一条「节点离线」告警。
+    /// Open a "node offline" alert.
     ///
-    /// 同一节点已有未解决的告警就**复用**并刷新 message / started_at_unix_nano，
-    /// 不堆新行——和 `open_platform_alert` 同一套思路，节点反复进出时别把历史刷成
-    /// 噪音。返回写入 / 命中行的 id。
+    /// If the same node already has an unresolved alert, **reuse** it and refresh message / `started_at_unix_nano`,
+    /// don't stack new rows -- same pattern as `open_platform_alert`, avoid turning node flapping
+    /// into noisy history. Returns the written/hit row id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update or insert query fails.
     #[allow(clippy::too_many_arguments)]
     pub async fn open_node_offline_alert(
         &self,
@@ -784,10 +989,10 @@ impl AlertsRepo {
             return Ok(existing);
         }
         let r = sqlx::query(
-            r#"INSERT INTO alerts
+            r"INSERT INTO alerts
                (rule_id, rule_name, node_id, hostname, severity, metric, op, threshold, value,
                 message, started_at_unix_nano, source, source_ref)
-               VALUES (0, '节点离线', ?, ?, ?, 'host.online', 'eq', 0, 0, ?, ?, 'node_offline', ?)"#,
+               VALUES (0, 'Node Offline', ?, ?, ?, 'host.online', 'eq', 0, 0, ?, ?, 'node_offline', ?)",
         )
         .bind(node_id)
         .bind(hostname)
@@ -800,8 +1005,12 @@ impl AlertsRepo {
         Ok(r.last_insert_rowid())
     }
 
-    /// 关闭某节点所有未解决的离线告警（节点恢复上报时调用）。
-    /// 返回关闭条数。
+    /// Close all unresolved offline alerts for a node (called when node resumes reporting).
+    /// Returns number closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update fails.
     pub async fn resolve_node_offline_alerts(
         &self,
         node_id: &str,
@@ -818,10 +1027,14 @@ impl AlertsRepo {
         Ok(r.rows_affected())
     }
 
-    // ---------- 容器启停告警（source = container） ----------
+    // ---------- Container start/stop alerts (source = container) ----------
 
-    /// 这台容器当前是否还有未解决的启停告警？
-    /// 用 `source_ref = container_id` 做幂等键——同一容器同时只允许一条开着。
+    /// Does this container currently have an unresolved start/stop alert?
+    /// Uses `source_ref = container_id` as idempotency key -- only one alert allowed per container at a time.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn open_container_alert_id(&self, container_id: &str) -> anyhow::Result<Option<i64>> {
         let id: Option<i64> = sqlx::query_scalar(
             "SELECT id FROM alerts
@@ -834,11 +1047,15 @@ impl AlertsRepo {
         Ok(id)
     }
 
-    /// 开一条「容器停止」告警。
+    /// Open a "container stopped" alert.
     ///
-    /// 同一容器已有未解决告警就**复用**并刷新 message / started_at_unix_nano，
-    /// 不堆新行——与 `open_node_offline_alert` 同一套幂等思路。容器再次启动时
-    /// 由 `resolve_open_container_alerts` 关闭。
+    /// If the same container already has an unresolved alert, **reuse** it and refresh message / `started_at_unix_nano`,
+    /// don't stack new rows -- same idempotency pattern as `open_node_offline_alert`. When the container
+    /// starts again, `resolve_open_container_alerts` closes it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update or insert query fails.
     #[allow(clippy::too_many_arguments)]
     pub async fn open_container_alert(
         &self,
@@ -865,10 +1082,10 @@ impl AlertsRepo {
             return Ok(existing);
         }
         let r = sqlx::query(
-            r#"INSERT INTO alerts
+            r"INSERT INTO alerts
                (rule_id, rule_name, node_id, hostname, severity, metric, op, threshold, value,
                 message, started_at_unix_nano, source, source_ref)
-               VALUES (0, ?, ?, ?, ?, 'container.state', 'eq', 1, 1, ?, ?, 'container', ?)"#,
+               VALUES (0, ?, ?, ?, ?, 'container.state', 'eq', 1, 1, ?, ?, 'container', ?)",
         )
         .bind(rule_name)
         .bind(node_id)
@@ -882,7 +1099,11 @@ impl AlertsRepo {
         Ok(r.last_insert_rowid())
     }
 
-    /// 关闭某容器当前未解决的启停告警（容器再次启动时调用），返回关闭条数。
+    /// Close current unresolved start/stop alert for a container (called when container starts again), returns count closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update fails.
     pub async fn resolve_open_container_alerts(
         &self,
         container_id: &str,
@@ -899,6 +1120,11 @@ impl AlertsRepo {
         Ok(r.rows_affected())
     }
 
+    /// Resolve a single alert by id (no-op if already resolved).
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update fails.
     pub async fn resolve_alert(&self, alert_id: i64, now: i64) -> anyhow::Result<()> {
         sqlx::query("UPDATE alerts SET resolved_at_unix_nano = ? WHERE id = ? AND resolved_at_unix_nano IS NULL")
             .bind(now)
@@ -908,13 +1134,21 @@ impl AlertsRepo {
         Ok(())
     }
 
-    /// 未解决的告警，最新的在前
+    /// Unresolved alerts, newest first
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn open_alerts(&self) -> anyhow::Result<Vec<Alert>> {
         self.query_alerts("WHERE resolved_at_unix_nano IS NULL ORDER BY started_at_unix_nano DESC")
             .await
     }
 
-    /// 已解决的历史告警
+    /// Resolved historical alerts
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn resolved_alerts(&self, limit: i64) -> anyhow::Result<Vec<Alert>> {
         self.query_alerts(&format!(
             "WHERE resolved_at_unix_nano IS NOT NULL ORDER BY resolved_at_unix_nano DESC LIMIT {}",
@@ -925,15 +1159,20 @@ impl AlertsRepo {
 
     async fn query_alerts(&self, tail: &str) -> anyhow::Result<Vec<Alert>> {
         let sql = format!(
-            r#"SELECT id, rule_id, rule_name, node_id, hostname, severity, metric, op, threshold,
+            r"SELECT id, rule_id, rule_name, node_id, hostname, severity, metric, op, threshold,
                       value, message, started_at_unix_nano, resolved_at_unix_nano,
                       silenced_until_unix_nano, source, source_ref
-               FROM alerts {tail}"#
+               FROM alerts {tail}"
         );
         let rows: Vec<AlertRow> = sqlx::query_as(&sql).fetch_all(&self.pool).await?;
         Ok(rows.into_iter().map(alert_from_row).collect())
     }
 
+    /// Silence an alert until `until_unix_nano` (used for "I'm handling this").
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update fails.
     pub async fn silence_alert(&self, id: i64, until_unix_nano: i64) -> anyhow::Result<()> {
         sqlx::query("UPDATE alerts SET silenced_until_unix_nano = ? WHERE id = ?")
             .bind(until_unix_nano)
@@ -943,12 +1182,17 @@ impl AlertsRepo {
         Ok(())
     }
 
-    // ---------- 通知渠道 ----------
+    // ---------- Notify channels ----------
 
+    /// Insert a new notify channel. Returns the row id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the insert fails.
     pub async fn create_channel(&self, ch: &NewChannel<'_>, now: i64) -> anyhow::Result<i64> {
         let r = sqlx::query(
-            r#"INSERT INTO notify_channels (name, kind, url, secret, app_id, receive_id, receive_id_type, enabled, min_severity, created_at_unix_nano)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)"#,
+            r"INSERT INTO notify_channels (name, kind, url, secret, app_id, receive_id, receive_id_type, enabled, min_severity, created_at_unix_nano)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
         )
         .bind(ch.name)
         .bind(ch.kind)
@@ -964,15 +1208,25 @@ impl AlertsRepo {
         Ok(r.last_insert_rowid())
     }
 
+    /// Enable / disable a notify channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update fails.
     pub async fn set_channel_enabled(&self, id: i64, enabled: bool) -> anyhow::Result<()> {
         sqlx::query("UPDATE notify_channels SET enabled = ? WHERE id = ?")
-            .bind(if enabled { 1 } else { 0 })
+            .bind(i32::from(enabled))
             .bind(id)
             .execute(&self.pool)
             .await?;
         Ok(())
     }
 
+    /// Delete a notify channel by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the delete fails.
     pub async fn delete_channel(&self, id: i64) -> anyhow::Result<()> {
         sqlx::query("DELETE FROM notify_channels WHERE id = ?")
             .bind(id)
@@ -981,6 +1235,11 @@ impl AlertsRepo {
         Ok(())
     }
 
+    /// Look up a channel by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn find_channel(&self, id: i64) -> anyhow::Result<Option<NotifyChannel>> {
         let row: Option<ChannelRow> = sqlx::query_as(&format!(
             "SELECT {CHANNEL_COLS} FROM notify_channels WHERE id = ?"
@@ -991,8 +1250,12 @@ impl AlertsRepo {
         Ok(row.map(channel_from_row))
     }
 
-    /// 全字段更新渠道（kind 不可改：类型变了必填字段就变了，删了重建更清楚）。
-    /// 返回行是否存在（不存在 = 调用方按 404 处理）。
+    /// Full-field channel update (kind cannot be changed: if type changes, required fields change;
+    /// delete and recreate is clearer). Returns whether row existed (not exists = caller handles as 404).
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update fails.
     pub async fn update_channel(
         &self,
         id: i64,
@@ -1011,7 +1274,7 @@ impl AlertsRepo {
         .bind(ch.app_id)
         .bind(ch.receive_id)
         .bind(ch.receive_id_type)
-        .bind(if enabled { 1 } else { 0 })
+        .bind(i32::from(enabled))
         .bind(ch.min_severity)
         .bind(id)
         .execute(&self.pool)
@@ -1020,6 +1283,11 @@ impl AlertsRepo {
         Ok(n > 0)
     }
 
+    /// List all notify channels.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn list_channels(&self) -> anyhow::Result<Vec<NotifyChannel>> {
         let rows: Vec<ChannelRow> = sqlx::query_as(&format!(
             "SELECT {CHANNEL_COLS} FROM notify_channels ORDER BY id"
@@ -1032,14 +1300,14 @@ impl AlertsRepo {
 
 #[cfg(test)]
 mod node_offline_tests {
-    //! 离线告警专用测试。共用 alerts_repo 的字段（rule_id、source、source_ref），
-    //! 但**不是**指标规则告警——所以 `rule_id = 0`，从 `rule_id NOT NULL` 约束里借
-    //! 一个永远不被引用的特殊值。
+    //! Offline alert tests. Shares `alerts_repo` fields (`rule_id`, source, `source_ref`),
+    //! but these are NOT metric rule alerts -- so `rule_id = 0`, borrowing from `rule_id NOT NULL`
+    //! constraint a special value that is never referenced.
     //!
-    //! 关键不变量：
-    //!   1. 同一节点同时只能有一条未解决的离线告警（重复 open 不堆行）；
-    //!   2. resolve 只关 `source = node_offline` 的行，不会误伤其它告警；
-    //!   3. resolve 后再次 open 会落新行（而不是去更新老行）。
+    //! Key invariants:
+    //!   1. Only one unresolved offline alert per node at a time (repeated opens don't stack rows);
+    //!   2. resolve only closes rows with `source = node_offline`, won't accidentally affect other alerts;
+    //!   3. After resolve, open again creates a new row (not reviving the old one).
 
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;
@@ -1069,7 +1337,7 @@ mod node_offline_tests {
             .unwrap();
         assert_eq!(
             id_a, id_b,
-            "同节点第二次 open 应该命中既有告警而不是新插一行"
+            "Second open on same node should hit existing alert, not insert a new row"
         );
 
         let count: i64 =
@@ -1077,9 +1345,12 @@ mod node_offline_tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(count, 1, "alerts 表里只能有一条未解决的离线告警");
+        assert_eq!(
+            count, 1,
+            "alerts table should have only one unresolved offline alert"
+        );
 
-        // 再开第二个节点的离线告警：应该新插一行
+        // Open a second node's offline alert: should insert a new row
         let id_c = repo
             .open_node_offline_alert("n2", "host-b", "critical", "third", 300)
             .await
@@ -1098,26 +1369,26 @@ mod node_offline_tests {
         let pool = fresh_pool().await;
         let repo = AlertsRepo::new(pool.clone());
 
-        // 一条 node_offline + 一条 probe（人工插的行）共存，resolve 不该误伤 probe
+        // One node_offline + one probe (manually inserted) coexist, resolve should not accidentally affect probe
         let off = repo
             .open_node_offline_alert("n1", "host-a", "critical", "offline", 100)
             .await
             .unwrap();
         sqlx::query(
-            r#"INSERT INTO alerts
+            r"INSERT INTO alerts
                (rule_id, rule_name, node_id, hostname, severity, metric, op, threshold, value,
                 message, started_at_unix_nano, source, source_ref)
                VALUES (0, 'probe probe', 'n1', 'host-a', 'warning', 'probe.state', 'eq', 0, 1,
-                       'should not be touched', 100, 'probe', 'probe-1')"#,
+                       'should not be touched', 100, 'probe', 'probe-1')",
         )
         .execute(&pool)
         .await
         .unwrap();
 
         let n = repo.resolve_node_offline_alerts("n1", 500).await.unwrap();
-        assert_eq!(n, 1, "应该只关掉一条 node_offline");
+        assert_eq!(n, 1, "should only close one node_offline");
 
-        // node_offline 那条应已关闭
+        // node_offline should be closed
         let resolved: Option<i64> =
             sqlx::query_scalar("SELECT resolved_at_unix_nano FROM alerts WHERE id = ?")
                 .bind(off)
@@ -1126,7 +1397,7 @@ mod node_offline_tests {
                 .unwrap();
         assert_eq!(resolved, Some(500));
 
-        // probe 那条应保持未解决
+        // probe should remain unresolved
         let probe_resolved: Option<i64> =
             sqlx::query_scalar("SELECT resolved_at_unix_nano FROM alerts WHERE source = 'probe'")
                 .fetch_one(&pool)
@@ -1149,28 +1420,31 @@ mod node_offline_tests {
             .open_node_offline_alert("n1", "host-a", "critical", "second", 300)
             .await
             .unwrap();
-        assert_ne!(first, second, "resolve 后再 open 应该插新行而不是复活旧的");
+        assert_ne!(
+            first, second,
+            "open after resolve should insert new row, not revive old"
+        );
 
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM alerts WHERE source = 'node_offline'")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        // 一条已恢复 + 一条新开 = 两条
+        // One resolved + one new = two
         assert_eq!(count, 2);
     }
 }
 
 #[cfg(test)]
 mod container_builtin_channel_tests {
-    //! 容器启停告警、内置告警开关的清理语义、渠道全字段更新。
+    //! Container start/stop alerts, builtin alert toggle cleanup semantics, channel full-field update.
     //!
-    //! 关键不变量：
-    //!   1. 迁移 019 把新内置告警全部播种、默认启用；
-    //!   2. 同一容器同时只有一条未解决的启停告警；resolve 只关它自己的；
-    //!   3. 停用内置开关会关掉它对应的未解决告警（service_offline → probe，
-    //!      container_stopped → container）；
-    //!   4. update_channel 覆盖全字段，未知 id 返回 false。
+    //! Key invariants:
+    //!   1. Migration 019 seeds all new builtin alerts, enabled by default;
+    //!   2. Only one unresolved start/stop alert per container; resolve only closes its own;
+    //!   3. Disabling a builtin toggle closes its corresponding unresolved alerts (`service_offline` -> probe,
+    //!      `container_stopped` -> container);
+    //!   4. `update_channel` overwrites all fields, unknown id returns false.
 
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;
@@ -1210,9 +1484,12 @@ mod container_builtin_channel_tests {
             "cert_expiring",
             "cert_expired",
         ] {
-            assert!(ids.contains(&want), "缺少内置告警 {want}：{ids:?}");
+            assert!(ids.contains(&want), "missing builtin alert {want}: {ids:?}");
         }
-        assert!(list.iter().all(|r| r.enabled), "新内置告警应默认启用");
+        assert!(
+            list.iter().all(|r| r.enabled),
+            "new builtin alerts should be enabled by default"
+        );
     }
 
     #[tokio::test]
@@ -1223,11 +1500,11 @@ mod container_builtin_channel_tests {
         let a = repo
             .open_container_alert(
                 "cid-1",
-                "容器停止",
+                "Container Stopped",
                 "n1",
                 "host-a",
                 "warning",
-                "已停止",
+                "stopped",
                 100,
             )
             .await
@@ -1235,26 +1512,29 @@ mod container_builtin_channel_tests {
         let b = repo
             .open_container_alert(
                 "cid-1",
-                "容器停止",
+                "Container Stopped",
                 "n1",
                 "host-a",
                 "warning",
-                "已停止",
+                "stopped",
                 200,
             )
             .await
             .unwrap();
-        assert_eq!(a, b, "同容器第二次 open 应命中既有行");
+        assert_eq!(
+            a, b,
+            "second open on same container should hit existing row"
+        );
         assert_eq!(open_alert_count(&pool, "container").await, 1);
 
-        // 另一个容器的告警不能被误关
+        // Another container's alert should not be accidentally closed
         repo.open_container_alert(
             "cid-2",
-            "容器停止",
+            "Container Stopped",
             "n1",
             "host-a",
             "warning",
-            "已停止",
+            "stopped",
             200,
         )
         .await
@@ -1271,18 +1551,18 @@ mod container_builtin_channel_tests {
                 .await
                 .unwrap(),
             0,
-            "已经关过的不该再关一次"
+            "already-closed should not be closed again"
         );
 
-        // resolve 后再 open 落新行（历史留痕）
+        // open after resolve creates new row (history preserved)
         let c = repo
             .open_container_alert(
                 "cid-1",
-                "容器停止",
+                "Container Stopped",
                 "n1",
                 "host-a",
                 "warning",
-                "已停止",
+                "stopped",
                 500,
             )
             .await
@@ -1296,7 +1576,7 @@ mod container_builtin_channel_tests {
         let repo = AlertsRepo::new(pool.clone());
         repo.open_probe_alert(
             "p1",
-            "服务 web · http",
+            "Service web http",
             "n1",
             "host-a",
             "critical",
@@ -1307,17 +1587,17 @@ mod container_builtin_channel_tests {
         .unwrap();
         repo.open_container_alert(
             "cid-1",
-            "容器停止",
+            "Container Stopped",
             "n1",
             "host-a",
             "warning",
-            "已停止",
+            "stopped",
             100,
         )
         .await
         .unwrap();
 
-        // 关「容器停止」：只清 container 的
+        // Disable "container stopped": only clears container's
         assert_eq!(
             repo.set_builtin_rule_enabled("container_stopped", false, 200)
                 .await
@@ -1327,7 +1607,7 @@ mod container_builtin_channel_tests {
         assert_eq!(open_alert_count(&pool, "container").await, 0);
         assert_eq!(open_alert_count(&pool, "probe").await, 1);
 
-        // 关「服务离线」：清 probe 的
+        // Disable "service offline": clears probe's
         assert_eq!(
             repo.set_builtin_rule_enabled("service_offline", false, 300)
                 .await
@@ -1336,7 +1616,7 @@ mod container_builtin_channel_tests {
         );
         assert_eq!(open_alert_count(&pool, "probe").await, 0);
 
-        // 未知 id → None（调用方按 404 处理）
+        // Unknown id -> None (caller handles as 404)
         assert_eq!(
             repo.set_builtin_rule_enabled("nope", false, 400)
                 .await
@@ -1366,7 +1646,7 @@ mod container_builtin_channel_tests {
             .await
             .unwrap();
 
-        let new = NewChannel {
+        let update = NewChannel {
             name: "b",
             kind: "webhook",
             url: "http://y",
@@ -1376,7 +1656,7 @@ mod container_builtin_channel_tests {
             receive_id_type: "chat_id",
             min_severity: "critical",
         };
-        assert!(repo.update_channel(id, &new, false).await.unwrap());
+        assert!(repo.update_channel(id, &update, false).await.unwrap());
 
         let got = repo.find_channel(id).await.unwrap().unwrap();
         assert_eq!(got.name, "b");
@@ -1385,7 +1665,7 @@ mod container_builtin_channel_tests {
         assert_eq!(got.min_severity, "critical");
         assert!(!got.enabled);
 
-        assert!(!repo.update_channel(9999, &new, true).await.unwrap());
+        assert!(!repo.update_channel(9999, &update, true).await.unwrap());
         assert!(repo.find_channel(9999).await.unwrap().is_none());
     }
 }

@@ -11,12 +11,12 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-/** 规范 05：时区选项（6 个） */
+/** Spec 05: timezone options (6) */
 /**
- * 规范 05 的 6 个时区。
+ * The 6 timezones from Spec 05.
  *
- * `key` 是语言包里的键（`tz.<key>`），**标签不能硬编码中文**——
- * 切到英文时时区列表也得跟着变。
+ * `key` is the key in the locale pack (`tz.<key>`); **labels cannot be hardcoded** —
+ * switching to English must also change the timezone list.
  */
 export const TIMEZONES = [
   { key: "beijing", tz: "Asia/Shanghai" },
@@ -28,7 +28,7 @@ export const TIMEZONES = [
   { key: "utc", tz: "UTC" },
 ] as const;
 
-/** 规范 05：时间统一 YYYY-MM-DD HH:mm，24 小时制，必须带时区 */
+/** Spec 05: time uniformly YYYY-MM-DD HH:mm, 24-hour format, must include timezone */
 export function formatTime(msOrDate: number | Date, tz: string): string {
   return dayjs(msOrDate).tz(tz).format("YYYY-MM-DD HH:mm");
 }
@@ -37,7 +37,7 @@ export function formatClock(msOrDate: number | Date, tz: string): string {
   return dayjs(msOrDate).tz(tz).format("HH:mm:ss");
 }
 
-/** 相对时间（用于「x 分钟前」），基于真实时刻差值，与时区无关 */
+/** Relative time (used for "x minutes ago"), based on actual moment differences, independent of timezone */
 export function relativeTime(
   ms: number,
   t: (k: string, o?: Record<string, unknown>) => string,
@@ -69,7 +69,7 @@ export function formatBytes(n: number): string {
 }
 
 /**
- * CPU 限额折算成核数。1e9 nano = 1 核；0 表示不限（docker 的 `--cpus 0`）。
+ * CPU limit converted to cores. 1e9 nano = 1 core; 0 means unlimited (docker's `--cpus 0`).
  */
 export function formatCpuLimit(nano: number): string {
   if (!Number.isFinite(nano) || nano <= 0) return "—";
@@ -78,7 +78,7 @@ export function formatCpuLimit(nano: number): string {
 }
 
 /**
- * 「用量 / 限额」配对展示，任一侧缺失都不留空：limit = 0（不限）时只给用量。
+ * "Usage / Limit" paired display, never blank when one side is missing: when limit = 0 (unlimited), show only usage.
  */
 export function formatUsagePair(
   usage: number | undefined,
@@ -93,17 +93,18 @@ export function formatUsagePair(
   return `${format(usage ?? 0)} / ${format(limit ?? 0)}`;
 }
 
-/** 速率（bytes/s）：`1.2 MB/s` */
+/** Rate (bytes/s): `1.2 MB/s` */
 export function formatRate(bytesPerSecond: number): string {
   if (!Number.isFinite(bytesPerSecond)) return "—";
   return `${formatBytes(bytesPerSecond)}/s`;
 }
 
 /**
- * 运行时长：天 + 小时（不足一天给「小时 + 分」），禁止裸显秒数。
+ * Uptime: days + hours (under a day gives "hours + minutes"), never show raw seconds.
  *
- * 两个档位都必须走语言包：以前不足一天那档硬编码成 `21h 36m`，于是同一个
- * 页面上「100 天 9 小时」和「21h 36m」两种语言并排出现（切到英文时反过来）。
+ * Both formats must go through the locale pack: previously the under-a-day case was hardcoded as `21h 36m`,
+ * so the same page showed "100 days 9 hours" and "21h 36m" in two languages side by side
+ * (and the reverse when switching to English).
  */
 export function formatUptime(
   seconds: number | undefined | null,
@@ -119,17 +120,18 @@ export function formatUptime(
 
 type TranslateFn = (k: string, o?: Record<string, unknown>) => string;
 
-/** 解析 `vX.Y.Z`（允许缺省段与后缀），解析不了返回 null */
+/** Parse `vX.Y.Z` (allows missing segments and suffixes), returns null on failure */
 function parseVersion(v: string | undefined): [number, number, number] | null {
   const m = /^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?/.exec((v ?? "").trim());
   return m ? [Number(m[1]), Number(m[2] ?? 0), Number(m[3] ?? 0)] : null;
 }
 
 /**
- * 节点 Agent 是否比控制台旧。
+ * Whether the node Agent is older than the console.
  *
- * 版本对不上是「容器用量列空白」「启停/日志点了没反应」的头号原因——节点上跑的
- * 还是旧二进制。解析不了就当作不旧，宁可不提示也不误报。
+ * Version mismatch is the #1 cause of "container usage column blank" and "start/stop/log click has no response" —
+ * the node is still running an old binary. If parsing fails, treat as not older — better to skip the hint
+ * than to misreport.
  */
 export function isAgentOlder(
   agent: string | undefined,
@@ -145,19 +147,20 @@ export function isAgentOlder(
 }
 
 /**
- * 容器状态徽章的本地化。未知状态原样显示（绝不会把 `state.foo` 这种键漏到界面上）。
+ * Localization for container state badges. Unknown states display as-is
+ * (never lets a `state.foo` key leak into the UI).
  */
 export function containerStateLabel(state: string, t: TranslateFn): string {
   return t(`state.${state.toLowerCase()}`, { defaultValue: state });
 }
 
 /**
- * 容器「运行状态」行的本地化。
+ * Localization for the container "running state" row.
  *
- * Docker 给的是英文句子（`Up 2 hours (healthy)` / `Exited (0) 3 hours ago`），
- * 中文界面直接展示很割裂。这里用我们自己的 inspect 时间戳重算时长，再拼上
- * 健康检查与退出码——信息不丢，语言跟着界面走；原始字符串由调用方放进
- * `title`，需要逐字核对时仍能看到。
+ * Docker returns English sentences (`Up 2 hours (healthy)` / `Exited (0) 3 hours ago`),
+ * which feels jarring on a non-English interface. Here we recalculate duration from our own inspect timestamps,
+ * then append health check and exit code — no information loss, language follows the UI;
+ * the raw string is placed in `title` by the caller so it remains visible for verbatim verification.
  */
 export function containerStatusLabel(
   c: {
@@ -206,8 +209,9 @@ export function containerStatusLabel(
 }
 
 /**
- * 密钥 / 令牌的密文展示：只留头 8 位与尾 4 位。
- * 完整值不落在 DOM 里（复制按钮需要时才取原值），避免随手截图泄密。
+ * Masked display of keys / tokens: keep only the first 8 and last 4 chars.
+ * Full value never lands in the DOM (the copy button fetches the original when needed),
+ * to prevent casual screenshots from leaking secrets.
  */
 export function maskSecret(value: string | undefined | null): string {
   if (!value) return "—";
@@ -215,26 +219,25 @@ export function maskSecret(value: string | undefined | null): string {
   return `${value.slice(0, 8)}……${value.slice(-4)}`;
 }
 
-/** 规范 10 / 08：禁止向用户裸显 HTTP 状态码或原始异常，统一友好文案 */
+/** Spec 10 / 08: forbidden to display raw HTTP status codes or raw exceptions to the user, unified friendly text */
 export function friendlyError(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err ?? "");
-  if (/401|unauthor|未授权/i.test(raw)) return "err.unauthorized";
-  // 后端自己写好的中文提示（如「ops-server 不可用：连不上 …」）比这里的任何
-  // 映射都准，先原样放行：传输层那条正则连「超时 / 连接」都会命中，
-  // 一旦被吃掉，用户就只剩一句没用的「网络错误」。
-  if (/[\u4e00-\u9fa5]/.test(raw)) return raw;
-  if (/network|fetch|ECONN|timeout|超时/i.test(raw)) return "err.network";
-  // 裸状态码（http_502 / 502 Bad Gateway）不直接给用户看
+  if (/401|unauthor|unauthorised/i.test(raw)) return "err.unauthorized";
+  // Backend's own ready-written messages (e.g. "ops-server unavailable: cannot connect …")
+  // are more accurate than any mapping here, so let them through first: the transport-layer regex
+  // matches "timeout / connection" too, and if it's eaten the user is left with a useless "network error".
+  if (/network|fetch|ECONN|timeout/i.test(raw)) return "err.network";
+  // Raw status codes (http_502 / 502 Bad Gateway) are not shown directly to the user
   if (/^http_\d+$/.test(raw) || /^\d{3}\b/.test(raw)) {
     return /^http_4/.test(raw) ? "err.generic" : "err.server";
   }
-  // 服务端给的是一句人话（如「kill_process 需要 pid」「signal 只能是 term 或 kill」），
-  // 直接用它——比「出错了」有用；异常栈与状态码仍然不外露。
+  // Server gives a human-readable sentence (e.g. "kill_process needs pid", "signal must be term or kill"),
+  // use it directly — more useful than "something went wrong"; stack traces and status codes still don't leak.
   if (raw.trim()) return raw;
   return "err.generic";
 }
 
-/** 节点存活判定：在线 / 滞后 / 离线 */
+/** Node liveness classification: online / lagging / offline */
 export type Liveness = "online" | "lagging" | "offline" | "unknown";
 
 export function livenessOf(lastSeenMs: number | null | undefined): Liveness {
@@ -246,10 +249,11 @@ export function livenessOf(lastSeenMs: number | null | undefined): Liveness {
 }
 
 /**
- * 节点显示名：管理员别名优先，没有就用主机名。
+ * Node display name: admin alias preferred, falls back to hostname.
  *
- * 下拉框、列表标题、日志页选节点统一走这里——别名本来就是给「一眼认出来」
- * 用的，单独一处漏掉就会出现同一个节点两个名字。
+ * Dropdowns, list titles, and the log page's node selector all go through this —
+ * the alias exists exactly for "recognize at a glance", so any one place missing it
+ * would result in the same node having two names.
  */
 export function nodeLabel(
   n: { alias?: string; hostname?: string } | null | undefined,
@@ -260,12 +264,13 @@ export function nodeLabel(
 }
 
 /**
- * 复制到剪贴板，成功返回 true。
+ * Copy to clipboard, returns true on success.
  *
- * 先走异步 Clipboard API，不可用或失败时退回隐藏 textarea + `execCommand`。
- * 退路不是怀旧：`navigator.clipboard` 只在**安全上下文**（https / localhost）
- * 里存在，而自建部署常是 `http://<内网 IP>:8443` 打开控制台，那里它是
- * `undefined`——「点击即复制」会静默失效，用户只会看到「复制失败」。
+ * Tries the async Clipboard API first, falls back to a hidden textarea + `execCommand`
+ * if unavailable or failed. The fallback isn't nostalgia: `navigator.clipboard` only exists
+ * in **secure contexts** (https / localhost), but self-hosted deployments often open the console
+ * at `http://<internal IP>:8443` where it's `undefined` — "click to copy" silently fails
+ * and the user only sees "copy failed".
  */
 export async function copyText(text: string): Promise<boolean> {
   try {
@@ -274,7 +279,7 @@ export async function copyText(text: string): Promise<boolean> {
       return true;
     }
   } catch {
-    // 继续走退路
+    // Fall through to the fallback
   }
   try {
     const ta = document.createElement("textarea");

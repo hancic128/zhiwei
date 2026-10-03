@@ -40,7 +40,7 @@ export function PrefsProvider({ children }: { children: React.ReactNode }) {
   const [locale, setLocaleState] = React.useState<Locale>(() => loadLocale());
   const [timezone, setTzState] = React.useState<string>(() => loadTimezone());
 
-  // 首帧即应用，避免闪烁
+  // Apply on first frame to avoid flicker
   React.useEffect(() => {
     applyThemeEarly();
   }, []);
@@ -53,7 +53,7 @@ export function PrefsProvider({ children }: { children: React.ReactNode }) {
     document.documentElement.classList.toggle("dark", colorScheme === "dark");
   }, [colorScheme]);
 
-  // 标签页图标与侧边栏 logo 同色：主题色或明暗一变就重画一遍
+  // Tab icon and sidebar logo same color: re-render whenever theme or color scheme changes
   React.useEffect(() => {
     applyFavicon();
   }, [theme, colorScheme]);

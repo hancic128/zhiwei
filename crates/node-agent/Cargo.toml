@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "ZhiWei node-agent: runs on every host, reports telemetry over signed HTTP"
 
 [[bin]]
@@ -34,7 +37,6 @@ futures = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
 rustls = { workspace = true }
-rustls-pemfile = { workspace = true }
 rcgen = { workspace = true }
 hostname = "0.4"
 base64 = { workspace = true }
@@ -48,5 +50,5 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 sysinfo = "0.37"
 glob = "0.3"
-webpki-roots = "0.26"
+webpki-roots = "1"
 x509-parser = { workspace = true }

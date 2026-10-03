@@ -44,7 +44,7 @@ import {
 
 type SortKey = "name" | "state" | "cpu" | "mem";
 
-/** 状态排序：异常最前，其次运行中，最后已停止 */
+/** State sort order: failed first, then running, then stopped */
 const STATE_RANK: Record<string, number> = {
   dead: 0,
   restarting: 1,
@@ -55,13 +55,16 @@ const STATE_RANK: Record<string, number> = {
 };
 
 /**
- * 节点详情页的「容器组」：列表 + 搜索/排序/分页 + 启停重启。
+ * Node detail page "containers group": list + search/sort/pagination +
+ * start/stop/restart.
  *
- * 数据来自 inventory 快照（节点侧 5 分钟一次），所以每个动作完成后会额外
- * 让节点「立刻重采一次快照」，并在一段时间内重复拉取，避免用户干等 5 分钟。
+ * Data comes from inventory snapshots (node side, every 5 minutes), so after
+ * each action we additionally ask the node to take an immediate snapshot and
+ * keep polling for a while so users don't have to wait up to 5 minutes.
  *
- * 视觉与「独立容器页 /containers」一致：同一列布局（名称/状态/CPU/内存/操作），
- * 进度条、徽章、限制提示全部沿用同一份样式。
+ * Visuals match the standalone containers page /containers: same column
+ * layout (name / state / CPU / memory / actions), progress bars, badges,
+ * and limit hints all share one set of styles.
  */
 export function NodeContainers({
   nodeId,
@@ -108,7 +111,8 @@ export function NodeContainers({
         case "name":
           return c.name.toLowerCase();
         case "cpu":
-          // 未运行 / 未上报 = 0，统一落到 -1 沉底（默认降序：占用高的在前）
+          // Not running / not reported = 0, unified to -1 to sink to bottom
+          // (default sort is descending: highest usage first).
           return c.cpu_percent ?? -1;
         case "mem":
           return c.mem_usage_bytes ?? -1;
@@ -235,7 +239,7 @@ export function NodeContainers({
                   return (
                     <Tr key={c.id}>
                       <Td>
-                        {/* 名称 + ID 同一列：名是头、ID 用 mono 标记成身份号（与 /containers 一致） */}
+                        {/* Name + ID in the same column: name as the header, ID shown in mono as an identifier (matches /containers) */}
                         <div className="flex items-center gap-2 min-w-0">
                           <span className="text-sm font-medium text-ink-900 dark:text-surface-0 truncate max-w-[220px]">
                             {c.name}
@@ -269,7 +273,7 @@ export function NodeContainers({
                           {containerStatusLabel(c, t)}
                         </div>
                       </Td>
-                      {/* CPU：占用 + 限额两行 + 进度条；未运行 / 未上报按「—」处理 */}
+                      {/* CPU: usage + limit two lines + bar; not running / no report shown as "—" */}
                       <Td className="hidden md:table-cell" align="right">
                         <div className="inline-flex flex-col items-end gap-1">
                           <div className="text-sm tabular-nums text-ink-700 dark:text-ink-100">
@@ -297,7 +301,7 @@ export function NodeContainers({
                           />
                         </div>
                       </Td>
-                      {/* 内存：用量 / 限额 + 进度条；限额 0 = 不限，只显示用量且无条 */}
+                      {/* Memory: usage / limit + bar; limit 0 = unlimited, only show usage with no bar */}
                       <Td className="hidden xl:table-cell" align="right">
                         <div className="inline-flex flex-col items-end gap-1">
                           <span

@@ -4,7 +4,7 @@ import { cn } from "@/lib/utils";
 
 export type SortDir = "asc" | "desc";
 
-/** 可排序表头（规范 7.3.1 的 Th 外观 + 排序图标，点一下切升降序） */
+/** Sortable header (spec 7.3.1 Th appearance + sort icons, click toggles asc/desc) */
 export function SortHeader<K extends string>({
   label,
   k,
@@ -23,7 +23,7 @@ export function SortHeader<K extends string>({
   className?: string;
 }) {
   const active = sortKey === k;
-  // 规范 7.3.2：无序 ArrowUpDown / 升序 ArrowUp / 降序 ArrowDown，尺寸 w-3 h-3
+  // Spec 7.3.2: unsorted ArrowUpDown / asc ArrowUp / desc ArrowDown, size w-3 h-3
   const Icon = !active ? ArrowUpDown : sortDir === "asc" ? ArrowUp : ArrowDown;
   return (
     <Th

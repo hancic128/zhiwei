@@ -1,8 +1,8 @@
 //! HTTP routes for the monitor server.
 //!
 //! Two endpoint families:
-//!   POST /v1/enroll       — bootstrap token + node Ed25519 public key → node_id
-//!   POST /v1/telemetry    — 节点 Ed25519 请求签名，protobuf payload
+//!   POST /v1/enroll       — bootstrap token + node Ed25519 public key → `node_id`
+//!   POST /v1/telemetry    — node Ed25519 request signature, protobuf payload
 //!
 //! Bootstrap tokens are short-lived (default 10 minutes) and stored in memory.
 
@@ -31,6 +31,25 @@ use crate::state::AppState;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .merge(monitor_routes())
+        .merge(certs_routes())
+        .merge(alerts_routes())
+        .merge(probes_routes())
+        .merge(admin_routes())
+        .merge(commands_routes())
+        // Node enrollment script. **Intentionally unauthenticated**: the target machine has no
+        // credentials yet; the real secret is the ZHIWEI_BOOTSTRAP_TOKEN passed in the enroll command.
+        // The script itself contains no secrets; exposing it is equivalent to exposing the install
+        // method (same approach as Tailscale et al.).
+        .route("/install-node.sh", get(install_node_script_handler))
+        // Fallback: console static assets + SPA deep links (returns 404 when console isn't built)
+        .fallback(ui_handler)
+        .with_state(state)
+}
+
+/// Core node/telemetry endpoints: health, enroll, telemetry, inventory, node views.
+fn monitor_routes() -> Router<AppState> {
+    Router::new()
         .route("/v1", get(index_handler))
         .route("/v1/enroll", post(enroll_handler))
         .route("/v1/telemetry", post(telemetry_handler))
@@ -46,6 +65,12 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/inventory", post(inventory_handler))
         .route("/v1/containers", get(all_containers_handler))
         .route("/v1/certificates", get(all_certificates_handler))
+        .route("/v1/series/nodes", get(all_nodes_series_handler))
+}
+
+/// Certificate-source configuration endpoints.
+fn certs_routes() -> Router<AppState> {
+    Router::new()
         .route(
             "/v1/cert-sources",
             get(crate::certs_api::list_cert_sources_handler)
@@ -64,13 +89,14 @@ pub fn router(state: AppState) -> Router {
             "/v1/cert-config",
             get(crate::certs_api::cert_config_handler),
         )
+}
+
+/// Alerting: alerts, rules, builtin toggles, notification channels, CA.
+fn alerts_routes() -> Router<AppState> {
+    Router::new()
         .route("/v1/alerts", get(alerts_handler))
         .route("/v1/alerts/:id/silence", post(silence_alert_handler))
         .route("/v1/alerts/:id/resolve", post(resolve_alert_handler))
-        .route(
-            "/v1/services/timeline",
-            get(crate::probes_api::services_timeline_handler),
-        )
         .route(
             "/v1/rules",
             get(list_rules_handler).post(create_rule_handler),
@@ -89,12 +115,20 @@ pub fn router(state: AppState) -> Router {
             get(list_channels_handler).post(create_channel_handler),
         )
         .route("/v1/channels/test", post(test_channel_handler))
-        .route("/v1/admin/token", post(change_admin_token_handler))
         .route(
             "/v1/channels/:id",
             axum::routing::patch(patch_channel_handler).delete(delete_channel_handler),
         )
         .route("/v1/ca", get(ca_handler))
+}
+
+/// Service / probe definitions, timelines and result ingestion.
+fn probes_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/v1/services/timeline",
+            get(crate::probes_api::services_timeline_handler),
+        )
         .route(
             "/v1/services",
             get(crate::probes_api::list_services_handler)
@@ -110,7 +144,7 @@ pub fn router(state: AppState) -> Router {
             get(crate::probes_api::list_probes_handler)
                 .post(crate::probes_api::create_probe_handler),
         )
-        // 静态段要排在 `:id` 之前注册：/v1/probes/test 不能被当成 id=test
+        // Static segments must be registered before `:id`: /v1/probes/test must not be treated as id=test
         .route(
             "/v1/probes/test",
             axum::routing::post(crate::probes_api::test_probe_handler),
@@ -132,9 +166,15 @@ pub fn router(state: AppState) -> Router {
             "/v1/probe-results",
             post(crate::probes_api::probe_results_ingest_handler),
         )
+}
+
+/// Console dashboards, token management, MCP transport and health.
+fn admin_routes() -> Router<AppState> {
+    Router::new()
         .route("/v1/todo", get(crate::todo_api::todo_handler))
         .route("/v1/retention", get(crate::retention::retention_handler))
         .route("/v1/help", get(help_handler))
+        .route("/v1/admin/token", post(change_admin_token_handler))
         .route("/mcp/sse", axum::routing::post(crate::mcp::sse_handler))
         .route(
             "/v1/ai-tokens",
@@ -152,30 +192,29 @@ pub fn router(state: AppState) -> Router {
             "/v1/enroll-tokens/:id",
             axum::routing::delete(delete_enroll_token_handler),
         )
-        .route("/v1/series/nodes", get(all_nodes_series_handler))
+        .route("/healthz", get(healthz))
+}
+
+/// Command channel: execute, poll results, history.
+fn commands_routes() -> Router<AppState> {
+    Router::new()
         .route("/v1/commands", get(node_commands_handler))
         .route("/v1/commands/:id/result", post(command_result_handler))
         .route("/v1/exec", post(exec_handler))
         .route("/v1/commands/history", get(command_history_handler))
         .route("/v1/commands/:id", get(command_detail_handler))
-        .route("/healthz", get(healthz))
-        // 节点入网脚本。**故意不鉴权**：目标机器此刻还没有任何凭据，
-        // 真正的秘密是 enroll 命令里带过去的 ZHIWEI_BOOTSTRAP_TOKEN。
-        // 脚本本身不含任何秘密，公开它等于公开安装方式（同 Tailscale 等做法）。
-        .route("/install-node.sh", get(install_node_script_handler))
-        // 兜底：控制台静态资源 + SPA 深链（未构建控制台时返回 404）
-        .fallback(ui_handler)
-        .with_state(state)
 }
 
-/// 校验节点请求签名（取代原 mTLS 客户端证书）。
+/// Validate the node request signature (replacing the old mTLS client certificates).
 ///
-/// 依次检查：签名头齐全 → 节点已入网且有公钥 → 时间窗 → nonce 未重放 → 签名。
-/// 任一步失败都返回 401，且不透露具体是哪一步（避免给攻击者反馈）。
+/// Checks in order: signature headers present → node enrolled with public key → time window
+/// → nonce not replayed → signature. Any step failure returns 401 without revealing which
+/// step failed (to avoid giving feedback to attackers).
 ///
-/// 返回 `(节点 id, 节点公钥)`——调用方若需要再验一层载荷签名（如命令回执），
-/// 可以直接用这个公钥，不必再查一次库。
-pub(crate) async fn verify_node(
+/// Returns `(node id, node public key)` — callers that need to verify a further layer of
+/// payload signatures (e.g. command receipts) can use this public key directly without
+/// hitting the database again.
+pub async fn verify_node(
     state: &AppState,
     headers: &HeaderMap,
     method: &str,
@@ -186,10 +225,15 @@ pub(crate) async fn verify_node(
         headers
             .get(name)
             .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
     };
 
-    let unauthorized = || (StatusCode::UNAUTHORIZED, "Node signature verification failed".to_string());
+    let unauthorized = || {
+        (
+            StatusCode::UNAUTHORIZED,
+            "Node signature verification failed".to_string(),
+        )
+    };
 
     let node_id_str = get(zhiwei_common::auth::HEADER_NODE).ok_or_else(unauthorized)?;
     let ts: i64 = get(zhiwei_common::auth::HEADER_TIMESTAMP)
@@ -213,10 +257,10 @@ pub(crate) async fn verify_node(
         .ok_or_else(unauthorized)?;
 
     if record.public_key.is_empty() {
-        // 老节点（mTLS 时代入网、没有公钥）需要重新入网
+        // Old nodes (enrolled in the mTLS era, without a public key) need to re-enroll
         return Err((
             StatusCode::UNAUTHORIZED,
-            "该节点没有登记公钥，请重新 enroll".to_string(),
+            "this node has no registered public key, please re-enroll".to_string(),
         ));
     }
 
@@ -239,39 +283,40 @@ pub(crate) async fn verify_node(
         .verify(&pub_key, method, path_and_query, body)
         .map_err(|_| unauthorized())?;
 
-    // 签名有效后再消耗 nonce：无效请求不该污染缓存
+    // Consume the nonce only after the signature is valid: invalid requests shouldn't pollute the cache
     if !state
         .nonce_cache
         .accept(&nonce, zhiwei_common::Timestamp::now().unix_nano())
     {
-        return Err((StatusCode::UNAUTHORIZED, "请求已重放".to_string()));
+        return Err((StatusCode::UNAUTHORIZED, "request replayed".to_string()));
     }
 
     Ok((id, pub_key))
 }
 
-/// 读端点只认一种凭据：`Authorization: Bearer <admin token>`
-/// （浏览器控制台用）。节点走签名鉴权，且不读这些端点。
-/// 鉴权层级 v2：不仅返回 bool，还区分凭据类型。
+/// Read endpoints accept only one credential: `Authorization: Bearer <admin token>`
+/// (used by the browser console). Nodes use signature auth and do not call these endpoints.
+/// Auth tier v2: returns not just bool but also distinguishes credential type.
 ///
-/// 当前所有受保护端点都是读端点，所以 AI token 实际权限 = admin token 的全部
-/// 权限（去掉 admin 改 admin.token 自身的能力）。后续 manage 类写端点落地时，
-/// handler 里加 `matches!(kind, Admin | AiToken)` 即可对 AI token 开放。
+/// All currently protected endpoints are read endpoints, so an AI token effectively
+/// has the same permissions as an admin token (minus the ability to change admin.token
+/// itself). When write-class "manage" endpoints are added later, handlers can just add
+/// `matches!(kind, Admin | AiToken)` to open them up to AI tokens.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ReadAuthKind {
-    /// 控制台 / 浏览器 / 拥有 admin token 的人。
+pub enum ReadAuthKind {
+    /// Console / browser / anyone with the admin token.
     Admin,
-    /// AI token，附带 token id（用于审计 last_used_at）。
+    /// AI token, with the token id (used to audit `last_used_at`).
     AiToken(String),
-    /// 没有合法凭据。
+    /// No valid credentials.
     None,
 }
 
-/// 解析 Authorization 头，返回凭据类型。
+/// Parse the Authorization header and return the credential type.
 ///
-/// 顺序：admin token（内存 ct_eq 比对，最快）→ AI token（SHA-256 后查 SQLite）。
-/// AI token 不命中或已撤销都返回 None。
-pub(crate) async fn read_auth_ok_v2(state: &AppState, headers: &HeaderMap) -> ReadAuthKind {
+/// Order: admin token (in-memory `ct_eq` compare, fastest) → AI token (SHA-256 then
+/// query `SQLite`). An AI token that doesn't match or has been revoked returns None.
+pub async fn read_auth_ok_v2(state: &AppState, headers: &HeaderMap) -> ReadAuthKind {
     let Some(value) = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
@@ -283,10 +328,13 @@ pub(crate) async fn read_auth_ok_v2(state: &AppState, headers: &HeaderMap) -> Re
     };
 
     // 1. admin token
-    // 把 String 取出来就 drop guard，否则 RwLockReadGuard 不是 Send，
-    // 后续 await 时整个 handler future 就不是 Send，axum 不认。
+    // Take the String out and drop the guard; otherwise RwLockReadGuard is not Send,
+    // and the entire handler future stops being Send, which axum rejects.
     let admin_ok = {
-        let current = state.admin_token.read().unwrap_or_else(|e| e.into_inner());
+        let current = state
+            .admin_token
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::admin::ct_eq(token.as_bytes(), current.as_bytes())
     };
     if admin_ok {
@@ -297,7 +345,7 @@ pub(crate) async fn read_auth_ok_v2(state: &AppState, headers: &HeaderMap) -> Re
     let hash = sha256_hex(token.as_bytes());
     match state.storage.ai_tokens().find_active_by_hash(&hash).await {
         Ok(Some(t)) => {
-            // best-effort: 更新 last_used_at。失败不影响主请求。
+            // best-effort: update last_used_at. Failures don't affect the main request.
             let id = t.id.clone();
             let now = zhiwei_common::Timestamp::now().unix_nano();
             let repo = state.storage.ai_tokens();
@@ -310,52 +358,58 @@ pub(crate) async fn read_auth_ok_v2(state: &AppState, headers: &HeaderMap) -> Re
     }
 }
 
-/// 旧接口：保留兼容。新代码请直接用 `read_auth_ok_v2`。
+/// Legacy interface: kept for compatibility. New code should use `read_auth_ok_v2` directly.
 ///
-/// 等价于 `matches!(v2(...), Admin | AiToken(_))`，但不 unwrap 也不分发 ——
-/// 调用方已经在用 bool，没必要为新代码增加心智负担。
-pub(crate) async fn read_auth_ok(state: &AppState, headers: &HeaderMap) -> bool {
+/// Equivalent to `matches!(v2(...), Admin | AiToken(_))`, but without unwrapping or
+/// dispatching — callers are already using bool, no need to add mental overhead for new code.
+pub async fn read_auth_ok(state: &AppState, headers: &HeaderMap) -> bool {
     !matches!(read_auth_ok_v2(state, headers).await, ReadAuthKind::None)
 }
 
-/// SHA-256 → 小写 hex（用 ring，已在依赖里）。AI token 哈希专用。
+/// SHA-256 → lowercase hex (using ring, which is already in dependencies). AI token hashing only.
 fn sha256_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
     let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
-    digest.as_ref().iter().map(|b| format!("{b:02x}")).collect()
+    digest.as_ref().iter().fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
-/// 一个入网令牌的元信息。`id` 给 UI 展示 + 撤销用；`token` 字符串本身只在校验路径用。
+/// Metadata for an enrollment token. `id` is for UI display + revocation; the `token`
+/// string itself is used only on the validation path.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct BootstrapTokenMeta {
     pub id: String,
     pub label: String,
     pub created_at_unix: u64,
     pub expires_at_unix: u64,
-    /// 长期有效（来自 ZHIWEI_BOOTSTRAP_TOKEN）时为 true，UI 可单独标识。
+    /// Long-lived (from `ZHIWEI_BOOTSTRAP_TOKEN`); UI can flag it specially.
     pub permanent: bool,
 }
 
 #[derive(Default)]
 pub struct BootstrapTokens {
-    /// token 字符串 -> 元信息
+    /// token string -> metadata
     inner: Mutex<HashMap<String, BootstrapTokenMeta>>,
 }
 
-/// 永不失效的过期时间戳。给 `ZHIWEI_BOOTSTRAP_TOKEN` 用——托管平台
-/// （尤其免费层）没有 Shell、也挂不了持久卷，抢「启动日志里 10 分钟有效」
-/// 的一次性 token 不现实。
+/// Never-expiring timestamp. Used for `ZHIWEI_BOOTSTRAP_TOKEN` — managed platforms
+/// (especially free tiers) have no shell and can't mount persistent volumes, so
+/// racing to grab a "valid for 10 minutes from startup logs" one-shot token isn't realistic.
 const NEVER_EXPIRES: u64 = u64::MAX;
 
 impl BootstrapTokens {
-    pub async fn is_empty(&self) -> bool {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
         self.inner.lock().is_empty()
     }
-    pub async fn add(&self, token: String, ttl_secs: u64) {
-        self.add_with_label(token, ttl_secs, String::new()).await;
+    pub fn add(&self, token: String, ttl_secs: u64) {
+        self.add_with_label(token, ttl_secs, String::new());
     }
-    /// 添加一个带 label 的临时 token。`label` 为空也合法。
-    /// `id` 自动生成（`boot-<6 hex>`），仅用于 UI 展示和撤销。
-    pub async fn add_with_label(&self, token: String, ttl_secs: u64, label: String) {
+    /// Add a labeled temporary token. An empty `label` is also valid.
+    /// `id` is auto-generated (`boot-<6 hex>`), used only for UI display and revocation.
+    pub fn add_with_label(&self, token: String, ttl_secs: u64, label: String) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -371,8 +425,8 @@ impl BootstrapTokens {
         };
         self.inner.lock().insert(token, meta);
     }
-    /// 登记一个长期有效的入网令牌（`ZHIWEI_BOOTSTRAP_TOKEN`）。
-    /// 删掉环境变量并重启即等于撤销。
+    /// Register a long-lived enrollment token (`ZHIWEI_BOOTSTRAP_TOKEN`).
+    /// Removing the environment variable and restarting is equivalent to revocation.
     pub fn add_static(&self, token: String) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -408,7 +462,7 @@ impl BootstrapTokens {
             None => false,
         }
     }
-    /// 列出当前未过期的 token 元信息。**不含明文 token**。
+    /// List currently non-expired token metadata. **Does not include the plaintext token**.
     pub fn list_active(&self) -> Vec<BootstrapTokenMeta> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -421,20 +475,20 @@ impl BootstrapTokens {
             .cloned()
             .collect()
     }
-    /// 按 id 撤销（找到第一个匹配的 token 字符串后移除）。
-    /// 返回是否真的撤销了什么。
+    /// Revoke by id (find the first matching token string and remove it).
+    /// Returns whether anything was actually revoked.
+    // The lock guard must stay alive until `remove`, so it can't be scoped tighter.
+    #[allow(clippy::significant_drop_tightening)]
     pub fn revoke_by_id(&self, id: &str) -> bool {
         let mut guard = self.inner.lock();
         let target = guard
             .iter()
             .find(|(_, m)| m.id == id)
             .map(|(t, _)| t.clone());
-        if let Some(token) = target {
+        target.is_some_and(|token| {
             guard.remove(&token);
             true
-        } else {
-            false
-        }
+        })
     }
 }
 
@@ -445,9 +499,10 @@ fn rand_bytes_3() -> [u8; 3] {
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
-        s.push_str(&format!("{b:02x}"));
+        let _ = write!(s, "{b:02x}");
     }
     s
 }
@@ -457,16 +512,17 @@ struct ErrorBody {
     error: String,
 }
 
-pub(crate) fn err(status: StatusCode, msg: impl Into<String>) -> Response {
+pub fn err(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, Json(ErrorBody { error: msg.into() })).into_response()
 }
 
-/// 控制台静态资源 + SPA 兜底。
+/// Console static assets + SPA fallback.
 ///
-/// 深链（`/nodes`、`/services`…）必须返回 **200 + index.html**：早先用
-/// `ServeDir::not_found_service` 时页面能渲染，但状态码是 404，会被线上探针、
-/// 爬虫与代理缓存误判成「页面不存在」。这里自己读文件，顺便给出正确 MIME。
-pub(crate) async fn ui_handler(State(state): State<AppState>, uri: axum::http::Uri) -> Response {
+/// Deep links (`/nodes`, `/services`, ...) must return **200 + index.html**: earlier
+/// when using `ServeDir::not_found_service` the page rendered but the status was 404,
+/// causing online probes, crawlers, and proxy caches to misinterpret it as "page does
+/// not exist". Here we read the file ourselves and set the correct MIME type.
+pub async fn ui_handler(State(state): State<AppState>, uri: axum::http::Uri) -> Response {
     use axum::http::header::CONTENT_TYPE;
 
     let Some(dir) = state.ui_dir.clone() else {
@@ -474,12 +530,12 @@ pub(crate) async fn ui_handler(State(state): State<AppState>, uri: axum::http::U
     };
     let rel = uri.path().trim_start_matches('/');
 
-    // 未知 API 路径仍按 JSON 404 返回，避免把 HTML 混进客户端
+    // Unknown API paths still return JSON 404, to avoid mixing HTML into client responses
     if rel.starts_with("v1/") || rel == "v1" {
         return err(StatusCode::NOT_FOUND, "unknown endpoint");
     }
 
-    // 已存在的静态文件优先；拒绝目录穿越
+    // Existing static files take priority; reject directory traversal
     if !rel.is_empty() && !rel.contains("..") {
         let path = dir.join(rel);
         if let Ok(bytes) = tokio::fs::read(&path).await {
@@ -496,7 +552,7 @@ pub(crate) async fn ui_handler(State(state): State<AppState>, uri: axum::http::U
             .into_response(),
         Err(e) => err(
             StatusCode::NOT_FOUND,
-            format!("console index.html 读取失败: {e}"),
+            format!("failed to read console index.html: {e}"),
         ),
     }
 }
@@ -529,16 +585,17 @@ async fn healthz() -> Response {
 
 // ---------- /v1/enroll ----------
 
-/// enroll 响应里要不要给节点下发本地 CA。
+/// Whether to send the node a local CA in the enroll response.
 ///
-/// 只在「本进程终结 TLS」时下发——那种情况下 monitor 的证书就是这个本地 CA 签的，
-/// 节点 pin 它才有意义。
+/// Only issued when "this process terminates TLS" — in that case the monitor certificate
+/// is signed by this local CA, so pinning it makes sense for the node.
 ///
-/// 部署在 Render / Railway 这类边缘终结 TLS 的平台后面时（`--plain-http`），
-/// 边缘用的是正经证书、与本地 CA 毫无关系；若仍然下发，节点会把它当唯一信任根，
-/// 表现为 **enroll 成功、之后每个请求都 TLS 校验失败**，排查起来很费劲。
-/// 所以这里直接不下发，让节点走系统根。
-pub(crate) fn enroll_ca_pem(ca_cert_pem: &str, tls_terminated_locally: bool) -> String {
+/// When deployed behind an edge-terminating TLS platform like Render / Railway (`--plain-http`),
+/// the edge uses a proper certificate, unrelated to the local CA; if we still issue it, the node
+/// will treat it as its only trust root, resulting in **enroll succeeds, every subsequent request
+/// fails TLS validation** — a very time-consuming thing to debug.
+/// So we simply don't issue it here, letting the node use the system roots.
+pub fn enroll_ca_pem(ca_cert_pem: &str, tls_terminated_locally: bool) -> String {
     if tls_terminated_locally {
         ca_cert_pem.to_string()
     } else {
@@ -546,13 +603,14 @@ pub(crate) fn enroll_ca_pem(ca_cert_pem: &str, tls_terminated_locally: bool) -> 
     }
 }
 
-/// ops 签名公钥（base64），随 enroll 下发给节点做 TOFU。
+/// Ops signing public key (base64), sent to nodes during enroll for TOFU.
 ///
-/// monitor 启动时就缓存了一份，但**缓存为空时会再读一次盘**：同容器多进程部署时
-/// ops-server 可能比 monitor 起得晚（见 `scripts/docker-entrypoint.sh`），
-/// 早启动的 monitor 不该因此永久不给新节点下发公钥——那种节点会一直
-/// 「未持有 ops 公钥」，命令通道静默失效。
-pub(crate) async fn ops_public_key(state: &AppState) -> String {
+/// The monitor caches a copy at startup, but **reads from disk again when the cache is empty**:
+/// in same-container multi-process setups, ops-server may start later than monitor
+/// (see `scripts/docker-entrypoint.sh`). An early-starting monitor shouldn't permanently
+/// withhold the public key from new nodes — those nodes would remain "without ops public
+/// key", and the command channel would silently fail.
+pub async fn ops_public_key(state: &AppState) -> String {
     if !state.ops_public_key.is_empty() {
         return state.ops_public_key.clone();
     }
@@ -571,9 +629,8 @@ async fn enroll_handler(
     let auth = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok());
-    let token = match auth.and_then(|s| s.strip_prefix("Bearer ")) {
-        Some(t) => t,
-        None => return err(StatusCode::UNAUTHORIZED, "missing bearer token"),
+    let Some(token) = auth.and_then(|s| s.strip_prefix("Bearer ")) else {
+        return err(StatusCode::UNAUTHORIZED, "missing bearer token");
     };
     if !state.bootstrap_tokens.check(token) {
         return err(
@@ -608,11 +665,11 @@ async fn enroll_handler(
     if hostname.is_empty() {
         return err(StatusCode::BAD_REQUEST, "hostname required");
     }
-    // 身份 = 节点自带的 Ed25519 公钥（不再是 CA 签发的客户端证书）
+    // Identity = node's own Ed25519 public key (no longer a CA-signed client certificate)
     if req.public_key.len() != 32 {
         return err(
             StatusCode::BAD_REQUEST,
-            "public_key 必须是 32 字节 Ed25519 公钥",
+            "public_key must be a 32-byte Ed25519 public key",
         );
     }
     let public_key_b64 = {
@@ -629,8 +686,8 @@ async fn enroll_handler(
         .collect();
     let labels_json = serde_json::to_string(&labels_map).unwrap_or_else(|_| "{}".into());
 
-    // 节点侧可选的别名 / 标签（`zhiwei-node --alias/--tags`，install-node.sh 也支持）。
-    // 规则与控制台 PATCH 完全一致：越界值直接 400，而不是截断后静默入库。
+    // Optional alias / tags from the node side (`zhiwei-node --alias/--tags`, also supported by install-node.sh).
+    // Rules are identical to console PATCH: out-of-range values return 400 directly, not silently truncated.
     let alias = match normalize_alias(&req.alias) {
         Ok(a) => a,
         Err(msg) => return err(StatusCode::BAD_REQUEST, msg),
@@ -645,13 +702,13 @@ async fn enroll_handler(
         id: node_id.to_string(),
         hostname: hostname.clone(),
         labels_json,
-        client_cert_pem: String::new(), // 历史列，mTLS 已废弃
+        client_cert_pem: String::new(), // Historical column, mTLS is deprecated
         enrolled_at_unix_nano: now,
         last_seen_unix_nano: None,
-        // 主机信息在第一次 telemetry 上报时才填充
+        // Host info is populated on the first telemetry report
         host_info_json: "{}".to_string(),
         public_key: public_key_b64.clone(),
-        // 别名与标签：节点侧可以自带（可选），之后由管理员在控制台维护
+        // Alias and tags: the node can provide them (optional), then maintained by the admin in the console
         alias,
         tags_json: serde_json::to_string(&tags).unwrap_or_else(|_| "[]".to_string()),
     };
@@ -693,7 +750,9 @@ async fn telemetry_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    let pq = uri
+        .path_and_query()
+        .map_or("/", hyper::http::uri::PathAndQuery::as_str);
     let (node_id, _node_pub) = match verify_node(&state, &headers, method.as_str(), pq, &body).await
     {
         Ok(id) => id,
@@ -720,11 +779,14 @@ async fn telemetry_handler(
             )
         }
     };
-    // 身份已由请求签名确认；这里再校验 body 里的 node_id 与签名主体一致，
-    // 防止用 A 节点的签名提交 B 节点的数据
+    // Identity is already confirmed by the request signature; here we additionally check that the body
+    // node_id matches the signature subject, preventing A's signature being used to submit B's data
     let node_id_str = batch.node_id.clone();
     if node_id_str.is_empty() || node_id_str != node_id.as_str() {
-        return err(StatusCode::BAD_REQUEST, "node_id 与签名主体不一致");
+        return err(
+            StatusCode::BAD_REQUEST,
+            "node_id does not match signature subject",
+        );
     }
 
     let ts = batch.ts_unix_nano;
@@ -746,9 +808,9 @@ async fn telemetry_handler(
 
     debug!(%node_id_str, %ts, interval, "telemetry batch stored");
 
-    // 落库后跑一遍告警规则（有规则才查库，无规则时开销可忽略）。
-    // 告警文案用的是**显示名**（有别名用别名），主机名 VM-16-12-opencloudos
-    // 这种认不出是哪台机器。
+    // Run alert rules after writing to the database (no rules = no DB query, overhead is negligible).
+    // Alert text uses the **display name** (alias if set), otherwise a hostname
+    // like an auto-generated cloud name is unrecognizable.
     let hostname = state
         .storage
         .nodes()
@@ -773,8 +835,9 @@ struct IndexBody {
     endpoints: Vec<&'static str>,
     nodes: i64,
     telemetry_batches: i64,
-    /// monitor 进程启动时刻（= 最近一次部署 / 重启）。控制台右上角版本号前显示
-    /// 「部署于 …」用它——和节点详情里的「本次部署时间」是同一个语义。
+    /// When the monitor process started (= most recent deploy / restart). The console shows
+    /// "Deployed at ..." next to the version number in the top-right — same semantic as
+    /// "current deploy time" in node details.
     started_at_unix_nano: i64,
 }
 
@@ -784,7 +847,7 @@ async fn index_handler(State(state): State<AppState>, headers: HeaderMap) -> Res
         .nodes()
         .list_all()
         .await
-        .map(|v| v.len() as i64)
+        .map(|v| i64::try_from(v.len()).unwrap_or(i64::MAX))
         .unwrap_or(-1);
     let batches = state.storage.telemetry().count_all().await.unwrap_or(-1);
     Json(IndexBody {
@@ -810,29 +873,30 @@ struct NodeView {
     id: String,
     hostname: String,
     labels: serde_json::Value,
-    /// 管理员给的简短别称（≤10 字符），空串表示未设置
+    /// Short alias assigned by the admin (≤10 characters); empty string means not set
     alias: String,
-    /// 管理员给的标签（≤10 个）
+    /// Tags assigned by the admin (≤10)
     tags: Vec<String>,
     enrolled_at_unix_nano: i64,
     last_seen_unix_nano: Option<i64>,
-    /// 主机基本信息（操作系统 / 内核 / CPU / IP 等），未见上报时为空对象
+    /// Host basic info (OS / kernel / CPU / IP etc.); empty object when no report has been received
     host_info: serde_json::Value,
-    /// 节点 Ed25519 公钥（base64）；用于调试/审计，UI 不直接展示
+    /// Node Ed25519 public key (base64); for debugging/auditing, not shown directly in UI
     public_key: String,
-    /// 最新一帧里的几个关键指标（列表页的 CPU / 内存 / 磁盘列直接取这里，
-    /// 避免每节点再来一次 series 请求）
+    /// Key metrics from the latest frame (list page's CPU / memory / disk columns read from here,
+    /// avoiding one series request per node)
     latest: Option<NodeLatestView>,
-    /// 命令通道状态——节点在线却不来拉命令时，控制台上的启停 / 日志全是死按钮，
-    /// 界面要把这件事说出来。判定见 [`crate::control_channel`]。
+    /// Command channel status — when a node is online but doesn't pull commands, the console's
+    /// start/stop / log buttons are all dead; the UI needs to surface this fact.
+    /// Rules: [`crate::control_channel`].
     command_channel: NodeChannelView,
 }
 
 #[derive(Serialize)]
 struct NodeChannelView {
-    /// `ok` | `down` | `unknown`（unknown = 刚重启观察不够 / 节点不在线）
+    /// `ok` | `down` | `unknown` (unknown = just restarted, insufficient observation / node not online)
     state: &'static str,
-    /// 最近一次拉命令距今多少毫秒；本进程从没见过它拉就是 None
+    /// Milliseconds since the most recent command poll; None if this process has never seen it poll
     last_poll_age_ms: Option<i64>,
 }
 
@@ -845,12 +909,12 @@ struct NodeLatestView {
     disk_usage_percent: Option<f64>,
     disk_used_bytes: Option<f64>,
     disk_total_bytes: Option<f64>,
-    /// 全部网卡累计收 / 发字节（列表页只用得到时间戳，速率在详情页算）
+    /// Sum of all NICs' cumulative rx / tx bytes (list page only needs the timestamp; rates are computed on detail page)
     net_rx_bytes: Option<f64>,
     net_tx_bytes: Option<f64>,
 }
 
-/// 从一帧 telemetry 里取列表页要用的指标
+/// Pull the metrics the list page needs from one telemetry frame
 fn latest_view(ts_unix_nano: i64, batch: &TelemetryBatch) -> NodeLatestView {
     let get = |name: &str| {
         batch
@@ -867,8 +931,26 @@ fn latest_view(ts_unix_nano: i64, batch: &TelemetryBatch) -> NodeLatestView {
         disk_usage_percent: get("host.disk.usage"),
         disk_used_bytes: get("host.disk.used_bytes"),
         disk_total_bytes: get("host.disk.total_bytes"),
-        net_rx_bytes: sum_if_present(batch.network.iter().map(|n| n.rx_bytes as f64)),
-        net_tx_bytes: sum_if_present(batch.network.iter().map(|n| n.tx_bytes as f64)),
+        net_rx_bytes: sum_u64_to_f64(batch.network.iter().map(|n| n.rx_bytes)),
+        net_tx_bytes: sum_u64_to_f64(batch.network.iter().map(|n| n.tx_bytes)),
+    }
+}
+
+/// Sum u64 counters into f64 for JSON serialization. f64 cannot represent integers
+/// above 2^53 exactly (≈9 PB); callers should treat values above that as approximate.
+#[allow(clippy::cast_precision_loss)] // intentional: display-only, precision above 2^53 irrelevant
+fn sum_u64_to_f64(it: impl Iterator<Item = u64>) -> Option<f64> {
+    let mut total: u64 = 0;
+    let mut any = false;
+    for v in it {
+        total = total.saturating_add(v);
+        any = true;
+    }
+    if any {
+        // Intentional cast: result is for display, byte precision above 2^53 is unnecessary.
+        Some(total as f64)
+    } else {
+        None
     }
 }
 
@@ -889,7 +971,7 @@ async fn list_nodes_handler(State(state): State<AppState>, headers: HeaderMap) -
         }
     };
 
-    // 一次取齐「每节点最新一帧」，列表页不再逐节点发 series 请求
+    // Fetch the latest frame for each node in one go; list page no longer issues per-node series requests
     let mut latest_by_node: HashMap<String, NodeLatestView> = HashMap::new();
     if let Ok(rows) = state.storage.telemetry().latest_per_node().await {
         for (node_id, ts, payload) in rows {
@@ -903,7 +985,7 @@ async fn list_nodes_handler(State(state): State<AppState>, headers: HeaderMap) -
     let mut out = Vec::with_capacity(nodes.len());
     for n in nodes {
         out.push(NodeView {
-            labels: serde_json::from_str(&n.labels_json).unwrap_or(serde_json::json!({})),
+            labels: serde_json::from_str(&n.labels_json).unwrap_or_else(|_| serde_json::json!({})),
             alias: n.alias.clone(),
             tags: parse_tags(&n.tags_json),
             latest: latest_by_node.remove(&n.id),
@@ -925,8 +1007,8 @@ async fn list_nodes_handler(State(state): State<AppState>, headers: HeaderMap) -
     Json(out).into_response()
 }
 
-/// 组装某个节点的「命令通道」视图。判定规则在
-/// [`crate::control_channel::channel_state`]，这里只负责喂参数。
+/// Build a "command channel" view for a given node. The decision logic is in
+/// [`crate::control_channel::channel_state`]; this function just supplies the inputs.
 fn channel_view(
     state: &AppState,
     node_id: &str,
@@ -946,32 +1028,34 @@ fn channel_view(
     }
 }
 
-/// `tags_json` 里存的是字符串数组；历史行可能是 `{}` 或损坏内容，
-/// 统一降级成空数组，别让一条脏数据把整个列表打成 500。
+/// `tags_json` stores a string array; historical rows may be `{}` or corrupt;
+/// degrade uniformly to empty array, don't let one dirty row turn the whole list into 500.
 fn parse_tags(raw: &str) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(raw).unwrap_or_default()
 }
 
-/// 别名上限（按字符计，不是字节）：中文别名也该按「几个字」算。
+/// Alias upper limit (by character count, not bytes): a Chinese alias should also count as "a few characters".
 const MAX_ALIAS_CHARS: usize = 10;
-/// 标签数量上限
+/// Upper limit on number of tags
 const MAX_TAGS: usize = 10;
-/// 单个标签长度上限
+/// Upper limit on a single tag length
 const MAX_TAG_CHARS: usize = 24;
 
-/// 归一化别名：去首尾空白并按字符数校验。
+/// Normalize alias: trim whitespace and validate by character count.
 fn normalize_alias(raw: &str) -> Result<String, String> {
     let alias = raw.trim().to_string();
     if alias.chars().count() > MAX_ALIAS_CHARS {
-        return Err(format!("别名最多 {MAX_ALIAS_CHARS} 个字符"));
+        return Err(format!("alias can be at most {MAX_ALIAS_CHARS} characters"));
     }
     Ok(alias)
 }
 
-/// 归一化标签：去空白 / 去空串 / 去重（保持顺序），再校验个数与长度。
+/// Normalize tags: trim whitespace / drop empty strings / deduplicate (preserving order),
+/// then validate count and length.
 ///
-/// 控制台改元数据（`PATCH /v1/nodes/:id`）与节点入网自报（`EnrollRequest`）共用，
-/// 两条路径的规则必须一致——否则节点侧能塞进控制台拒绝的值。
+/// Shared between console metadata edits (`PATCH /v1/nodes/:id`) and node self-reported
+/// tags on enrollment (`EnrollRequest`) — the rules must be identical, otherwise the
+/// node side could sneak in values the console rejects.
 fn normalize_tags(raw: &[String]) -> Result<Vec<String>, String> {
     let mut seen = std::collections::HashSet::new();
     let mut cleaned = Vec::new();
@@ -981,32 +1065,35 @@ fn normalize_tags(raw: &[String]) -> Result<Vec<String>, String> {
             continue;
         }
         if tag.chars().count() > MAX_TAG_CHARS {
-            return Err(format!("单个标签最多 {MAX_TAG_CHARS} 个字符"));
+            return Err(format!(
+                "a single tag can be at most {MAX_TAG_CHARS} characters"
+            ));
         }
         if seen.insert(tag.to_string()) {
             cleaned.push(tag.to_string());
         }
     }
     if cleaned.len() > MAX_TAGS {
-        return Err(format!("标签最多 {MAX_TAGS} 个"));
+        return Err(format!("at most {MAX_TAGS} tags are allowed"));
     }
     Ok(cleaned)
 }
 
 #[derive(Deserialize)]
 struct NodeMetaPatch {
-    /// 缺省 = 不改（区别于传空串 = 清空别名）
+    /// Absent = no change (distinguished from passing an empty string = clear alias)
     #[serde(default)]
     alias: Option<String>,
-    /// 缺省 = 不改（区别于传空数组 = 清空标签）
+    /// Absent = no change (distinguished from passing an empty array = clear tags)
     #[serde(default)]
     tags: Option<Vec<String>>,
 }
 
-/// `PATCH /v1/nodes/:id`：改管理员维护的别名与标签。
+/// `PATCH /v1/nodes/:id`: change the admin-maintained alias and tags.
 ///
-/// 只接受 alias / tags 两个字段，节点身份（id、公钥、hostname、上报数据）
-/// 一律不可从控制台改。校验失败返回 400 并把原因原样给控制台。
+/// Only accepts alias / tags; node identity (id, public key, hostname, reported data)
+/// cannot be changed from the console. Validation failures return 400 with the reason
+/// passed through to the console.
 async fn patch_node_handler(
     State(state): State<AppState>,
     axum::extract::Path(node_id): axum::extract::Path<String>,
@@ -1024,7 +1111,10 @@ async fn patch_node_handler(
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
     };
     if patch.alias.is_none() && patch.tags.is_none() {
-        return err(StatusCode::BAD_REQUEST, "alias 与 tags 至少要给一个");
+        return err(
+            StatusCode::BAD_REQUEST,
+            "alias and tags: at least one must be provided",
+        );
     }
 
     let node = zhiwei_common::NodeId::from_string(node_id.clone());
@@ -1063,23 +1153,26 @@ async fn patch_node_handler(
     Json(serde_json::json!({ "id": node.as_str(), "alias": alias, "tags": tags })).into_response()
 }
 
-/// `DELETE /v1/nodes/:id`：节点永久删除。
+/// `DELETE /v1/nodes/:id`: permanently delete a node.
 ///
-/// 范围：节点行 + 引用它的所有数据（telemetry / inventory / 探针结果 / 证书来源 /
-/// 命令历史 / 告警 / 告警状态机）一律清掉。`audit_log` 保留——它是事后追责用的，
-/// 不能因为节点没了就连带洗白。
+/// Scope: the node row + all data referencing it (telemetry / inventory / probe results /
+/// certificate sources / command history / alerts / alert state machine) are wiped.
+/// `audit_log` is retained — it's for post-hoc accountability and shouldn't be
+/// laundered just because the node is gone.
 ///
-/// 前置条件：没有「还有效的」pending 命令——这些命令还在路上、节点删了就再也没人
-/// 回执，会留下悬空记录。过期（TTL 已过）的不算：节点拿到也会拒收，拿它们拦住删除
-/// 只会让节点永久删不掉（重装过的节点换了 node_id，永远不会再来拉）。
+/// Precondition: no "still-valid" pending commands — these are in transit and would
+/// leave dangling records if the node is deleted (no one will ever receive the receipt).
+/// Expired ones (TTL passed) don't count: the node would refuse them upon receipt,
+/// and using them to block deletion would make the node permanently undeletable
+/// (a re-installed node gets a new `node_id` and never comes back to poll).
 ///
-/// `?force=1`：把该节点未发出的命令全部作废（写 audit_log，outcome=cancelled）再删。
-/// 「先取消」这句话总得有个能按的按钮——命令通道坏掉 / 节点重装时，
-/// 「等节点拉完」是不可能发生的事。
+/// `?force=1`: voids all unsent commands for this node (writes `audit_log`, outcome=cancelled),
+/// then deletes. "Cancel first" needs a button somewhere — when the command channel is broken
+/// or the node is reinstalled, "wait for the node to pull" will simply never happen.
 ///
-/// 探针绑定：把节点 id 从所有 `probes.node_ids_json` 数组里摘掉。探针若没剩
-/// 任何节点绑定，会回落到「任意节点」（空数组 = 全节点）——这是写入路径的语义，
-/// 不是新引入的副作用。
+/// Probe bindings: remove the node id from every `probes.node_ids_json` array. A probe with
+/// no remaining node bindings falls back to "any node" (empty array = all nodes) — this
+/// is the semantics of the write path, not a newly introduced side effect.
 async fn delete_node_handler(
     State(state): State<AppState>,
     axum::extract::Path(node_id): axum::extract::Path<String>,
@@ -1094,18 +1187,18 @@ async fn delete_node_handler(
     }
     let trimmed = node_id.trim().to_string();
     if trimmed.is_empty() {
-        return err(StatusCode::BAD_REQUEST, "node id 不能为空");
+        return err(StatusCode::BAD_REQUEST, "node id cannot be empty");
     }
     let id = zhiwei_common::NodeId::from_string(trimmed.clone());
     let exists = match state.storage.nodes().find_by_id(&id).await {
         Ok(Some(_)) => true,
-        Ok(None) => return err(StatusCode::NOT_FOUND, "节点未入网"),
+        Ok(None) => return err(StatusCode::NOT_FOUND, "node not enrolled"),
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("lookup: {e}")),
     };
 
     let force = matches!(
         q.get("force").map(String::as_str),
-        Some("1") | Some("true") | Some("yes")
+        Some("1" | "true" | "yes")
     );
 
     let now_ns = zhiwei_common::Timestamp::now().unix_nano();
@@ -1128,65 +1221,82 @@ async fn delete_node_handler(
             return err(
                 StatusCode::CONFLICT,
                 format!(
-                    "该节点还有 {pending} 条未发出的命令（pending 状态）：等节点拉完再删，\
-                     或作废它们后删除（DELETE …?force=1）"
+                    "this node still has {pending} unsent commands (pending state): wait for the node to pull before deleting,\
+                     or void them and delete (DELETE …?force=1)"
                 ),
             );
         }
-        // 作废 + 留痕：节点一删命令历史就跟着没了，审计得单独写一份
-        let cancelled = match state
-            .storage
-            .commands()
-            .cancel_pending_for_node(&trimmed)
-            .await
-        {
-            Ok(rows) => rows,
-            Err(e) => {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("cancel commands: {e}"),
-                )
-            }
-        };
-        for c in &cancelled {
-            if let Err(e) = state
-                .storage
-                .commands()
-                .audit_with_outcome(
-                    now_ns,
-                    "admin",
-                    &trimmed,
-                    &c.id,
-                    &c.action,
-                    &c.params_json,
-                    "cancelled",
-                )
-                .await
-            {
-                warn!(node_id = %trimmed, command_id = %c.id, error = %e, "作废命令写审计失败");
-            }
+        if let Err(resp) = void_pending_commands(&state, &trimmed, now_ns).await {
+            return resp;
         }
-        warn!(
-            node_id = %trimmed,
-            cancelled = cancelled.len(),
-            "强制删除节点：未发出的命令已作废"
-        );
     }
 
-    match state.storage.nodes().delete(&trimmed).await {
+    delete_node_row(&state, &trimmed, exists).await
+}
+
+/// `?force=1` path: void every unsent command for the node and write one `audit_log`
+/// row per command (command history goes with the node on delete, so the trail must
+/// be recorded separately).
+async fn void_pending_commands(
+    state: &AppState,
+    node_id: &str,
+    now_ns: i64,
+) -> Result<(), Response> {
+    let cancelled = match state
+        .storage
+        .commands()
+        .cancel_pending_for_node(node_id)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            return Err(err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("cancel commands: {e}"),
+            ))
+        }
+    };
+    for c in &cancelled {
+        if let Err(e) = state
+            .storage
+            .commands()
+            .audit_with_outcome(
+                now_ns,
+                "admin",
+                node_id,
+                &c.id,
+                &c.action,
+                &c.params_json,
+                "cancelled",
+            )
+            .await
+        {
+            warn!(node_id = %node_id, command_id = %c.id, error = %e, "failed to write audit log when voiding command");
+        }
+    }
+    warn!(
+        node_id = %node_id,
+        cancelled = cancelled.len(),
+        "force-deleted node: unsent commands have been voided"
+    );
+    Ok(())
+}
+
+async fn delete_node_row(state: &AppState, node_id: &str, exists: bool) -> Response {
+    match state.storage.nodes().delete(node_id).await {
         Ok(true) => {
-            info!(node_id = %trimmed, "节点已删除");
+            info!(node_id = %node_id, "Node deleted");
             (StatusCode::NO_CONTENT).into_response()
         }
         Ok(false) => {
-            // exists=true 走到这里不该发生，但兜底：节点在并发里被别人删了
+            // exists=true reaching here shouldn't happen, but guard for the case where the node was concurrently deleted
             if exists {
                 err(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "delete 报告 0 行影响，但节点刚刚还在",
+                    "delete reported 0 rows affected, but the node was just there",
                 )
             } else {
-                err(StatusCode::NOT_FOUND, "节点未入网")
+                err(StatusCode::NOT_FOUND, "node not enrolled")
             }
         }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("delete: {e}")),
@@ -1311,8 +1421,9 @@ struct SeriesView {
     points: Vec<SeriesPoint>,
     /// Latest value across all metrics, useful for KPI tiles.
     latest: Option<f64>,
-    /// `raw` = 原始 10 秒数据；`hourly` = 小时聚合（窗口起点早于原始保留期时）。
-    /// 前端可据此提示「这段是小时级」——见设计文档 §8。
+    /// `raw` = original 10-second data; `hourly` = hourly aggregation (when the window start
+    /// is earlier than the raw retention). The front end can hint "this segment is
+    /// hourly-level" based on this — see design doc §8.
     resolution: &'static str,
 }
 
@@ -1322,9 +1433,11 @@ struct SeriesView {
 /// server-side so the browser receives a compact array instead of N protobuf
 /// blobs.
 ///
-/// - `from` / `to`（毫秒，闭区间）：详情页的时间范围控件；缺省是最近 1 小时。
-/// - `rate=1`：对**累计型**指标（网卡收发字节）做每秒差分，得到 bytes/s；
-///   计数器回绕或节点重启导致的负增量按 0 处理，避免图上出现向下的尖刺。
+/// - `from` / `to` (milliseconds, inclusive): the time-range control on the detail page;
+///   defaults to the most recent hour.
+/// - `rate=1`: for **cumulative** metrics (NIC rx/tx bytes), compute per-second deltas to
+///   get bytes/s; negative increments from counter wrap or node restart are clamped to 0
+///   to avoid downward spikes in the chart.
 async fn node_series_handler(
     State(state): State<AppState>,
     axum::extract::Path(node_id): axum::extract::Path<String>,
@@ -1356,12 +1469,12 @@ async fn node_series_handler(
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(to_ms - 3_600_000);
     if from_ms >= to_ms {
-        return err(StatusCode::BAD_REQUEST, "from 必须早于 to");
+        return err(StatusCode::BAD_REQUEST, "from must be earlier than to");
     }
-    let rate = matches!(q.get("rate").map(String::as_str), Some("1") | Some("true"));
+    let rate = matches!(q.get("rate").map(String::as_str), Some("1" | "true"));
 
-    // 窗口起点早于原始保留期 → 走小时聚合；否则走原始数据。
-    // 原始数据的保留天数见 retention::RAW_RETENTION_DAYS。
+    // Window start earlier than raw retention → hourly aggregation; otherwise raw data.
+    // Raw retention days: see retention::RAW_RETENTION_DAYS.
     let raw_floor_ms = now_ms - crate::retention::RAW_RETENTION_DAYS * 24 * 60 * 60 * 1000;
     if from_ms < raw_floor_ms {
         return hourly_series(
@@ -1423,8 +1536,9 @@ async fn node_series_handler(
 
 /// `GET /v1/series/nodes?metric=<name>&from=<ms>&to=<ms>&limit=N`
 ///
-/// 全部节点同一个指标的趋势——**一条线一个节点**，前端配图例。
-/// 与单节点 `/v1/nodes/:id/series` 同一套取数与抽稀口径（长窗口同样走小时聚合）。
+/// Same metric across all nodes — **one line per node**, the front end renders the legend.
+/// Uses the same data fetching and downsampling as the per-node `/v1/nodes/:id/series`
+/// (long windows also go through hourly aggregation).
 async fn all_nodes_series_handler(
     State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
@@ -1445,7 +1559,7 @@ async fn all_nodes_series_handler(
         .get("limit")
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(300);
-    let rate = matches!(q.get("rate").map(String::as_str), Some("1") | Some("true"));
+    let rate = matches!(q.get("rate").map(String::as_str), Some("1" | "true"));
     let now_ms = zhiwei_common::Timestamp::now().unix_nano() / 1_000_000;
     let to_ms = q
         .get("to")
@@ -1456,7 +1570,7 @@ async fn all_nodes_series_handler(
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(to_ms - 3_600_000);
     if from_ms >= to_ms {
-        return err(StatusCode::BAD_REQUEST, "from 必须早于 to");
+        return err(StatusCode::BAD_REQUEST, "from must be earlier than to");
     }
 
     let raw_floor_ms = now_ms - crate::retention::RAW_RETENTION_DAYS * 24 * 60 * 60 * 1000;
@@ -1475,55 +1589,18 @@ async fn all_nodes_series_handler(
     let telemetry = state.storage.telemetry();
     let mut out: Vec<serde_json::Value> = Vec::with_capacity(nodes.len());
     for n in &nodes {
-        // 网络类指标是计数器，画速率前需要至少两个样本；
-        // 在走「按窗口抽稀」的原始路径里，相邻两点之间的间隔由采样密度决定，
-        // 转成 bytes/s 时要减去上一帧的累计值，再除以 dt。
-        let raw_points: Vec<(i64, f64)> = if hourly {
-            match telemetry
-                .hourly_range(
-                    &n.id,
-                    &metric,
-                    from_ms * 1_000_000,
-                    to_ms * 1_000_000,
-                    limit,
-                )
-                .await
-            {
-                Ok(rows) => rows
-                    .into_iter()
-                    .map(|(ts, avg, _min, _max, first, last, _samples)| {
-                        // 小时内本身就是平均，rate 模式下落回「last-first 摊到 1h」
-                        let v = if rate {
-                            ((last - first) / 3600.0).max(0.0)
-                        } else {
-                            avg
-                        };
-                        (ts / 1_000_000, v)
-                    })
-                    .collect(),
-                Err(e) => {
-                    warn!(error = %e, node = %n.hostname, "取小时聚合失败");
-                    Vec::new()
-                }
-            }
-        } else {
-            match telemetry
-                .range(&n.id, from_ms * 1_000_000, to_ms * 1_000_000, limit)
-                .await
-            {
-                Ok(rows) => rows
-                    .into_iter()
-                    .filter_map(|(ts, _interval, payload)| {
-                        let batch = TelemetryBatch::decode(&payload[..]).ok()?;
-                        extract_metric(&batch, &metric).map(|v| (ts / 1_000_000, v))
-                    })
-                    .collect(),
-                Err(e) => {
-                    warn!(error = %e, node = %n.hostname, "取遥测失败");
-                    Vec::new()
-                }
-            }
-        };
+        let raw_points = node_series_points(
+            &telemetry,
+            &n.id,
+            &n.hostname,
+            &metric,
+            from_ms,
+            to_ms,
+            limit,
+            rate,
+            hourly,
+        )
+        .await;
         let points: Vec<SeriesPoint> = if rate {
             to_rate(&raw_points)
         } else {
@@ -1532,7 +1609,7 @@ async fn all_nodes_series_handler(
                 .map(|(t, v)| SeriesPoint { t: *t, v: *v })
                 .collect()
         };
-        // 没有数据的节点不画线，图例里也就不会出现无意义的空条目
+        // Nodes without data don't get a line drawn, so no meaningless empty entries appear in the legend
         if points.is_empty() {
             continue;
         }
@@ -1552,9 +1629,75 @@ async fn all_nodes_series_handler(
     .into_response()
 }
 
-/// 长窗口走小时聚合表。每桶一条：非速率取平均值；
-/// 速率用桶内的 first/last 还原（`(last - first) / 3600`），
-/// 所以计数器类指标（网络字节数）在这里依然画得出来。
+/// Fetch one node's `(ts_ms, value)` points for the cross-node series view, from either the
+/// hourly aggregate table (long windows) or raw telemetry.
+///
+/// Network metrics are counters; computing rates needs at least two samples. In the
+/// "downsample by window" raw path, the interval between adjacent points is determined by
+/// sampling density, so when converting to bytes/s we subtract the previous frame's cumulative
+/// value, then divide by dt.
+#[allow(clippy::too_many_arguments)] // the query window + flags are all needed; grouping would not aid readability
+async fn node_series_points(
+    telemetry: &zhiwei_storage::telemetry_repo::TelemetryRepo,
+    node_id: &str,
+    hostname: &str,
+    metric: &str,
+    from_ms: i64,
+    to_ms: i64,
+    limit: i64,
+    rate: bool,
+    hourly: bool,
+) -> Vec<(i64, f64)> {
+    if hourly {
+        return match telemetry
+            .hourly_range(
+                node_id,
+                metric,
+                from_ms * 1_000_000,
+                to_ms * 1_000_000,
+                limit,
+            )
+            .await
+        {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|(ts, avg, _min, _max, first, last, _samples)| {
+                    // Within an hour it's already an average; in rate mode fall back to "(last-first) spread over 1h"
+                    let v = if rate {
+                        ((last - first) / 3600.0).max(0.0)
+                    } else {
+                        avg
+                    };
+                    (ts / 1_000_000, v)
+                })
+                .collect(),
+            Err(e) => {
+                warn!(error = %e, node = %hostname, "failed to fetch hourly aggregation");
+                Vec::new()
+            }
+        };
+    }
+    match telemetry
+        .range(node_id, from_ms * 1_000_000, to_ms * 1_000_000, limit)
+        .await
+    {
+        Ok(rows) => rows
+            .into_iter()
+            .filter_map(|(ts, _interval, payload)| {
+                let batch = TelemetryBatch::decode(&payload[..]).ok()?;
+                extract_metric(&batch, metric).map(|v| (ts / 1_000_000, v))
+            })
+            .collect(),
+        Err(e) => {
+            warn!(error = %e, node = %hostname, "failed to fetch telemetry");
+            Vec::new()
+        }
+    }
+}
+
+/// Long windows use the hourly aggregation table. One entry per bucket: non-rate uses
+/// the average; rate is reconstructed from the bucket's first/last (`(last - first) / 3600`),
+/// so counter-type metrics (network bytes) can still be plotted here.
 async fn hourly_series(
     state: &AppState,
     node_id: String,
@@ -1602,21 +1745,22 @@ async fn hourly_series(
     .into_response()
 }
 
-/// 指标抽取：`metrics[]` 是主来源；**派生指标**在这里补齐，让控制台可以像
-/// 普通指标一样画 / 告警：
+/// Metric extraction: `metrics[]` is the primary source; **derived metrics** are filled
+/// in here, so the console can plot / alert on them just like regular metrics:
 ///
-/// - `host.net.rx_bytes` / `host.net.tx_bytes`：不在 `metrics[]` 里（每网卡一份），
-///   跨网卡求和；
-/// - `host.mem.usage`：节点上报的是 used/total 两个字节数，百分比在这里算。
-///   这条曾经漏掉过——播种规则「内存使用率过高」用的就是这个指标名，
-///   而节点从不上报它、求值也只查 `metrics[]`，**那条规则永远不会触发**。
-pub(crate) fn extract_metric(batch: &TelemetryBatch, name: &str) -> Option<f64> {
+/// - `host.net.rx_bytes` / `host.net.tx_bytes`: not in `metrics[]` (one per NIC),
+///   sum across NICs;
+/// - `host.mem.usage`: the node reports used/total in bytes, percentage is computed here.
+///   This used to be missing — the seeded rule "memory usage too high" uses this metric
+///   name, but nodes never report it and evaluation only looks at `metrics[]`,
+///   so **that rule would never fire**.
+pub fn extract_metric(batch: &TelemetryBatch, name: &str) -> Option<f64> {
     if let Some(m) = batch.metrics.iter().find(|m| m.name == name) {
         return Some(m.value);
     }
     match name {
-        "host.net.rx_bytes" => sum_if_present(batch.network.iter().map(|n| n.rx_bytes as f64)),
-        "host.net.tx_bytes" => sum_if_present(batch.network.iter().map(|n| n.tx_bytes as f64)),
+        "host.net.rx_bytes" => sum_u64_to_f64(batch.network.iter().map(|n| n.rx_bytes)),
+        "host.net.tx_bytes" => sum_u64_to_f64(batch.network.iter().map(|n| n.tx_bytes)),
         "host.mem.usage" => {
             let get = |n: &str| batch.metrics.iter().find(|m| m.name == n).map(|m| m.value);
             match (get("host.mem.used_bytes"), get("host.mem.total_bytes")) {
@@ -1628,21 +1772,13 @@ pub(crate) fn extract_metric(batch: &TelemetryBatch, name: &str) -> Option<f64> 
     }
 }
 
-/// 空集合 → None（该节点没上报网卡），有值 → 求和
-fn sum_if_present(it: impl Iterator<Item = f64>) -> Option<f64> {
-    let vals: Vec<f64> = it.collect();
-    if vals.is_empty() {
-        None
-    } else {
-        Some(vals.iter().sum())
-    }
-}
-
-/// 累计计数器 → 每秒速率（bytes/s）。相邻两点求差，负增量按 0（计数器回绕或节点重启）。
+/// Cumulative counter → per-second rate (bytes/s). Take the delta between adjacent
+/// points; negative increments are clamped to 0 (counter wrap or node restart).
 fn to_rate(raw: &[(i64, f64)]) -> Vec<SeriesPoint> {
     raw.windows(2)
         .map(|w| {
-            let dt_s = (w[1].0 - w[0].0) as f64 / 1000.0;
+            let elapsed_ms = w[1].0 - w[0].0;
+            let dt_s = f64::from(i32::try_from(elapsed_ms).unwrap_or(i32::MAX)) / 1000.0_f64;
             let delta = w[1].1 - w[0].1;
             let v = if dt_s > 0.0 {
                 (delta / dt_s).max(0.0)
@@ -1684,7 +1820,8 @@ struct HostInfoView {
     boot_time_unix_seconds: u64,
     interfaces: Vec<IfaceView>,
     agent_version: String,
-    /// 当前 node-agent 进程启动的 Unix 秒。0 = 老 agent / 未知，控制台当成 unknown 不显示。
+    /// Unix seconds at which the current node-agent process started. 0 = old agent /
+    /// unknown, console shows it as unknown.
     agent_started_at_unix_seconds: u64,
 }
 
@@ -1722,13 +1859,14 @@ fn host_info_view(info: &zhiwei_proto::telemetry::HostInfo) -> HostInfoView {
     }
 }
 
-// ---------- inventory（快照：主机信息 + 容器 + 进程） ----------
+// ---------- inventory (snapshot: host info + containers + processes) ----------
 
 /// `POST /v1/inventory`
 ///
-/// 低频（默认 5 分钟）上报的「当前状态」：主机信息写回 nodes，
-/// 容器与进程写进 node_inventory（每节点只留最新一份）。
-/// 这类数据不进 telemetry_batches，避免每 30 秒重复存静态数据。
+/// Low-frequency (default 5 minutes) "current state" report: host info is written back
+/// to nodes; containers and processes go into `node_inventory` (one latest snapshot per node).
+/// This kind of data doesn't go into `telemetry_batches`, avoiding repeated storage of static
+/// data every 30 seconds.
 async fn inventory_handler(
     State(state): State<AppState>,
     method: axum::http::Method,
@@ -1736,7 +1874,9 @@ async fn inventory_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    let pq = uri
+        .path_and_query()
+        .map_or("/", hyper::http::uri::PathAndQuery::as_str);
     let (node_id, _node_pub) = match verify_node(&state, &headers, method.as_str(), pq, &body).await
     {
         Ok(id) => id,
@@ -1764,105 +1904,32 @@ async fn inventory_handler(
     };
 
     if report.node_id != node_id.as_str() {
-        return err(StatusCode::BAD_REQUEST, "node_id 与签名主体不一致");
+        return err(
+            StatusCode::BAD_REQUEST,
+            "node_id does not match signature subject",
+        );
     }
 
-    // 证书告警要用主机名，先留一份（host_info 是 Option，可能缺失）
+    // Certificate alerts need the hostname; save it first (host_info is Option, may be missing)
     let hostname = report
         .host_info
         .as_ref()
-        .map(|i| i.hostname.clone())
-        .unwrap_or_else(|| node_id.as_str().to_string());
+        .map_or_else(|| node_id.as_str().to_string(), |i| i.hostname.clone());
 
-    if let Some(info) = report.host_info.as_ref() {
-        match serde_json::to_string(&host_info_view(info)) {
-            Ok(json) => {
-                if let Err(e) = state
-                    .storage
-                    .nodes()
-                    .update_host_info(&node_id, &json)
-                    .await
-                {
-                    warn!(error = %e, "update_host_info failed");
-                }
-            }
-            Err(e) => warn!(error = %e, "serialize host_info failed"),
-        }
-        // 节点可以自报新名字：入网时拿到的可能只是 bogon 这类占位值，
-        // 换用 --node-name 或 LocalHostName 后无需重新入网即可改名
-        if let Err(e) = state
-            .storage
-            .nodes()
-            .update_hostname(&node_id, &info.hostname)
-            .await
-        {
-            warn!(error = %e, "update_hostname failed");
-        }
-    }
+    apply_host_info(&state, &node_id, &report).await;
 
-    let containers: Vec<ContainerView> = report
-        .containers
-        .iter()
-        .map(|c| ContainerView {
-            id: c.id.clone(),
-            name: c.name.clone(),
-            image: c.image.clone(),
-            state: c.state.clone(),
-            status: c.status.clone(),
-            runtime: c.runtime.clone(),
-            created_at_unix_nano: c.created_at_unix_nano,
-            started_at_unix_nano: c.started_at_unix_nano,
-            finished_at_unix_nano: c.finished_at_unix_nano,
-            compose_project: c.compose_project.clone(),
-            compose_service: c.compose_service.clone(),
-            mem_usage_bytes: c.mem_usage_bytes,
-            mem_limit_bytes: c.mem_limit_bytes,
-            cpu_percent: c.cpu_percent,
-            cpu_limit_nano: c.cpu_limit_nano,
-        })
-        .collect();
-
-    let processes: Vec<ProcessView> = report
-        .processes
-        .as_ref()
-        .map(|p| {
-            p.processes
-                .iter()
-                .map(|x| ProcessView {
-                    pid: x.pid,
-                    name: x.name.clone(),
-                    cmdline: x.cmdline.clone(),
-                    user: x.user.clone(),
-                    cpu_percent: x.cpu_percent,
-                    memory_bytes: x.memory_bytes,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let certificates: Vec<CertView> = report
-        .certificates
-        .iter()
-        .map(|c| CertView {
-            path: c.path.clone(),
-            subject: c.subject.clone(),
-            issuer: c.issuer.clone(),
-            not_after_unix_nano: c.not_after_unix_nano,
-            not_before_unix_nano: c.not_before_unix_nano,
-            domains: c.domains.clone(),
-            serial: c.serial.clone(),
-            parse_error: c.parse_error,
-            source_id: c.source_id.clone(),
-        })
-        .collect();
+    let containers = view_containers(&report);
+    let processes = view_processes(&report);
+    let certificates = view_certificates(&report);
 
     let containers_json = serde_json::to_string(&containers).unwrap_or_else(|_| "[]".into());
     let processes_json = serde_json::to_string(&processes).unwrap_or_else(|_| "[]".into());
     let certificates_json = serde_json::to_string(&certificates).unwrap_or_else(|_| "[]".into());
 
-    // 容器启停事件检测要拿「上一次快照」做基线——必须在 upsert 覆盖之前读。
-    // 基线存在数据库里，节点 / monitor 重启都不丢；第一次上报（无历史）时
-    // on_container_events 会跳过事件、只立基线。
+    // Container start/stop event detection needs the "previous snapshot" as a baseline —
+    // must be read before upsert overwrites it. The baseline lives in the database, surviving
+    // node / monitor restarts; on the first report (no history), on_container_events skips
+    // events and only sets the baseline.
     let previous_containers = state
         .storage
         .inventory()
@@ -1898,31 +1965,149 @@ async fn inventory_handler(
         "inventory stored"
     );
 
-    // 证书到期评估：跟快照同拍，配置改了/证书续签了都能立刻反映到告警。
-    // 文案用显示名（有别名用别名），与指标告警一致。
-    let display = state
-        .storage
-        .nodes()
-        .find_by_id(&node_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|n| node_display_name(&n.alias, &hostname))
-        .unwrap_or_else(|| hostname.clone());
-    crate::alerts::evaluate_cert_expiry(&state, node_id.as_str(), &display, &certificates_json)
-        .await;
-
-    // 容器启停事件：跟快照同拍（每 5 分钟一次），差异即事件。
-    // 与证书评估共用 display（显示名），文案一致。
-    crate::alerts::on_container_events(
+    evaluate_snapshot_alerts(
         &state,
         node_id.as_str(),
-        &display,
+        &hostname,
         previous_containers.as_deref(),
         &containers_json,
+        &certificates_json,
     )
     .await;
     (StatusCode::NO_CONTENT).into_response()
+}
+
+/// Write the node's self-reported host info back to `nodes` (serialized `host_info_json`
+/// plus the possibly-updated hostname).
+async fn apply_host_info(
+    state: &AppState,
+    node_id: &zhiwei_common::NodeId,
+    report: &InventoryReport,
+) {
+    let Some(info) = report.host_info.as_ref() else {
+        return;
+    };
+    persist_host_info(state, node_id, info).await;
+    // Nodes can self-report a new name: what we got at enrollment may be just a placeholder
+    // like "bogon"; after switching to --node-name or LocalHostName no re-enrollment is needed
+    if let Err(e) = state
+        .storage
+        .nodes()
+        .update_hostname(node_id, &info.hostname)
+        .await
+    {
+        warn!(error = %e, "update_hostname failed");
+    }
+}
+
+async fn persist_host_info(
+    state: &AppState,
+    node_id: &zhiwei_common::NodeId,
+    info: &zhiwei_proto::telemetry::HostInfo,
+) {
+    match serde_json::to_string(&host_info_view(info)) {
+        Ok(json) => {
+            if let Err(e) = state.storage.nodes().update_host_info(node_id, &json).await {
+                warn!(error = %e, "update_host_info failed");
+            }
+        }
+        Err(e) => warn!(error = %e, "serialize host_info failed"),
+    }
+}
+
+fn view_containers(report: &InventoryReport) -> Vec<ContainerView> {
+    report
+        .containers
+        .iter()
+        .map(|c| ContainerView {
+            id: c.id.clone(),
+            name: c.name.clone(),
+            image: c.image.clone(),
+            state: c.state.clone(),
+            status: c.status.clone(),
+            runtime: c.runtime.clone(),
+            created_at_unix_nano: c.created_at_unix_nano,
+            started_at_unix_nano: c.started_at_unix_nano,
+            finished_at_unix_nano: c.finished_at_unix_nano,
+            compose_project: c.compose_project.clone(),
+            compose_service: c.compose_service.clone(),
+            mem_usage_bytes: c.mem_usage_bytes,
+            mem_limit_bytes: c.mem_limit_bytes,
+            cpu_percent: c.cpu_percent,
+            cpu_limit_nano: c.cpu_limit_nano,
+        })
+        .collect()
+}
+
+fn view_processes(report: &InventoryReport) -> Vec<ProcessView> {
+    report
+        .processes
+        .as_ref()
+        .map(|p| {
+            p.processes
+                .iter()
+                .map(|x| ProcessView {
+                    pid: x.pid,
+                    name: x.name.clone(),
+                    cmdline: x.cmdline.clone(),
+                    user: x.user.clone(),
+                    cpu_percent: x.cpu_percent,
+                    memory_bytes: x.memory_bytes,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn view_certificates(report: &InventoryReport) -> Vec<CertView> {
+    report
+        .certificates
+        .iter()
+        .map(|c| CertView {
+            path: c.path.clone(),
+            subject: c.subject.clone(),
+            issuer: c.issuer.clone(),
+            not_after_unix_nano: c.not_after_unix_nano,
+            not_before_unix_nano: c.not_before_unix_nano,
+            domains: c.domains.clone(),
+            serial: c.serial.clone(),
+            parse_error: c.parse_error,
+            source_id: c.source_id.clone(),
+        })
+        .collect()
+}
+
+/// Certificate expiry + container start/stop evaluation, sharing one display name for
+/// consistent text. Same snapshot timing, so config changes / renewals immediately reflect.
+async fn evaluate_snapshot_alerts(
+    state: &AppState,
+    node_id: &str,
+    hostname: &str,
+    previous_containers: Option<&str>,
+    containers_json: &str,
+    certificates_json: &str,
+) {
+    // Text uses display name (alias if set), same as metric alerts.
+    let display = state
+        .storage
+        .nodes()
+        .find_by_id(&zhiwei_common::NodeId::from_string(node_id.to_string()))
+        .await
+        .ok()
+        .flatten()
+        .map_or_else(
+            || hostname.to_string(),
+            |n| node_display_name(&n.alias, hostname),
+        );
+    crate::alerts::evaluate_cert_expiry(state, node_id, &display, certificates_json).await;
+    crate::alerts::on_container_events(
+        state,
+        node_id,
+        &display,
+        previous_containers,
+        containers_json,
+    )
+    .await;
 }
 
 #[derive(Serialize, Clone)]
@@ -1935,7 +2120,7 @@ struct CertView {
     domains: Vec<String>,
     serial: String,
     parse_error: bool,
-    /// 命中的服务端证书来源 id；空 = 内置 / 命令行 glob 扫到的
+    /// Matched server-certificate source id; empty = built-in / command-line glob scan
     source_id: String,
 }
 
@@ -1948,15 +2133,15 @@ struct ContainerView {
     status: String,
     runtime: String,
     created_at_unix_nano: i64,
-    /// 逐容器 inspect 得到；0 = 未知（老版本节点 agent 未上报）
+    /// From per-container inspect; 0 = unknown (older node agents don't report it)
     started_at_unix_nano: i64,
     finished_at_unix_nano: i64,
-    /// compose 项目（「应用」维度）——老版本节点 agent 上报时为空串
+    /// Compose project ("application" dimension); empty string when reported by older node agents
     #[serde(default)]
     compose_project: String,
     #[serde(default)]
     compose_service: String,
-    /// 用量与限额——老版本节点 agent 上报时全是 0（界面显示「—」/「不限」）
+    /// Usage and limit — all 0 when reported by older node agents (UI shows "—" / "unlimited")
     #[serde(default)]
     mem_usage_bytes: u64,
     #[serde(default)]
@@ -2067,13 +2252,13 @@ async fn node_processes_handler(
 struct ContainerGroupView {
     node_id: String,
     hostname: String,
-    /// 管理员别名（空串=未设置）；容器页的节点下拉优先显示它
+    /// Admin alias (empty string = not set); containers page node dropdown prefers it
     alias: String,
     ts_unix_nano: Option<i64>,
     containers: serde_json::Value,
 }
 
-/// `GET /v1/containers`：所有节点的容器，按节点分组（容器页一次请求拿全）
+/// `GET /v1/containers`: containers from all nodes, grouped by node (one request gets the whole containers page)
 async fn all_containers_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if !read_auth_ok(&state, &headers).await {
         return err(
@@ -2113,7 +2298,7 @@ async fn all_containers_handler(State(state): State<AppState>, headers: HeaderMa
     Json(out).into_response()
 }
 
-// ---------- 证书 ----------
+// ---------- Certificates ----------
 
 #[derive(Serialize)]
 struct NodeCertsView {
@@ -2123,7 +2308,7 @@ struct NodeCertsView {
     certificates: serde_json::Value,
 }
 
-/// `GET /v1/certificates`：所有节点的证书（证书页一次拿全，前端按到期日排序）
+/// `GET /v1/certificates`: certificates from all nodes (certificates page gets everything in one request; front end sorts by expiry)
 async fn all_certificates_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if !read_auth_ok(&state, &headers).await {
         return err(
@@ -2163,7 +2348,7 @@ async fn all_certificates_handler(State(state): State<AppState>, headers: Header
     Json(out).into_response()
 }
 
-// ---------- 告警与规则 ----------
+// ---------- Alerts and Rules ----------
 
 #[derive(Serialize)]
 struct AlertsView {
@@ -2197,15 +2382,15 @@ async fn silence_alert_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    #[derive(serde::Deserialize)]
+    struct Body {
+        minutes: i64,
+    }
     if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
         );
-    }
-    #[derive(serde::Deserialize)]
-    struct Body {
-        minutes: i64,
     }
     let minutes = if body.is_empty() {
         60
@@ -2219,7 +2404,7 @@ async fn silence_alert_handler(
     if let Err(e) = state.storage.alerts().silence_alert(id, until).await {
         return err(StatusCode::INTERNAL_SERVER_ERROR, format!("silence: {e}"));
     }
-    info!(alert_id = id, minutes, "告警已静默");
+    info!(alert_id = id, minutes, "alert silenced");
     (StatusCode::NO_CONTENT).into_response()
 }
 
@@ -2236,9 +2421,12 @@ async fn resolve_alert_handler(
     }
     let now = zhiwei_common::Timestamp::now().unix_nano();
     if let Err(e) = state.storage.alerts().resolve_alert(id, now).await {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, format!("resolve alert: {e}"));
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("resolve alert: {e}"),
+        );
     }
-    info!(alert_id = id, "告警已手动关闭");
+    info!(alert_id = id, "alert manually closed");
     (StatusCode::NO_CONTENT).into_response()
 }
 
@@ -2263,12 +2451,6 @@ async fn create_rule_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !read_auth_ok(&state, &headers).await {
-        return err(
-            StatusCode::UNAUTHORIZED,
-            "authentication required (Bearer admin token)",
-        );
-    }
     #[derive(serde::Deserialize)]
     struct Body {
         name: String,
@@ -2283,16 +2465,22 @@ async fn create_rule_handler(
     fn default_severity() -> String {
         "warning".into()
     }
+    if !read_auth_ok(&state, &headers).await {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "authentication required (Bearer admin token)",
+        );
+    }
 
     let b: Body = match serde_json::from_slice(&body) {
         Ok(b) => b,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
     };
     if !["gt", "gte", "lt", "lte", "eq"].contains(&b.op.as_str()) {
-        return err(StatusCode::BAD_REQUEST, "op 必须是 gt/gte/lt/lte/eq");
+        return err(StatusCode::BAD_REQUEST, "op must be gt/gte/lt/lte/eq");
     }
     if !["warning", "critical"].contains(&b.severity.as_str()) {
-        return err(StatusCode::BAD_REQUEST, "severity 必须是 warning/critical");
+        return err(StatusCode::BAD_REQUEST, "severity must be warning/critical");
     }
     let now = zhiwei_common::Timestamp::now().unix_nano();
     match state
@@ -2323,12 +2511,6 @@ async fn patch_rule_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !read_auth_ok(&state, &headers).await {
-        return err(
-            StatusCode::UNAUTHORIZED,
-            "authentication required (Bearer admin token)",
-        );
-    }
     #[derive(serde::Deserialize)]
     struct Body {
         name: Option<String>,
@@ -2339,23 +2521,29 @@ async fn patch_rule_handler(
         severity: Option<String>,
         enabled: Option<bool>,
     }
+    if !read_auth_ok(&state, &headers).await {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "authentication required (Bearer admin token)",
+        );
+    }
     let b: Body = match serde_json::from_slice(&body) {
         Ok(b) => b,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
     };
-    // 验证 op 和 severity
+    // Validate op and severity
     if let Some(ref op) = b.op {
         if !["gt", "gte", "lt", "lte", "eq"].contains(&op.as_str()) {
-            return err(StatusCode::BAD_REQUEST, "op 必须是 gt/gte/lt/lte/eq");
+            return err(StatusCode::BAD_REQUEST, "op must be gt/gte/lt/lte/eq");
         }
     }
     if let Some(ref sev) = b.severity {
         if !["warning", "critical"].contains(&sev.as_str()) {
-            return err(StatusCode::BAD_REQUEST, "severity 必须是 warning/critical");
+            return err(StatusCode::BAD_REQUEST, "severity must be warning/critical");
         }
     }
     let now = zhiwei_common::Timestamp::now().unix_nano();
-    // 读取现有规则
+    // Read existing rule
     let rule = match state.storage.alerts().get_rule(id).await {
         Ok(Some(r)) => r,
         Ok(None) => return err(StatusCode::NOT_FOUND, "rule not found"),
@@ -2375,7 +2563,10 @@ async fn patch_rule_handler(
     };
     match state.storage.alerts().update_rule(id, &updated).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("update rule: {e}")),
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("update rule: {e}"),
+        ),
     }
 }
 
@@ -2400,10 +2591,11 @@ async fn delete_rule_handler(
     }
 }
 
-/// `GET /v1/builtin-alerts`：列出内置告警规则（节点离线 / 节点上线等）
+/// `GET /v1/builtin-alerts`: list built-in alert rules (node offline / node online etc.)
 ///
-/// 这类规则不是用户配置的，但要让用户在告警页能看到、并能启用 / 停用——
-/// 否则它们就在后台悄悄发通知，控制台上找不到对应的开关。
+/// These rules aren't user-configured, but users need to see them on the alerts page
+/// and be able to enable / disable them — otherwise they silently send notifications in
+/// the background with no corresponding toggle on the console.
 async fn list_builtin_alerts_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2423,44 +2615,74 @@ async fn list_builtin_alerts_handler(
     }
 }
 
-/// `PATCH /v1/builtin-alerts/:id`：切换内置告警规则的启用状态
+/// `PATCH /v1/builtin-alerts/:id`: update settings of a built-in alert rule
 ///
-/// id 是稳定字符串（目前只有 `node_offline` / `node_online`）。未知 id 返回 404。
+/// `id` is a stable string (e.g. '`node_offline`' / '`node_online`'). Unknown id returns 404.
 async fn patch_builtin_alert_handler(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    #[derive(serde::Deserialize)]
+    struct Body {
+        enabled: Option<bool>,
+        threshold: Option<f64>,
+        duration_seconds: Option<i64>,
+    }
     if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
         );
     }
-    #[derive(serde::Deserialize)]
-    struct Body {
-        enabled: bool,
-    }
     let b: Body = match serde_json::from_slice(&body) {
         Ok(b) => b,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
     };
+
+    // If no updates provided, just return success
+    if b.enabled.is_none() && b.threshold.is_none() && b.duration_seconds.is_none() {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+
     let now = zhiwei_common::Timestamp::now().unix_nano();
-    match state
-        .storage
-        .alerts()
-        .set_builtin_rule_enabled(&id, b.enabled, now)
-        .await
-    {
-        Ok(Some(_)) => StatusCode::NO_CONTENT.into_response(),
-        Ok(None) => err(
-            StatusCode::NOT_FOUND,
-            format!("unknown builtin alert: {id}"),
-        ),
+
+    // Get current rule to merge with updates
+    match state.storage.alerts().list_builtin_rules().await {
+        Ok(rules) => {
+            let rule = rules.iter().find(|r| r.id == id);
+            let Some(current) = rule else {
+                return err(
+                    StatusCode::NOT_FOUND,
+                    format!("unknown builtin alert: {id}"),
+                );
+            };
+
+            let threshold = b.threshold.unwrap_or(current.threshold);
+            let duration_seconds = b.duration_seconds.unwrap_or(current.duration_seconds);
+            let enabled = b.enabled.unwrap_or(current.enabled);
+
+            match state
+                .storage
+                .alerts()
+                .update_builtin_rule(&id, threshold, duration_seconds, enabled, now)
+                .await
+            {
+                Ok(Some(_)) => StatusCode::NO_CONTENT.into_response(),
+                Ok(None) => err(
+                    StatusCode::NOT_FOUND,
+                    format!("unknown builtin alert: {id}"),
+                ),
+                Err(e) => err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("update builtin alert: {e}"),
+                ),
+            }
+        }
         Err(e) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("patch builtin alert: {e}"),
+            format!("list builtin alerts: {e}"),
         ),
     }
 }
@@ -2481,7 +2703,7 @@ async fn list_channels_handler(State(state): State<AppState>, headers: HeaderMap
     }
 }
 
-// ---------- CA 信息 ----------
+// ---------- CA info ----------
 
 #[derive(Serialize)]
 struct CaView {
@@ -2489,14 +2711,16 @@ struct CaView {
     not_before_unix_nano: i64,
     not_after_unix_nano: i64,
     serial: String,
-    /// SHA-256 指纹（冒号分隔大写十六进制，便于人工比对）
+    /// SHA-256 fingerprint (colon-separated uppercase hex, easier for manual comparison)
     fingerprint_sha256: String,
     nodes_enrolled: i64,
-    /// 本进程是否自己终结 TLS。
+    /// Whether this process terminates TLS itself.
     ///
-    /// false 时（托管平台，边缘终结 TLS）这个 CA **不参与任何事**：
-    /// 它既不是节点信任的根（节点走系统根），monitor 的证书也是边缘签的。
-    /// 前端据此把这一节写成「当前部署用不到」而不是让人以为它是集群身份根。
+    /// When false (managed platform, edge-terminated TLS), this CA is **not involved**:
+    /// it's neither the node's trust root (nodes use system roots), nor is the monitor's
+    /// certificate signed by it (the edge signs it). The front end accordingly renders
+    /// this section as "not used by current deployment" rather than implying it's the
+    /// cluster's identity root.
     tls_terminated_locally: bool,
 }
 
@@ -2512,9 +2736,12 @@ async fn ca_handler(State(state): State<AppState>, headers: HeaderMap) -> Respon
     let info = tokio::task::spawn_blocking(move || parse_ca(&pem))
         .await
         .ok()
-        .and_then(|r| r.ok());
+        .and_then(std::result::Result::ok);
     let Some((subject, nb, na, serial, fp)) = info else {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, "解析 CA 证书失败");
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to parse CA certificate",
+        );
     };
 
     let nodes_enrolled = state
@@ -2522,7 +2749,7 @@ async fn ca_handler(State(state): State<AppState>, headers: HeaderMap) -> Respon
         .nodes()
         .list_all()
         .await
-        .map(|v| v.len() as i64)
+        .map(|v| i64::try_from(v.len()).unwrap_or(i64::MAX))
         .unwrap_or(0);
 
     Json(CaView {
@@ -2537,15 +2764,15 @@ async fn ca_handler(State(state): State<AppState>, headers: HeaderMap) -> Respon
     .into_response()
 }
 
-/// 解析本地 CA 证书（PEM）取主体 / 有效期 / 序列号 / 指纹
+/// Parse the local CA certificate (PEM) to extract subject / validity period / serial / fingerprint
 #[allow(clippy::type_complexity)]
 fn parse_ca(pem: &str) -> anyhow::Result<(String, i64, i64, String, String)> {
+    use base64::Engine;
     use x509_parser::prelude::FromDer;
     let der = pem
         .lines()
         .filter(|l| !l.trim_start().starts_with("-----"))
         .collect::<String>();
-    use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD.decode(der.trim())?;
     let (_, cert) = x509_parser::certificate::X509Certificate::from_der(&bytes)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -2567,19 +2794,13 @@ fn parse_ca(pem: &str) -> anyhow::Result<(String, i64, i64, String, String)> {
     ))
 }
 
-// ---------- 通知渠道 ----------
+// ---------- Notification channels ----------
 
 async fn create_channel_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !read_auth_ok(&state, &headers).await {
-        return err(
-            StatusCode::UNAUTHORIZED,
-            "authentication required (Bearer admin token)",
-        );
-    }
     #[derive(serde::Deserialize)]
     struct Body {
         name: String,
@@ -2604,16 +2825,23 @@ async fn create_channel_handler(
     fn default_sev() -> String {
         "warning".into()
     }
+    if !read_auth_ok(&state, &headers).await {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "authentication required (Bearer admin token)",
+        );
+    }
 
     let b: Body = match serde_json::from_slice(&body) {
         Ok(b) => b,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
     };
     if b.name.trim().is_empty() {
-        return err(StatusCode::BAD_REQUEST, "name 不能为空");
+        return err(StatusCode::BAD_REQUEST, "name cannot be empty");
     }
-    // 只填 url 的老客户端、手写 curl 都会打到这里：缺哪个字段由类型决定，
-    // 判断口径统一放在 alerts::validate_channel，别在两处各写一份
+    // Old clients that only fill in `url`, hand-crafted curl, all hit this path: which field
+    // is missing depends on the type; keep the check rule in one place (alerts::validate_channel),
+    // don't write it twice
     let rid_type = default_receive_id_type(&b.receive_id_type);
     if let Err(msg) = crate::alerts::validate_channel(
         b.kind.trim(),
@@ -2628,11 +2856,11 @@ async fn create_channel_handler(
     if !matches!(b.min_severity.as_str(), "warning" | "critical") {
         return err(
             StatusCode::BAD_REQUEST,
-            "min_severity 只能是 warning 或 critical",
+            "min_severity must be warning or critical",
         );
     }
     let now = zhiwei_common::Timestamp::now().unix_nano();
-    let new = zhiwei_storage::alerts_repo::NewChannel {
+    let channel = zhiwei_storage::alerts_repo::NewChannel {
         name: b.name.trim(),
         kind: b.kind.trim(),
         url: b.url.trim(),
@@ -2642,7 +2870,7 @@ async fn create_channel_handler(
         receive_id_type: &rid_type,
         min_severity: &b.min_severity,
     };
-    match state.storage.alerts().create_channel(&new, now).await {
+    match state.storage.alerts().create_channel(&channel, now).await {
         Ok(id) => (StatusCode::CREATED, Json(serde_json::json!({ "id": id }))).into_response(),
         Err(e) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2651,7 +2879,7 @@ async fn create_channel_handler(
     }
 }
 
-/// 飞书的 receive_id_type 缺省取 `chat_id`（与飞书自己的默认一致）
+/// Feishu's `receive_id_type` defaults to `chat_id` (matches Feishu's own default)
 fn default_receive_id_type(raw: &str) -> String {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -2661,20 +2889,14 @@ fn default_receive_id_type(raw: &str) -> String {
     }
 }
 
-/// `POST /v1/channels/test` —— 拿当前填的参数**真发一条**，返回成功或失败原因。
+/// `POST /v1/channels/test` — actually **sends one** with the current params; returns success or the reason for failure.
 ///
-/// 用参数而不是渠道 id：新增渠道的对话框里，「测试」要在保存之前就能点。
+/// Use params rather than a channel id: in the "create channel" dialog, "Test" must be clickable before saving.
 async fn test_channel_handler(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !read_auth_ok(&_state, &headers).await {
-        return err(
-            StatusCode::UNAUTHORIZED,
-            "authentication required (Bearer admin token)",
-        );
-    }
     #[derive(serde::Deserialize)]
     struct Body {
         kind: String,
@@ -2688,6 +2910,12 @@ async fn test_channel_handler(
         receive_id: String,
         #[serde(default)]
         receive_id_type: String,
+    }
+    if !read_auth_ok(&state, &headers).await {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "authentication required (Bearer admin token)",
+        );
     }
     let b: Body = match serde_json::from_slice(&body) {
         Ok(b) => b,
@@ -2714,7 +2942,7 @@ async fn test_channel_handler(
         &b.receive_id,
         &b.receive_id_type,
     );
-    // 与真告警共用一条投递路径：测试通过 = 真出事也发得出去
+    // Share the same delivery path with real alerts: if the test passes, real events will also go out
     match crate::alerts::deliver(
         &ch,
         &crate::alerts::test_rule(),
@@ -2724,7 +2952,7 @@ async fn test_channel_handler(
     .await
     {
         Ok(()) => Json(serde_json::json!({ "ok": true, "detail": "" })).into_response(),
-        // 投递失败不是服务端错误——把原因如实回给控制台，用户自己判断
+        // Delivery failure is not a server error — pass the reason back to the console for the user to judge
         Err(e) => Json(serde_json::json!({
             "ok": false,
             "detail": e.to_string(),
@@ -2733,10 +2961,11 @@ async fn test_channel_handler(
     }
 }
 
-/// `POST /v1/admin/token` —— 改控制台凭据。
+/// `POST /v1/admin/token` — change console credentials.
 ///
-/// 要求带上当前凭据（等价于确认操作），新凭据写回 `<data-dir>/admin.token`
-/// 并立即生效。节点那一侧不受影响——它们走签名，不认这个凭据。
+/// Requires the current credential (equivalent to confirming the operation); the new
+/// credential is written to `<data-dir>/admin.token` and takes effect immediately.
+/// Nodes aren't affected — they use signatures and don't trust this credential.
 async fn change_admin_token_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2753,9 +2982,12 @@ async fn change_admin_token_handler(
     };
 
     {
-        let current = state.admin_token.read().unwrap_or_else(|e| e.into_inner());
+        let current = state
+            .admin_token
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !crate::admin::ct_eq(b.current.trim().as_bytes(), current.as_bytes()) {
-            return err(StatusCode::UNAUTHORIZED, "当前凭据不正确");
+            return err(StatusCode::UNAUTHORIZED, "current credential is incorrect");
         }
     }
     if let Err(msg) = crate::admin::validate_new_token(b.new.trim()) {
@@ -2765,21 +2997,24 @@ async fn change_admin_token_handler(
     if let Err(e) = crate::admin::save(&state.data_dir, b.new.trim()).await {
         return err(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("写入新凭据失败：{e}"),
+            format!("failed to write new credential: {e}"),
         );
     }
-    // 先落盘再改内存：反过来的话，落盘失败会让内存与文件不一致
+    // Write to disk before changing memory: reversing the order would let a disk-write failure leave memory and file inconsistent
     {
-        let mut current = state.admin_token.write().unwrap_or_else(|e| e.into_inner());
+        let mut current = state
+            .admin_token
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *current = b.new.trim().to_string();
     }
-    // headers 参与鉴权只是为了与其它 handler 的形状一致，这里不做前置校验——
-    // 改凭据本身要求带 current，等于已确认过身份
+    // The headers parameter is here only to match the shape of other handlers; we don't pre-check auth here —
+    // changing credentials requires the current credential, which is itself a proof of identity
     let _ = headers;
     Json(serde_json::json!({ "ok": true })).into_response()
 }
 
-/// 渠道 PATCH 的请求体：字段全部可选（缺省 = 保持原值）。
+/// Channel PATCH request body: all fields optional (absent = keep existing value).
 #[derive(serde::Deserialize)]
 struct ChannelPatchBody {
     #[serde(default)]
@@ -2800,17 +3035,18 @@ struct ChannelPatchBody {
     enabled: Option<bool>,
 }
 
-/// 把「只改要改的字段」合并到已有渠道上。
+/// Merge "only the fields being changed" onto an existing channel.
 ///
-/// 凭据只允许覆盖、不允许清空：`secret` 缺省或传空串都保持原值
-/// （真要重置就删了重建）。校验失败返回可直接回给控制台的错误文案。
+/// Credentials may be overwritten but never cleared: an absent or empty `secret` keeps the
+/// existing value (delete and recreate if you really need to reset). Validation failures
+/// return error text ready to pass through to the console.
 fn merge_channel_patch(
     mut ch: zhiwei_storage::alerts_repo::NotifyChannel,
     b: &ChannelPatchBody,
 ) -> Result<zhiwei_storage::alerts_repo::NotifyChannel, String> {
     if let Some(v) = &b.name {
         if v.trim().is_empty() {
-            return Err("name 不能为空".into());
+            return Err("name cannot be empty".into());
         }
         ch.name = v.trim().to_string();
     }
@@ -2833,9 +3069,9 @@ fn merge_channel_patch(
     }
     if let Some(v) = &b.min_severity {
         if !matches!(v.as_str(), "warning" | "critical") {
-            return Err("min_severity 只能是 warning 或 critical".into());
+            return Err("min_severity must be warning or critical".into());
         }
-        ch.min_severity = v.clone();
+        ch.min_severity.clone_from(v);
     }
     if let Some(v) = b.enabled {
         ch.enabled = v;
@@ -2843,11 +3079,12 @@ fn merge_channel_patch(
     Ok(ch)
 }
 
-/// `PATCH /v1/channels/:id`：更新通知渠道。
+/// `PATCH /v1/channels/:id`: update a notification channel.
 ///
-/// 全部字段可选，「缺省 = 保持原值」；`secret` 传空串同样保持原值
-/// （凭据只允许覆盖，不允许清空——真要重置就删了重建）。kind 不可改：
-/// 类型变了必填字段就变了，删了重建更清楚。`enabled` 单独传也可以。
+/// All fields optional; "absent = keep existing"; passing an empty `secret` also keeps
+/// the existing value (credentials may be overwritten, never cleared — delete and
+/// recreate if you really need to reset). `kind` is not modifiable: changing the type
+/// changes the required fields; deleting and recreating is clearer. `enabled` alone works too.
 async fn patch_channel_handler(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<i64>,
@@ -2878,7 +3115,7 @@ async fn patch_channel_handler(
         Ok(ch) => ch,
         Err(msg) => return err(StatusCode::BAD_REQUEST, msg),
     };
-    // 按合并后的整行校验：类型决定的必填字段缺哪个，这里都得说清楚
+    // Validate the merged row as a whole: which required field is missing (per type) must be reported here
     if let Err(msg) = crate::alerts::validate_channel(
         &ch.kind,
         &ch.url,
@@ -2934,26 +3171,29 @@ async fn delete_channel_handler(
     }
 }
 
-// ---------- 控制通道 ----------
+// ---------- Control channel ----------
 
 #[derive(Serialize)]
 struct NodeCommandsView {
-    /// base64 的 Command protobuf 列表，节点自行验签
+    /// base64-encoded Command protobuf list; nodes verify the signature themselves
     commands: Vec<String>,
 }
 
-/// 节点长轮询可挂起的最长时间（秒）。没有命令时把它挂在这里，
-/// 一旦有新命令（本机 ops 签发成功）立刻返回——比 10s 定时轮询快一个数量级。
+/// Maximum node long-poll hang time (seconds). When there are no commands, hang here;
+/// once a new command is issued (signed by local ops), return immediately — orders of
+/// magnitude faster than a 10s poll.
 const MAX_COMMAND_WAIT_SECS: u64 = 25;
-/// 即便没人唤醒也每这么久查一次库：兜住「命令不是本进程签发」的边角
-/// （多实例、运维手工插库），保证最长 2s 也能拿到。
+/// Even with no wake-up, re-check the DB this often: covers the edge case where
+/// the command wasn't issued by this process (multi-instance, manual DB inserts),
+/// guaranteeing commands are picked up within 2s at most.
 const COMMAND_RECHECK: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// 拉取某节点的待执行命令。`wait_secs > 0` 时为长轮询：
-/// 挂起直到有命令或超时（返回空列表）。
+/// Fetch pending commands for a node. With `wait_secs > 0`, long-poll: wait until
+/// there's a command or the timeout (returns empty list).
 ///
-/// 关键顺序是「先订阅、再查库」：这样查库与 await 之间落库的命令不会漏掉信号，
-/// 否则会出现「命令已入库、节点却睡满一个超时」的间隙。
+/// The critical order is "subscribe first, then query the DB": this way commands that
+/// land between the query and the await don't miss the signal, otherwise you'd get a
+/// gap where the command is already in the DB but the node sleeps through a full timeout.
 async fn collect_pending(
     state: &AppState,
     node_id: &str,
@@ -2962,7 +3202,8 @@ async fn collect_pending(
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
     let mut rx = state.command_signal.subscribe();
     loop {
-        // 每次查库都取当前时间：长轮询可能挂几秒，TTL 判断要跟着走
+        // Each DB query uses the current time: a long-poll may hang for several seconds,
+        // TTL judgment must move along
         let now_ns = zhiwei_common::Timestamp::now().unix_nano();
         let rows = state
             .storage
@@ -2978,15 +3219,16 @@ async fn collect_pending(
         }
         tokio::select! {
             _ = rx.changed() => {}
-            _ = tokio::time::sleep(remaining.min(COMMAND_RECHECK)) => {}
+            () = tokio::time::sleep(remaining.min(COMMAND_RECHECK)) => {}
         }
     }
 }
 
-/// 节点拉取待执行命令（请求签名）。返回 base64 的 Command protobuf，命令签名由节点校验。
+/// Node pulls pending commands (request signature). Returns base64-encoded Command
+/// protobuf; the node validates the command signature.
 ///
-/// `wait=<秒>`（可选，上限 [`MAX_COMMAND_WAIT_SECS`]）开启长轮询；不带则立即返回，
-/// 老版本节点行为不变。
+/// `wait=<seconds>` (optional, upper bound [`MAX_COMMAND_WAIT_SECS`]) enables long-polling;
+/// without it, returns immediately (legacy node behavior).
 async fn node_commands_handler(
     State(state): State<AppState>,
     method: axum::http::Method,
@@ -2994,7 +3236,9 @@ async fn node_commands_handler(
     headers: HeaderMap,
     axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
 ) -> Response {
-    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    let pq = uri
+        .path_and_query()
+        .map_or("/", hyper::http::uri::PathAndQuery::as_str);
     let (node_id, _node_pub) = match verify_node(&state, &headers, method.as_str(), pq, &[]).await {
         Ok(v) => v,
         Err((code, msg)) => return err(code, msg),
@@ -3003,10 +3247,14 @@ async fn node_commands_handler(
         return err(StatusCode::BAD_REQUEST, "node_id required");
     };
     if query_node_id != node_id.as_str() {
-        return err(StatusCode::BAD_REQUEST, "node_id 与签名主体不一致");
+        return err(
+            StatusCode::BAD_REQUEST,
+            "node_id does not match signature subject",
+        );
     }
-    // 一次合法的拉取 = 这个节点的控制循环还活着。签名的验过了才记，
-    // 否则伪造的请求能替别人的节点刷出「通道正常」。
+    // A legitimate pull = this node's control loop is still alive. Only recorded after
+    // signature verification passes — otherwise forged requests could mark someone
+    // else's node as "channel OK".
     state.control_polls.note(
         node_id.as_str(),
         zhiwei_common::Timestamp::now().unix_nano() / 1_000_000,
@@ -3044,7 +3292,7 @@ async fn node_commands_handler(
     }
 }
 
-/// 节点回执（请求签名）。只有签名主体本人能提交自己的回执。
+/// Node receipt (request signature). Only the signature subject itself can submit its own receipt.
 async fn command_result_handler(
     State(state): State<AppState>,
     method: axum::http::Method,
@@ -3053,7 +3301,9 @@ async fn command_result_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    let pq = uri
+        .path_and_query()
+        .map_or("/", hyper::http::uri::PathAndQuery::as_str);
     let (node_id, node_pub) = match verify_node(&state, &headers, method.as_str(), pq, &body).await
     {
         Ok(v) => v,
@@ -3070,13 +3320,17 @@ async fn command_result_handler(
         }
     };
     if result.command_id != id {
-        return err(StatusCode::BAD_REQUEST, "command_id 与路径不一致");
+        return err(StatusCode::BAD_REQUEST, "command_id does not match path");
     }
     if result.node_id != node_id.as_str() {
-        return err(StatusCode::BAD_REQUEST, "回执 node_id 与签名主体不一致");
+        return err(
+            StatusCode::BAD_REQUEST,
+            "receipt node_id does not match signature subject",
+        );
     }
 
-    // 回执由节点私钥签名：即使传输层被攻破，也无法伪造别人的执行结果
+    // Receipt is signed by the node's private key: even if the transport layer is compromised,
+    // no one can forge someone else's execution results
     {
         let mut unsigned = result.clone();
         let sig = zhiwei_common::Signature(std::mem::take(&mut unsigned.signature));
@@ -3088,11 +3342,15 @@ async fn command_result_handler(
             );
         }
         if zhiwei_common::KeyPair::verify(&node_pub, &preimage, &sig).is_err() {
-            return err(StatusCode::UNAUTHORIZED, "Receipt signature verification failed");
+            return err(
+                StatusCode::UNAUTHORIZED,
+                "Receipt signature verification failed",
+            );
         }
     }
 
-    // 回执只能写回自己名下的命令，避免用 A 的签名覆盖 B 的命令结果
+    // Receipts can only be written under your own commands, preventing A's signature from
+    // overwriting B's command results
     let owner = match state.storage.commands().owner_of(&id).await {
         Ok(owner) => owner,
         Err(e) => {
@@ -3104,8 +3362,13 @@ async fn command_result_handler(
     };
     match owner {
         Some(owner) if owner == node_id.as_str() => {}
-        Some(_) => return err(StatusCode::FORBIDDEN, "回执主体与命令归属不一致"),
-        None => return err(StatusCode::NOT_FOUND, "命令不存在"),
+        Some(_) => {
+            return err(
+                StatusCode::FORBIDDEN,
+                "receipt subject does not match command ownership",
+            )
+        }
+        None => return err(StatusCode::NOT_FOUND, "command does not exist"),
     }
 
     let now = zhiwei_common::Timestamp::now().unix_nano();
@@ -3122,7 +3385,7 @@ async fn command_result_handler(
         .await
     {
         Ok(()) => {
-            debug!(command_id = %id, ok = result.ok, "命令回执已记录");
+            debug!(command_id = %id, ok = result.ok, "command receipt recorded");
             (StatusCode::NO_CONTENT).into_response()
         }
         Err(e) => err(
@@ -3140,7 +3403,8 @@ struct ExecBody {
     params: serde_json::Value,
 }
 
-/// 控制台发起命令：转给 ops-server 签名后落库（见 crates/ops-server）。
+/// Console initiates a command: forward to ops-server for signing, then write to DB
+/// (see crates/ops-server).
 async fn exec_handler(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     if !read_auth_ok(&state, &headers).await {
         return err(
@@ -3153,7 +3417,7 @@ async fn exec_handler(State(state): State<AppState>, headers: HeaderMap, body: B
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
     };
 
-    // 节点必须存在，避免给未知节点签发命令
+    // Node must exist; avoid issuing commands to unknown nodes
     let node = zhiwei_common::NodeId::from_string(b.node_id.clone());
     match state.storage.nodes().find_by_id(&node).await {
         Ok(Some(_)) => {}
@@ -3161,7 +3425,7 @@ async fn exec_handler(State(state): State<AppState>, headers: HeaderMap, body: B
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("lookup: {e}")),
     }
 
-    // 转给 ops-server 签名（localhost，明文 HTTP；ops 是独立进程、持有签名私钥）
+    // Forward to ops-server for signing (localhost, plain HTTP; ops is a separate process holding the signing private key)
     let payload = serde_json::json!({
         "node_id": b.node_id,
         "action": b.action,
@@ -3174,15 +3438,15 @@ async fn exec_handler(State(state): State<AppState>, headers: HeaderMap, body: B
             Json(serde_json::json!({ "command_id": id })),
         )
             .into_response(),
-        // ops 的 4xx 是「动作/参数被拒」，原因要原样透给控制台——
-        // 否则界面上只会看到「服务不可用」，用户改不了参数只会反复重试
+        // ops's 4xx means "action/params rejected"; the reason must be passed through to the console verbatim —
+        // otherwise the UI just shows "service unavailable", and the user can't fix the params, only retry
         Err(OpsSignError::Rejected { status, message }) => err(
             StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST),
             message,
         ),
         Err(OpsSignError::Unavailable(detail)) => err(
             StatusCode::SERVICE_UNAVAILABLE,
-            format!("ops-server 不可用：{detail}"),
+            format!("ops-server unavailable: {detail}"),
         ),
     }
 }
@@ -3199,18 +3463,19 @@ struct CommandHistoryView {
     ttl_seconds: i64,
     result_ok: Option<bool>,
     result_error: Option<String>,
-    /// 产物以 UTF-8 文本返回（日志之类）
+    /// Payload returned as UTF-8 text (e.g. logs)
     result_text: Option<String>,
     result_received_at_unix_nano: Option<i64>,
 }
 
-/// pending 但已过 TTL → 展示成 `expired`。
+/// pending but past TTL → display as `expired`.
 ///
-/// 「命令过期」原先只有节点侧在判（`node-agent/src/control.rs::verify`），monitor
-/// 从不写 `expired`，于是历史里永远显示「还在路上」，运营看不出它早就废了——而默认
-/// TTL 只有 60s（ops-server `--ttl`）。这里在展示层补齐，口径与
-/// `zhiwei_storage::commands_repo` 的 `PENDING_LIVE_SQL` 一致：`ttl_seconds <= 0`
-/// 视为不过期。
+/// "Command expiry" was previously only checked on the node side
+/// (`node-agent/src/control.rs::verify`); monitor never wrote `expired`, so history
+/// always showed "still in transit", and operators couldn't see it had long since been
+/// discarded — yet the default TTL is only 60s (ops-server `--ttl`). Filled in here
+/// on the display side, same criterion as `zhiwei_storage::commands_repo`'s
+/// `PENDING_LIVE_SQL`: `ttl_seconds <= 0` means never expires.
 fn effective_state(state: &str, issued_at_unix_nano: i64, ttl_seconds: i64, now_ns: i64) -> String {
     let overdue = ttl_seconds > 0
         && issued_at_unix_nano.saturating_add(ttl_seconds.saturating_mul(1_000_000_000)) <= now_ns;
@@ -3221,7 +3486,8 @@ fn effective_state(state: &str, issued_at_unix_nano: i64, ttl_seconds: i64, now_
     }
 }
 
-/// 命令行 → 控制台视图。history 与单条查询共用，字段口径只有这一处。
+/// Command row → console view. Shared between history and single-record query; this is
+/// the only place field semantics are defined.
 fn command_view(
     c: zhiwei_storage::commands_repo::CommandRow,
     node_hostname: String,
@@ -3257,8 +3523,9 @@ async fn command_history_handler(State(state): State<AppState>, headers: HeaderM
         Ok(r) => r,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("history: {e}")),
     };
-    // 过期的 pending 要在展示上落成 expired：TTL 只有 60s，而这些行只会在节点
-    // 下次拉取时才被落库改状态，节点不再拉就永远显示「还在路上」。
+    // Expired pending rows should display as expired: TTL is only 60s, and these rows only
+    // change state when the node next polls; if the node never polls again, they stay
+    // "still in transit" forever.
     let now_ns = zhiwei_common::Timestamp::now().unix_nano();
     let nodes = state.storage.nodes().list_all().await.unwrap_or_default();
     let name_of = |id: &str| {
@@ -3279,10 +3546,12 @@ async fn command_history_handler(State(state): State<AppState>, headers: HeaderM
     Json(out).into_response()
 }
 
-/// `GET /v1/commands/:id` —— 单条命令的当前状态。
+/// `GET /v1/commands/:id` — current state of a single command.
 ///
-/// 控制台等一条命令的回执时只关心这一条：拉整段 history（100 条）既重又容易被
-/// 别的动作干扰，单条查询让轮询间隔可以压到几百毫秒，点完动作几秒内就能看到结果。
+/// When the console is waiting for a command receipt, it only cares about this one:
+/// pulling the whole history (100 rows) is heavy and easily disturbed by other actions;
+/// single-record queries let the polling interval drop to a few hundred milliseconds,
+/// so results appear within seconds of clicking the action.
 async fn command_detail_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -3317,28 +3586,30 @@ async fn command_detail_handler(
     .into_response()
 }
 
-/// 把签名请求转给 ops-server（localhost）
-/// 转发签名请求失败的两类原因：ops 明确拒绝（4xx，可展示给用户）
-/// 与链路问题（连不上 / 超时 / 5xx，属于「服务不可用」）。
-pub(crate) enum OpsSignError {
+/// Forward the signing request to ops-server (localhost)
+/// Two failure modes when forwarding the signing request: ops explicitly rejects (4xx,
+/// showable to user) and link problems (can't connect / timeout / 5xx, classified as
+/// "service unavailable").
+pub enum OpsSignError {
     Rejected { status: u16, message: String },
     Unavailable(String),
 }
 
 impl OpsSignError {
-    /// 只给日志用的短描述（面向用户的文案走上面两类的分支处理）
+    /// Short description for logs only (user-facing text handled by the two branches above)
     pub(crate) fn message(&self) -> String {
         match self {
-            OpsSignError::Rejected { message, .. } => message.clone(),
-            OpsSignError::Unavailable(detail) => detail.clone(),
+            Self::Rejected { message, .. } => message.clone(),
+            Self::Unavailable(detail) => detail.clone(),
         }
     }
 }
 
-/// 发起一条命令：转给 ops-server 签名，成功后唤醒等待中的节点长轮询。
+/// Issue a command: forward to ops-server for signing, then wake any node long-polls.
 ///
-/// 所有写操作的必须入口——少走这一处，节点就得等下一次兜底查库才拿到命令。
-pub(crate) async fn sign_command(
+/// The mandatory entry for all write actions — bypassing it forces nodes to wait for the
+/// next fallback DB query before getting the command.
+pub async fn sign_command(
     state: &AppState,
     payload: &serde_json::Value,
 ) -> Result<String, OpsSignError> {
@@ -3347,17 +3618,14 @@ pub(crate) async fn sign_command(
     Ok(id)
 }
 
-pub(crate) async fn ops_sign(
-    endpoint: &str,
-    payload: &serde_json::Value,
-) -> Result<String, OpsSignError> {
+pub async fn ops_sign(endpoint: &str, payload: &serde_json::Value) -> Result<String, OpsSignError> {
+    use http_body_util::BodyExt;
     let authority = endpoint.strip_prefix("http://").ok_or_else(|| {
-        OpsSignError::Unavailable("ops endpoint 仅支持 http://（本机回环）".into())
+        OpsSignError::Unavailable("ops endpoint only supports http:// (loopback)".into())
     })?;
-    let (host_port, path) = match authority.find('/') {
-        Some(i) => (&authority[..i], &authority[i..]),
-        None => (authority, "/exec"),
-    };
+    let (host_port, path) = authority
+        .find('/')
+        .map_or((authority, "/exec"), |i| (&authority[..i], &authority[i..]));
     let (host, port) = match host_port.split_once(':') {
         Some((h, p)) => (h, p.parse::<u16>().unwrap_or(8444)),
         None => (host_port, 8444),
@@ -3370,8 +3638,8 @@ pub(crate) async fn ops_sign(
     .await
     .map_err(|_| {
         OpsSignError::Unavailable(format!(
-            "连不上 {endpoint}：3 秒内没有响应。自建部署请确认 zhiwei-ops 在跑；\
-             容器 / 托管平台部署请用镜像自带的 entrypoint。"
+            "can't reach {endpoint}: no response within 3 seconds. For self-hosted deployments, ensure zhiwei-ops is running;\
+             for container / managed-platform deployments, use the bundled image entrypoint."
         ))
     })?
     .map_err(|e| OpsSignError::Unavailable(ops_connect_error_hint(&e, endpoint)))?;
@@ -3379,7 +3647,7 @@ pub(crate) async fn ops_sign(
     let io = hyper_util::rt::TokioIo::new(stream);
     let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
         .await
-        .map_err(|e| OpsSignError::Unavailable(format!("握手失败：{e}")))?;
+        .map_err(|e| OpsSignError::Unavailable(format!("handshake failed: {e}")))?;
     tokio::spawn(async move {
         let _ = conn.await;
     });
@@ -3391,24 +3659,23 @@ pub(crate) async fn ops_sign(
         .header("Host", host)
         .header("Content-Type", "application/json")
         .body(http_body_util::Full::new(bytes::Bytes::from(body)))
-        .map_err(|e| OpsSignError::Unavailable(format!("构造请求失败：{e}")))?;
+        .map_err(|e| OpsSignError::Unavailable(format!("failed to build request: {e}")))?;
 
-    let res = tokio::time::timeout(std::time::Duration::from_secs(3), sender.send_request(req))
+    let resp = tokio::time::timeout(std::time::Duration::from_secs(3), sender.send_request(req))
         .await
-        .map_err(|_| OpsSignError::Unavailable("请求超时".into()))?
-        .map_err(|e| OpsSignError::Unavailable(format!("请求失败：{e}")))?;
-    let status = res.status();
-    use http_body_util::BodyExt;
-    let bytes = res
+        .map_err(|_| OpsSignError::Unavailable("request timed out".into()))?
+        .map_err(|e| OpsSignError::Unavailable(format!("request failed: {e}")))?;
+    let status = resp.status();
+    let bytes = resp
         .into_body()
         .collect()
         .await
-        .map_err(|e| OpsSignError::Unavailable(format!("读取响应失败：{e}")))?
+        .map_err(|e| OpsSignError::Unavailable(format!("failed to read response: {e}")))?
         .to_bytes();
     if !status.is_success() {
         let text = String::from_utf8_lossy(&bytes).trim().to_string();
         if status.is_client_error() {
-            // ops 的错误体形如 {"error":"..."}，取出来原样展示
+            // ops's error body looks like {"error":"..."}, extract it and display verbatim
             let message = serde_json::from_slice::<serde_json::Value>(&bytes)
                 .ok()
                 .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
@@ -3421,15 +3688,20 @@ pub(crate) async fn ops_sign(
         return Err(OpsSignError::Unavailable(format!("HTTP {status}: {text}")));
     }
     let v: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|e| OpsSignError::Unavailable(format!("响应不是 JSON：{e}")))?;
+        .map_err(|e| OpsSignError::Unavailable(format!("response is not JSON: {e}")))?;
     v.get("command_id")
         .and_then(|x| x.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| OpsSignError::Unavailable("ops 响应缺少 command_id".into()))
+        .map(std::string::ToString::to_string)
+        .ok_or_else(|| OpsSignError::Unavailable("ops response missing command_id".into()))
 }
 
 #[cfg(test)]
 mod series_tests {
+    // Test asserts exact rate deltas (e.g. `(300 - 100) / (1 - 0) == 200.0`).
+    // Floating-point equality is intentional — inputs are integer-valued by
+    // construction, so the rate is exactly representable.
+    #![allow(clippy::float_cmp)]
+
     use super::*;
     use zhiwei_proto::telemetry::{Metric, NetworkInterface};
 
@@ -3443,7 +3715,7 @@ mod series_tests {
                 .map(|(name, value)| Metric {
                     name: name.into(),
                     value,
-                    labels: Default::default(),
+                    labels: std::collections::HashMap::default(),
                 })
                 .collect(),
             network: net
@@ -3466,20 +3738,20 @@ mod series_tests {
     fn extract_metric_prefers_metrics_then_derives_network_sum() {
         let b = batch_with(vec![("host.cpu.usage", 12.5)], vec![(100, 200), (300, 400)]);
         assert_eq!(extract_metric(&b, "host.cpu.usage"), Some(12.5));
-        // 网络累计量不在 metrics[] 里，跨网卡求和
+        // Network cumulative values aren't in metrics[], sum across NICs
         assert_eq!(extract_metric(&b, "host.net.rx_bytes"), Some(400.0));
         assert_eq!(extract_metric(&b, "host.net.tx_bytes"), Some(600.0));
         assert_eq!(extract_metric(&b, "host.disk.total_bytes"), None);
 
-        // 没有网卡的节点：不该返回 0，而是 None（图上留空，而不是画一条零线）
+        // Nodes without NICs: should not return 0, but None (leave the chart blank, not a zero line)
         let empty = batch_with(vec![], vec![]);
         assert_eq!(extract_metric(&empty, "host.net.rx_bytes"), None);
     }
 
     #[test]
     fn extract_metric_derives_memory_usage_percent() {
-        // 播种规则「内存使用率过高」用的就是 host.mem.usage，而节点只上报
-        // used/total 两个字节数——不在这里派生，那条规则永远不会触发。
+        // The seeded rule "memory usage too high" uses host.mem.usage, but nodes only report
+        // used/total in bytes — without derivation here, that rule would never fire.
         let b = batch_with(
             vec![
                 ("host.mem.used_bytes", 8_000_000_000.0),
@@ -3489,7 +3761,7 @@ mod series_tests {
         );
         assert_eq!(extract_metric(&b, "host.mem.usage"), Some(50.0));
 
-        // 节点已上报真值时就以真值优先，不覆盖
+        // When the node has already reported a real value, the real value wins — no override
         let reported = batch_with(
             vec![
                 ("host.mem.usage", 42.0),
@@ -3500,7 +3772,7 @@ mod series_tests {
         );
         assert_eq!(extract_metric(&reported, "host.mem.usage"), Some(42.0));
 
-        // total 缺失或为 0：返回 None，而不是编一个数出来
+        // total missing or 0: return None, don't fabricate a number
         let only_used = batch_with(vec![("host.mem.used_bytes", 123.0)], vec![]);
         assert_eq!(extract_metric(&only_used, "host.mem.usage"), None);
         let zero_total = batch_with(
@@ -3521,11 +3793,11 @@ mod series_tests {
         assert_eq!(rising[0].v, 200.0);
         assert_eq!(rising[1].v, 200.0);
 
-        // 计数器回绕 / 节点重启：负增量按 0，不画向下的尖刺
+        // Counter wrap / node restart: negative increments clamped to 0, no downward spike
         let reset = to_rate(&[(0, 9_000.0), (1_000, 100.0)]);
         assert_eq!(reset[0].v, 0.0);
 
-        // 单点无法求差 → 空序列（图上是空状态，而不是 0）
+        // Single point can't compute a delta → empty sequence (empty state on the chart, not 0)
         assert!(to_rate(&[(0, 1.0)]).is_empty());
     }
 
@@ -3557,14 +3829,14 @@ mod enroll_ca_tests {
 
     #[test]
     fn self_hosted_hands_the_local_ca_to_the_node() {
-        // 本进程终结 TLS：monitor 的证书就是这个 CA 签的，节点该 pin 它
+        // This process terminates TLS: the monitor certificate is signed by this CA, node should pin it
         assert_eq!(enroll_ca_pem(LOCAL_CA, true), LOCAL_CA);
     }
 
     #[test]
     fn edge_terminated_tls_hands_nothing_so_the_node_uses_system_roots() {
-        // Render / Railway：边缘用的是正经证书，本地 CA 与它无关。
-        // 下发了就会变成「enroll 成功、之后每个请求都 TLS 校验失败」。
+        // Render / Railway: edge uses proper certificates, local CA is irrelevant.
+        // Issuing it would become "enroll succeeds, every subsequent request fails TLS validation".
         assert_eq!(enroll_ca_pem(LOCAL_CA, false), "");
     }
 }
@@ -3575,12 +3847,12 @@ mod bootstrap_token_tests {
 
     #[test]
     fn static_token_never_expires_and_survives_repeated_checks() {
-        // ZHIWEI_BOOTSTRAP_TOKEN 走这条路：托管平台免费层没法去抢
-        // 「启动日志里 10 分钟」的一次性 token，得有个长期有效的。
+        // ZHIWEI_BOOTSTRAP_TOKEN goes this route: managed-platform free tiers can't race to grab
+        // a "10-minute-from-startup" one-shot token, so we need a long-lived one.
         let tokens = BootstrapTokens::default();
         tokens.add_static("zhi-bt-fixed-token-0123456789".into());
 
-        // 反复 check：过期分支会 remove，静态令牌不能因此消失。
+        // Repeated check: the expiry branch removes; static tokens must not disappear.
         for _ in 0..3 {
             assert!(tokens.check("zhi-bt-fixed-token-0123456789"));
         }
@@ -3589,33 +3861,34 @@ mod bootstrap_token_tests {
 
     #[tokio::test]
     async fn static_token_keeps_the_ephemeral_one_from_being_minted() {
-        // 设了固定令牌，启动时就不该再生成/打印一个一次性 token。
+        // With a fixed token set, no ephemeral one-shot token should be generated/printed at startup.
         let tokens = BootstrapTokens::default();
-        assert!(tokens.is_empty().await);
+        assert!(tokens.is_empty());
         tokens.add_static("zhi-bt-fixed-token-0123456789".into());
-        assert!(!tokens.is_empty().await);
+        assert!(!tokens.is_empty());
     }
 
     #[tokio::test]
     async fn one_shot_token_still_expires() {
-        // 回归：一次性 token 的 10 分钟 TTL 不能被上面的改动弄丢。
+        // Regression: the 10-minute TTL on one-shot tokens must not be lost by the changes above.
         let tokens = BootstrapTokens::default();
-        tokens.add("zhi-bt-short-lived".into(), 0).await; // 立刻过期
+        tokens.add("zhi-bt-short-lived".into(), 0); // expire immediately
         assert!(!tokens.check("zhi-bt-short-lived"));
     }
 }
 
-/// `GET /v1/help` —— 帮助页 markdown 内容。
+/// `GET /v1/help` — help page markdown content.
 ///
-/// 鉴权：admin token 或 AI token 都可读（AI 客户端如果要做 onboarding 也用得到）。
-/// 没找到 help 文件时返回空 body，UI 端展示占位文案。
+/// Auth: admin token or AI token both allowed (AI clients doing onboarding may also need it).
+/// When the help file is not found, return empty body; the UI side shows placeholder text.
 ///
 /// Language selection (by priority): `?locale=` URL param → `Accept-Language`
 /// header → default locale (en-US). Unknown locales fall back silently;
 /// missing translations return 200 with the default locale's markdown.
 ///
-/// 正文里的 `{{BASE_URL}}` 会换成**控制台当前的访问地址**（scheme + host，
-/// 与 enroll 命令同源），用户照帮助页复制命令就能直接跑，不必手改示例域名。
+/// The `{{BASE_URL}}` in the body is replaced with **the console's current access address**
+/// (scheme + host, same origin as the enroll command); users can copy commands directly
+/// from the help page without manually editing example domains.
 async fn help_handler(
     State(state): State<AppState>,
     Query(q): Query<HelpQuery>,
@@ -3651,28 +3924,31 @@ struct HelpQuery {
     locale: Option<String>,
 }
 
-/// 从 `Accept-Language` 头挑最靠前的、能解析的 locale 段（例：
-/// `"zh-CN,zh;q=0.9,en;q=0.8"` → 第一个能识别的）。空值 / 解析失败都返回 None，
-/// 由上层回落。
+/// Pick the first recognizable locale from an `Accept-Language` header (e.g.
+/// `"zh-CN,zh;q=0.9,en;q=0.8"` → `"zh-CN"`). Empty / unparseable values
+/// return None and let the caller fall back.
+///
+/// Tags arrive in arbitrary casing (`zh-CN`, `zh-cn`, `en`, `en-GB`) but the
+/// help-content lookups are exact-match against canonical keys, so case-fold
+/// before matching instead of returning the raw tag. Unknown locales pass
+/// through lower-cased; the caller's lookup misses and falls back.
 fn parse_accept_language(value: &str) -> Option<String> {
     for part in value.split(',') {
         let tag = part.split(';').next().unwrap_or("").trim();
         if tag.is_empty() {
             continue;
         }
-        // Normalize `en` to `en-US`. Unknown locales fall through to the caller,
-        // which falls back to en-US.
         let lowered = tag.to_ascii_lowercase();
-        let normalized: &str = match lowered.as_str() {
-            "en" | "en-us" | "en-uk" | "en-gb" => "en-US",
-            other => other,
-        };
-        return Some(normalized.to_string());
+        return Some(match lowered.as_str() {
+            "en" | "en-us" | "en-uk" | "en-gb" => "en-US".to_string(),
+            "zh" | "zh-cn" | "zh-hans" | "zh-sg" => "zh-CN".to_string(),
+            _ => lowered,
+        });
     }
     None
 }
 
-/// 帮助页里代表「控制台地址」的占位符（见 `assets/help.md`）。
+/// Placeholder representing the "console address" in the help page (see `assets/help.md`).
 const BASE_URL_PLACEHOLDER: &str = "{{BASE_URL}}";
 
 #[cfg(test)]
@@ -3682,7 +3958,7 @@ mod help_locale_tests {
 
     #[test]
     fn parse_accept_language_picks_first_known() {
-        // 第一个 tag 就是 zh-CN，应该原样挑出来。
+        // First tag is zh-CN, should be picked and kept canonical.
         assert_eq!(
             parse_accept_language("zh-CN,zh;q=0.9,en;q=0.8"),
             Some("zh-CN".to_string()),
@@ -3694,12 +3970,17 @@ mod help_locale_tests {
     }
 
     #[test]
-    fn parse_accept_language_normalizes_short_tags() {
-        // 缩写 zh / en 也会补成 zh-CN / en-US。
+    fn parse_accept_language_canonicalizes_case_and_short_tags() {
+        // Browsers send `zh-cn` / `zh` / `en`; all must map to the canonical
+        // keys the help lookup uses, or the lookup misses and falls back.
+        assert_eq!(
+            parse_accept_language("zh-cn,zh;q=0.9"),
+            Some("zh-CN".to_string())
+        );
         assert_eq!(parse_accept_language("zh"), Some("zh-CN".to_string()));
-        assert_eq!(parse_accept_language("en-GB"), Some("en-US".to_string()));
-        // 未知 locale 透传（小写化），由上层回落——snapshot_for 在 map
-        // 里找不到时会用默认 locale，不会因为大小写问题出错。
+        assert_eq!(parse_accept_language("en"), Some("en-US".to_string()));
+        assert_eq!(parse_accept_language("EN-GB"), Some("en-US".to_string()));
+        // Unknown locales pass through lower-cased; the caller falls back.
         assert_eq!(
             parse_accept_language("fr-FR,en;q=0.5"),
             Some("fr-fr".to_string()),
@@ -3709,7 +3990,7 @@ mod help_locale_tests {
 
     #[test]
     fn help_query_default_is_none() {
-        // `?` 后面没有 locale 时应允许直接 deserialize。
+        // When `?` has no locale, direct deserialization should still work.
         let q: HelpQuery = serde_json::from_str("{}").unwrap();
         assert!(q.locale.is_none());
     }
@@ -3727,7 +4008,7 @@ mod help_locale_tests {
 
 // ---------- AI Tokens ----------
 
-/// `GET /v1/ai-tokens` —— 列出所有 AI token 元信息（不含明文）。
+/// `GET /v1/ai-tokens` — list all AI token metadata (excluding plaintext).
 async fn list_ai_tokens_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if !read_auth_ok(&state, &headers).await {
         return err(
@@ -3744,21 +4025,22 @@ async fn list_ai_tokens_handler(State(state): State<AppState>, headers: HeaderMa
     }
 }
 
-/// `POST /v1/ai-tokens` —— 创建 AI token。返回明文 token（**仅这一次**）。
+/// `POST /v1/ai-tokens` — create an AI token. Returns the plaintext token (**only this once**).
 async fn create_ai_token_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    #[derive(Deserialize)]
+    struct Body {
+        name: String,
+    }
+    use base64::Engine;
     if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
         );
-    }
-    #[derive(Deserialize)]
-    struct Body {
-        name: String,
     }
     let b: Body = match serde_json::from_slice(&body) {
         Ok(b) => b,
@@ -3766,17 +4048,16 @@ async fn create_ai_token_handler(
     };
     let name = b.name.trim();
     if name.is_empty() {
-        return err(StatusCode::BAD_REQUEST, "name 不能为空");
+        return err(StatusCode::BAD_REQUEST, "name cannot be empty");
     }
     if name.chars().count() > 64 {
-        return err(StatusCode::BAD_REQUEST, "name 过长（>64 字符）");
+        return err(StatusCode::BAD_REQUEST, "name too long (>64 characters)");
     }
 
-    // 生成 32 字节熵的明文 token → base64url 编码。
-    // 前缀 `ait_` 与 bootstrap token 的 `zhi-bt-` 区分，便于 grep。
+    // Generate a 32-byte entropy plaintext token → base64url encoded.
+    // Prefix `ait_` distinguishes from the bootstrap token's `zhi-bt-`, easier to grep.
     let mut buf = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut buf);
-    use base64::Engine;
     let token = format!(
         "ait_{}",
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
@@ -3796,7 +4077,7 @@ async fn create_ai_token_handler(
             "name": row.name,
             "token": token,
             "created_at_unix_nano": row.created_at_unix_nano,
-            "warning": "明文 token 仅返回一次，请立即复制保存",
+            "warning": "plaintext token is shown only once, please copy and save it now",
         }))
         .into_response(),
         Err(e) => err(
@@ -3806,7 +4087,7 @@ async fn create_ai_token_handler(
     }
 }
 
-/// `DELETE /v1/ai-tokens/:id` —— 撤销。立即生效（下次请求 401）。
+/// `DELETE /v1/ai-tokens/:id` — revoke. Takes effect right away (next request 401).
 async fn delete_ai_token_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -3821,7 +4102,10 @@ async fn delete_ai_token_handler(
     let now_unix_nano = zhiwei_common::Timestamp::now().unix_nano();
     match state.storage.ai_tokens().revoke(&id, now_unix_nano).await {
         Ok(true) => Json(serde_json::json!({ "ok": true, "id": id })).into_response(),
-        Ok(false) => err(StatusCode::NOT_FOUND, "id 不存在或已撤销"),
+        Ok(false) => err(
+            StatusCode::NOT_FOUND,
+            "id does not exist or has been revoked",
+        ),
         Err(e) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("revoke ai token: {e}"),
@@ -3829,9 +4113,9 @@ async fn delete_ai_token_handler(
     }
 }
 
-// ---------- Enroll Tokens（运行时入网命令） ----------
+// ---------- Enroll Tokens (runtime enrollment commands) ----------
 
-/// `GET /v1/enroll-tokens` —— 列出当前所有未过期的入网令牌元信息。
+/// `GET /v1/enroll-tokens` — list metadata of all currently non-expired enrollment tokens.
 async fn list_enroll_tokens_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if !read_auth_ok(&state, &headers).await {
         return err(
@@ -3844,51 +4128,57 @@ async fn list_enroll_tokens_handler(State(state): State<AppState>, headers: Head
 
 #[derive(Deserialize)]
 struct CreateEnrollTokenBody {
-    /// TTL 秒数；默认 86400 (24h)。最长 7 天。
+    /// TTL in seconds; default 86400 (24h). Maximum 7 days.
     #[serde(default)]
     ttl_secs: Option<u64>,
-    /// 可选 label；为空也合法。
+    /// Optional label; empty is also valid.
     #[serde(default)]
     label: Option<String>,
 }
 
-/// 连不上 ops-server 时给控制台看的文案。
+/// Console-facing message when ops-server is unreachable.
 ///
-/// 「没起 ops-server」是部署形态问题，原始 OS 报错（`Connection refused
-/// (os error 111)`）对使用者毫无帮助，所以这里直接把「该做什么」写进文案；
-/// 调用方已经加了「ops-server 不可用：」前缀，这里别再复述。
+/// "ops-server not started" is a deployment shape issue; the raw OS error
+/// (`Connection refused (os error 111)`) is no help to the user, so the
+/// "what to do" goes directly into the text.
+/// The caller already prepends "ops-server unavailable: "; don't repeat it here.
 fn ops_connect_error_hint(e: &std::io::Error, endpoint: &str) -> String {
     if is_connection_refused(e) {
         format!(
-            "连不上 {endpoint}（{e}）：该地址上没有进程在监听。\
-             自建部署请启动 zhiwei-ops；容器 / 托管平台部署请用镜像自带的 \
-             entrypoint（它会在同一容器里一并拉起 zhiwei-ops）。"
+            "can't reach {endpoint} ({e}): no process is listening on that address.\
+             For self-hosted deployments, start zhiwei-ops; for container / managed-platform\
+             deployments, use the bundled image entrypoint (it will start zhiwei-ops\
+             in the same container)."
         )
     } else {
         format!(
-            "连不上 {endpoint}（{e}）：自建部署请确认 zhiwei-ops 在跑；\
-             容器 / 托管平台部署请用镜像自带的 entrypoint。"
+            "can't reach {endpoint} ({e}): for self-hosted deployments, ensure zhiwei-ops\
+             is running; for container / managed-platform deployments, use the bundled\
+             image entrypoint."
         )
     }
 }
 
-/// 判断「对端没有监听」。
+/// Determine "the other end isn't listening".
 ///
-/// 光看 `ErrorKind` 不够：解析主机名 / 经过中间层时 kind 会掉成
-/// `Uncategorized`，只剩文案里的 "Connection refused" 还认得出来——线上
-/// 报回来的正是 `连接失败：Connection refused (os error 111)` 这种形态，
-/// 只认 kind 就漏成了没头没尾的原始报错。errno 111 是 Linux 的 ECONNREFUSED。
+/// Looking at `ErrorKind` alone isn't enough: when resolving hostnames / going through
+/// intermediate layers, the kind degrades to `Uncategorized`, leaving only the
+/// "Connection refused" in the text recognizable — and what production logs report
+/// is `connection failed: Connection refused (os error 111)`. Relying only on kind
+/// misses these and leaves the user with raw, headless errors. errno 111 is
+/// Linux's ECONNREFUSED.
 fn is_connection_refused(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::ConnectionRefused
         || e.raw_os_error() == Some(111)
         || e.to_string().contains("Connection refused")
 }
 
-/// 节点在「给人看」的语境里用的名字：设了别名就用别名，否则退回主机名。
+/// The name used for a node in "human-facing" contexts: alias if set, otherwise the hostname.
 ///
-/// 告警文案、通知、待办都用它——主机名常常是 `VM-16-12-opencloudos` 这种，
-/// 用户看不出是哪台机器；别名是用户自己起的「北京入口」。
-pub(crate) fn node_display_name(alias: &str, hostname: &str) -> String {
+/// Used by alert text, notifications, todos — hostnames are often auto-generated
+/// names like `ip-10-0-0-5.ec2.internal` that don't tell the user which machine
+/// it is; aliases are user-chosen like "Beijing Edge".
+pub fn node_display_name(alias: &str, hostname: &str) -> String {
     let alias = alias.trim();
     if alias.is_empty() {
         hostname.to_string()
@@ -3897,11 +4187,12 @@ pub(crate) fn node_display_name(alias: &str, hostname: &str) -> String {
     }
 }
 
-/// 控制台的对外访问地址（scheme + host），从请求头推断。
+/// Console's external access address (scheme + host), inferred from request headers.
 ///
-/// enroll 命令与帮助页共用这一处：两处给出的地址必须一致，否则用户照帮助页
-/// 粘命令会因为地址不对而连错。挂在 nginx / 托管平台后面时优先
-/// `X-Forwarded-Proto`，其余回退见 [`enroll_url_scheme`]。
+/// Shared between the enroll command and the help page: the addresses they emit must
+/// match, otherwise commands copied from the help page connect to the wrong place.
+/// When behind nginx / a managed platform, prefer `X-Forwarded-Proto`; other fallbacks
+/// see [`enroll_url_scheme`].
 fn public_base_url(headers: &HeaderMap, tls_terminated_locally: bool) -> String {
     let scheme = enroll_url_scheme(headers, tls_terminated_locally);
     let host = headers
@@ -3911,27 +4202,29 @@ fn public_base_url(headers: &HeaderMap, tls_terminated_locally: bool) -> String 
     format!("{scheme}://{host}")
 }
 
-/// 生成入网命令时该用 http 还是 https。
+/// Whether the URL scheme in the generated enroll command should be http or https.
 ///
-/// 1) `X-Forwarded-Proto` 最权威——只有边缘知道对外那一段是明文还是 TLS；
-/// 2) 没有它：本进程自己终结 TLS → https；
-/// 3) 本进程是明文 HTTP，且 Host 是回环 / 内网地址 → http。
+/// 1) `X-Forwarded-Proto` is the most authoritative — only the edge knows whether
+///    the outward leg is plaintext or TLS;
+/// 2) Without it: this process terminates TLS itself → https;
+/// 3) This process is plain HTTP, and Host is loopback / private IP → http.
 ///
-/// 第 3 条专治「内网 IP + 明文」的自建部署：以前一律猜 https，控制台给出的
-/// 命令是 `https://10.0.0.5:8443/install-node.sh`，照着执行必然连不上。
-/// 公网域名不在第 3 条范围内（仍猜 https）：托管平台边缘几乎总会给
-/// `X-Forwarded-Proto`，而它没给的时候「对外是 https」的可能性更大。
+/// Rule 3 specifically targets "private IP + plaintext" self-hosted deployments:
+/// previously always guessed https, so the console gave commands like
+/// `https://10.0.0.5:8443/install-node.sh` which obviously can't connect.
+/// Public domains aren't covered by rule 3 (still guess https): managed-platform
+/// edges almost always send `X-Forwarded-Proto`, and when they don't, "external is https"
+/// is the more likely scenario.
 fn enroll_url_scheme(headers: &HeaderMap, tls_terminated_locally: bool) -> &'static str {
     if let Some(v) = headers
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
     {
-        // 可能是 "https, http" 这种列表，取第一个
+        // May be a list like "https, http"; take the first segment
         let first = v.split(',').next().unwrap_or("").trim();
         if !first.is_empty() {
             return match first {
                 "http" => "http",
-                "https" => "https",
                 _ => "https",
             };
         }
@@ -3950,27 +4243,31 @@ fn enroll_url_scheme(headers: &HeaderMap, tls_terminated_locally: bool) -> &'sta
     }
 }
 
-/// Host 头（可带端口）是不是回环 / 内网 / mDNS 地址。
+/// Whether the Host header (may include port) is a loopback / private / mDNS address.
 fn host_is_local(host: &str) -> bool {
     let bare = match host.rsplit_once(':') {
-        // IPv6 字面量形如 [::1]:8443，去掉端口后还要剥掉方括号
+        // IPv6 literal looks like [::1]:8443; after stripping the port, also strip the brackets
         Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) => h,
         _ => host,
     };
     let bare = bare.trim_start_matches('[').trim_end_matches(']');
-    if bare.eq_ignore_ascii_case("localhost") || bare.ends_with(".local") {
+    let is_mdns = bare
+        .rsplit_once('.')
+        .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("local"));
+    if bare.eq_ignore_ascii_case("localhost") || is_mdns {
         return true;
     }
-    match bare.parse::<std::net::IpAddr>() {
-        Ok(ip) => match ip {
-            std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
-            std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unique_local(),
-        },
-        Err(_) => false,
-    }
+    bare.parse::<std::net::IpAddr>().is_ok_and(|ip| match ip {
+        std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => {
+            // `is_unique_local` is stable since 1.84; project MSRV is 1.75, so inline the fc00::/7 check.
+            let octets = v6.octets();
+            v6.is_loopback() || (octets[0] & 0xfe) == 0xfc
+        }
+    })
 }
 
-/// `POST /v1/enroll-tokens` —— 创建一个临时入网令牌，返回完整 enroll 命令。
+/// `POST /v1/enroll-tokens` — create a temporary enrollment token and return the full enroll command.
 async fn create_enroll_token_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -3988,40 +4285,41 @@ async fn create_enroll_token_handler(
     };
     let ttl_secs = b.ttl_secs.unwrap_or(86_400);
     if ttl_secs == 0 || ttl_secs > 7 * 24 * 3600 {
-        return err(StatusCode::BAD_REQUEST, "ttl_secs 必须在 1..=604800");
+        return err(StatusCode::BAD_REQUEST, "ttl_secs must be in 1..=604800");
     }
     let label = b.label.unwrap_or_default().trim().to_string();
     if label.chars().count() > 64 {
-        return err(StatusCode::BAD_REQUEST, "label 过长（>64 字符）");
+        return err(StatusCode::BAD_REQUEST, "label too long (>64 characters)");
     }
 
     let token = BootstrapTokens::mint();
     state
         .bootstrap_tokens
-        .add_with_label(token.clone(), ttl_secs, label.clone())
-        .await;
+        .add_with_label(token.clone(), ttl_secs, label.clone());
     let now_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let expires_at_unix = now_unix + ttl_secs;
 
-    // 从请求头推断 monitor 公开 URL：
-    //   1) 优先 `X-Forwarded-Proto` + `Host`（托管平台 / nginx 会注入）
-    //   2) 回退见 enroll_url_scheme
+    // Infer the monitor's public URL from request headers:
+    // Infer the monitor's public URL from request headers:
+    //   1) Prefer `X-Forwarded-Proto` + `Host` (managed platforms / nginx inject these)
+    //   2) Fallback: see enroll_url_scheme
     let monitor_url = public_base_url(&headers, state.tls_terminated_locally);
 
-    // 设了 ZHIWEI_NODE_BASE_URL（国内 / 隔离网络的自建分发源）时，命令里自动
-    // 多带一行，执行者不必自己记得加。没设就保持原样（走 GitHub Releases）。
-    let base_url_line = match state.node_base_url.as_deref() {
-        Some(u) => format!("    ZHIWEI_BASE_URL={u} \\\n"),
-        None => String::new(),
-    };
+    // When ZHIWEI_NODE_BASE_URL is set (domestic / isolated-network self-hosted distribution source),
+    // the command automatically includes an extra line so the runner doesn't have to remember
+    // to add it. If unset, leave as-is (go through GitHub Releases).
+    let base_url_line = state
+        .node_base_url
+        .as_deref()
+        .map_or_else(String::new, |u| format!("    ZHIWEI_BASE_URL={u} \\\n"));
     let enroll_command = format!(
         "curl -sSL {monitor_url}/install-node.sh \\\n  | ZHIWEI_MONITOR_URL={monitor_url} \\\n    ZHIWEI_BOOTSTRAP_TOKEN={token} \\\n{base_url_line}    bash -s"
     );
 
-    // 从 list_active 找到刚加的那条 id（保证 id 与服务端一致）。
+    // Find the just-added id from list_active (guarantees id matches server-side).
     let just_added = state
         .bootstrap_tokens
         .list_active()
@@ -4035,8 +4333,8 @@ async fn create_enroll_token_handler(
         "label": label,
         "created_at_unix": now_unix,
         "expires_at_unix": expires_at_unix,
-        // UI 的 EnrollTokenCreated 类型 extends EnrollTokenMeta，字段要对齐。
-        // 运行时生成的令牌永远是 ephemeral（长期那种来自环境变量，不在这条路径）。
+        // UI's EnrollTokenCreated type extends EnrollTokenMeta; fields must align.
+        // Runtime-generated tokens are always ephemeral (the long-lived kind comes from env vars, not this path).
         "permanent": false,
         "monitor_url": monitor_url,
         "enroll_command": enroll_command,
@@ -4044,7 +4342,7 @@ async fn create_enroll_token_handler(
     .into_response()
 }
 
-/// `DELETE /v1/enroll-tokens/:id` —— 撤销一个入网令牌。立即生效。
+/// `DELETE /v1/enroll-tokens/:id` — revoke an enrollment token. Takes effect immediately.
 async fn delete_enroll_token_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -4059,15 +4357,16 @@ async fn delete_enroll_token_handler(
     if state.bootstrap_tokens.revoke_by_id(&id) {
         Json(serde_json::json!({ "ok": true, "id": id })).into_response()
     } else {
-        err(StatusCode::NOT_FOUND, "id 不存在或已过期")
+        err(StatusCode::NOT_FOUND, "id does not exist or has expired")
     }
 }
 
-/// `GET /install-node.sh` —— 原样吐出节点入网脚本（`text/plain`）。
+/// `GET /install-node.sh` — emit the node enrollment script verbatim (`text/plain`).
 ///
-/// 不鉴权：目标机器执行 `curl ... | bash` 时还没有凭据；秘密在 enroll 命令的
-/// 环境变量里。脚本在**编译期**从仓库根的 `scripts/install-node.sh` 内嵌
-/// （见 `main.rs` 的 `INSTALL_NODE_SH`），启动时挂到 state 上。
+/// No authentication: when the target machine runs `curl ... | bash` it has no credentials yet;
+/// the secret is in the enroll command's environment variables. The script is embedded at
+/// **compile time** from `scripts/install-node.sh` at the repo root (see `INSTALL_NODE_SH`
+/// in `main.rs`), loaded onto state at startup.
 async fn install_node_script_handler(State(state): State<AppState>) -> Response {
     (
         StatusCode::OK,
@@ -4075,7 +4374,7 @@ async fn install_node_script_handler(State(state): State<AppState>) -> Response 
             axum::http::header::CONTENT_TYPE,
             "text/plain; charset=utf-8",
         )],
-        state.install_script.clone(),
+        state.install_script,
     )
         .into_response()
 }
@@ -4086,13 +4385,13 @@ mod ai_token_auth_tests {
 
     #[test]
     fn sha256_hex_is_lowercase_and_stable() {
-        // 已知向量：空串的 SHA-256 是 e3b0c44298fc1c149afbf4c8996fb924...
+        // Known vector: SHA-256 of empty string is e3b0c44298fc1c149afbf4c8996fb924...
         let h = sha256_hex(b"");
         assert_eq!(
             h,
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
-        // 同样输入两次结果一致
+        // Same input twice produces identical result
         assert_eq!(h, sha256_hex(b""));
     }
 
@@ -4103,7 +4402,7 @@ mod ai_token_auth_tests {
 
     #[test]
     fn sha256_hex_accepts_binary_bytes() {
-        // 0x00 与 UTF-8 NUL 字符串同字节序列，哈希应一致
+        // 0x00 and the UTF-8 NUL string are the same byte sequence, hashes must agree
         let bytes = [0u8, 159, 146, 150];
         assert_eq!(sha256_hex(&bytes), sha256_hex(&bytes[..]));
     }
@@ -4115,10 +4414,12 @@ mod node_meta_tests {
 
     #[test]
     fn alias_limited_by_chars_not_bytes() {
-        // 10 个汉字（30 字节）合法，11 个不合法
-        assert!(normalize_alias("一二三四五六七八九十").is_ok());
-        assert!(normalize_alias("一二三四五六七八九十一").is_err());
-        // 首尾空白先裁掉再算长度
+        // 10 multi-byte chars (20 bytes) are valid, 11 are not. We use
+        // Greek letters here so the test stays ASCII-free in a global
+        // project while still exercising multi-byte width counting.
+        assert!(normalize_alias("αβγδεζηθικ").is_ok());
+        assert!(normalize_alias("αβγδεζηθικλ").is_err());
+        // Trim leading/trailing whitespace before counting length
         assert_eq!(normalize_alias("  bj-1  ").unwrap(), "bj-1");
     }
 
@@ -4127,15 +4428,15 @@ mod node_meta_tests {
         let got = normalize_tags(&[
             " prod ".to_string(),
             "prod".to_string(),
-            "".to_string(),
+            String::new(),
             "bj".to_string(),
         ])
         .unwrap();
         assert_eq!(got, vec!["prod", "bj"]);
-        // 单个标签按字符计
-        assert!(normalize_tags(&["字".repeat(24)]).is_ok());
-        assert!(normalize_tags(&["字".repeat(25)]).is_err());
-        // 个数上限
+        // Single tag counted by characters
+        assert!(normalize_tags(&["α".repeat(24)]).is_ok());
+        assert!(normalize_tags(&["α".repeat(25)]).is_err());
+        // Count upper limit
         let many: Vec<String> = (0..11).map(|i| format!("t{i}")).collect();
         assert!(normalize_tags(&many).is_err());
     }
@@ -4148,24 +4449,20 @@ mod enroll_token_tests {
     #[tokio::test]
     async fn add_with_label_records_metadata() {
         let tokens = BootstrapTokens::default();
-        tokens
-            .add_with_label("zhi-bt-labeled".into(), 3600, "prod-web".into())
-            .await;
+        tokens.add_with_label("zhi-bt-labeled".into(), 3600, "prod-web".into());
         let metas = tokens.list_active();
         assert_eq!(metas.len(), 1);
         assert_eq!(metas[0].label, "prod-web");
         assert!(!metas[0].permanent);
-        // id 形如 boot-<6 hex>
+        // id looks like boot-<6 hex>
         assert!(metas[0].id.starts_with("boot-"), "got id={}", metas[0].id);
     }
 
     #[tokio::test]
     async fn expired_tokens_drop_out_of_list_active() {
         let tokens = BootstrapTokens::default();
-        tokens
-            .add_with_label("zhi-bt-expired".into(), 0, String::new())
-            .await;
-        // TTL=0 → expires_at == now，过滤条件是 `> now`，所以立刻不可见
+        tokens.add_with_label("zhi-bt-expired".into(), 0, String::new());
+        // TTL=0 → expires_at == now, filter condition is `> now`, so immediately invisible
         assert!(tokens.list_active().is_empty());
         assert!(!tokens.check("zhi-bt-expired"));
     }
@@ -4173,12 +4470,8 @@ mod enroll_token_tests {
     #[tokio::test]
     async fn revoke_by_id_removes_the_token() {
         let tokens = BootstrapTokens::default();
-        tokens
-            .add_with_label("zhi-bt-a".into(), 3600, "a".into())
-            .await;
-        tokens
-            .add_with_label("zhi-bt-b".into(), 3600, "b".into())
-            .await;
+        tokens.add_with_label("zhi-bt-a".into(), 3600, "a".into());
+        tokens.add_with_label("zhi-bt-b".into(), 3600, "b".into());
         let target_id = tokens
             .list_active()
             .into_iter()
@@ -4187,18 +4480,18 @@ mod enroll_token_tests {
             .id;
 
         assert!(tokens.revoke_by_id(&target_id));
-        // a 已被撤销，b 还在
+        // a has been revoked, b is still present
         assert!(!tokens.check("zhi-bt-a"));
         assert!(tokens.check("zhi-bt-b"));
 
-        // 再撤一次同一个 id：找不到，返回 false
+        // Revoke the same id again: not found, returns false
         assert!(!tokens.revoke_by_id(&target_id));
     }
 
     #[tokio::test]
     async fn revoke_unknown_id_is_a_noop() {
         let tokens = BootstrapTokens::default();
-        tokens.add("zhi-bt-x".into(), 3600).await;
+        tokens.add("zhi-bt-x".into(), 3600);
         assert!(!tokens.revoke_by_id("boot-does-not-exist"));
         assert!(tokens.check("zhi-bt-x"));
     }
@@ -4226,23 +4519,23 @@ mod enroll_token_tests {
 
     #[test]
     fn enroll_scheme_prefers_forwarded_proto() {
-        // 边缘说的算：内网 Host + 明文监听，对外仍是 https
+        // Edge decides: private Host + plaintext listener, external is still https
         let h = headers_with(&[("host", "127.0.0.1:18445"), ("x-forwarded-proto", "https")]);
         assert_eq!(enroll_url_scheme(&h, false), "https");
-        // 代理链可能给列表，取第一段
+        // Proxy chain may give a list; take the first segment
         let h = headers_with(&[
             ("host", "example.com"),
             ("x-forwarded-proto", "http, https"),
         ]);
         assert_eq!(enroll_url_scheme(&h, true), "http");
-        // 空值 / 乱值回退到下面的推断
+        // Empty / junk values fall back to the inference below
         let h = headers_with(&[("host", "10.0.0.5:8443"), ("x-forwarded-proto", "")]);
         assert_eq!(enroll_url_scheme(&h, false), "http");
     }
 
     #[test]
     fn enroll_scheme_uses_http_for_lan_plain_http() {
-        // 自建「内网 IP + 明文」：命令必须是 http，否则节点照抄命令连不上
+        // Self-hosted "private IP + plaintext": command must be http, otherwise the node can't connect
         for host in [
             "127.0.0.1:18445",
             "10.0.0.5:8443",
@@ -4261,33 +4554,38 @@ mod enroll_token_tests {
     fn enroll_scheme_stays_https_for_public_and_local_tls() {
         for host in [
             "example.com",
-            "monitor.hancic.site",
-            "49.232.168.161:8443",
-            "170.106.103.36",
+            // TODO(open-source): replace personal domain with a neutral test fixture
+            // (e.g. "monitor.example.test") before tagging the public release.
+            "monitor.example.test",
+            // RFC 2606 / 5737 reserved ranges — neutral test fixtures.
+            "192.0.2.1:8443",
+            "203.0.113.1",
         ] {
             let h = headers_with(&[("host", host)]);
             assert_eq!(enroll_url_scheme(&h, false), "https", "host={host}");
-            // 本进程自己终结 TLS 时更明确：一律 https
+            // When this process terminates TLS itself, it's clearer — always https
             assert_eq!(enroll_url_scheme(&h, true), "https", "host={host}");
         }
-        // 没有 Host 头也不该崩
+        // Missing Host header shouldn't crash either
         assert_eq!(enroll_url_scheme(&HeaderMap::new(), false), "https");
     }
 
     #[test]
     fn connection_refused_detected_even_without_the_right_kind() {
-        // 正常路径：errno 111 → kind 也是 ConnectionRefused
-        let e = std::io::Error::from_raw_os_error(111);
+        // Real ECONNREFUSED maps to the right kind. The raw errno differs by
+        // platform (Linux 111, macOS/BSD 61), so derive it from the OS.
+        let refused_errno = if cfg!(target_os = "linux") { 111 } else { 61 };
+        let e = std::io::Error::from_raw_os_error(refused_errno);
         assert_eq!(e.kind(), std::io::ErrorKind::ConnectionRefused);
         assert!(is_connection_refused(&e));
 
-        // 线上真实形态：kind 掉成 Other，只剩文案能认
+        // Real production form: kind degrades to Other, only the text is recognizable
         let e = std::io::Error::other("Connection refused (os error 111)");
         assert!(is_connection_refused(&e));
         let e = std::io::Error::new(std::io::ErrorKind::NotConnected, "Connection refused");
         assert!(is_connection_refused(&e));
 
-        // 其它网络错误不要误判成「没起 ops-server」
+        // Other network errors shouldn't be misclassified as "ops-server not started"
         for msg in ["connection reset by peer", "timed out", "dns error"] {
             assert!(!is_connection_refused(&std::io::Error::other(msg)));
         }
@@ -4297,7 +4595,10 @@ mod enroll_token_tests {
     fn ops_connect_hint_always_says_what_to_do() {
         let refused = std::io::Error::other("Connection refused (os error 111)");
         let hint = ops_connect_error_hint(&refused, "http://127.0.0.1:8444");
-        assert!(hint.contains("该地址上没有进程在监听"), "{hint}");
+        assert!(
+            hint.contains("no process is listening on that address"),
+            "{hint}"
+        );
         assert!(hint.contains("entrypoint"), "{hint}");
 
         let other = std::io::Error::other("connection reset by peer");
@@ -4306,34 +4607,35 @@ mod enroll_token_tests {
         assert!(hint.contains("entrypoint"), "{hint}");
     }
 
-    /// 过期的 pending 要显示成 expired：默认 TTL 只有 60s，节点不再来拉的话
-    /// 这些行永远停在 pending，运营在命令历史里看不出它们早就废了。
+    /// Overdue pending rows should be shown as expired: default TTL is only 60s; if the
+    /// node stops polling, these rows stay "pending" forever and operators can't see in
+    /// command history that they've long since been voided.
     #[test]
     fn overdue_pending_is_shown_as_expired() {
         const NOW: i64 = 1_700_000_000_000_000_000;
         const SEC: i64 = 1_000_000_000;
 
-        // 60s TTL，签发了 90s → 过期
+        // 60s TTL, issued 90s ago → expired
         assert_eq!(
             effective_state("pending", NOW - 90 * SEC, 60, NOW),
             "expired"
         );
-        // 还在 TTL 内 → 原样
+        // Still within TTL → unchanged
         assert_eq!(
             effective_state("pending", NOW - 30 * SEC, 60, NOW),
             "pending"
         );
-        // 边界：签发 + TTL == now 就当过期（与 commands_repo 的 SQL 同口径）
+        // Boundary: issued + TTL == now is treated as expired (same criterion as commands_repo SQL)
         assert_eq!(
             effective_state("pending", NOW - 60 * SEC, 60, NOW),
             "expired"
         );
-        // ttl<=0 = 不过期（节点侧 control.rs::verify 的语义）
+        // ttl<=0 = never expires (semantics of node-side control.rs::verify)
         assert_eq!(
             effective_state("pending", NOW - 86_400 * SEC, 0, NOW),
             "pending"
         );
-        // pending 之外的终态一律不动
+        // Terminal states other than pending are left untouched
         for s in ["delivered", "done", "failed", "expired"] {
             assert_eq!(effective_state(s, NOW - 86_400 * SEC, 60, NOW), s);
         }
@@ -4342,12 +4644,12 @@ mod enroll_token_tests {
 
 #[cfg(test)]
 mod channel_patch_tests {
-    //! 渠道编辑（`PATCH /v1/channels/:id`）的合并语义。
+    //! Channel edit (`PATCH /v1/channels/:id`) merge semantics.
     //!
-    //! 关键不变量：
-    //!   1. 缺省的字段保持原值；
-    //!   2. `secret` 只允许覆盖，空串 / 缺省都不能把已存的凭据清掉；
-    //!   3. 合并后的整行仍要过一遍按类型的必填校验。
+    //! Key invariants:
+    //!   1. Absent fields keep their existing values;
+    //!   2. `secret` can only be overwritten; empty / absent cannot clear the stored credential;
+    //!   3. The merged row must still pass the per-type required-field validation.
 
     use super::*;
     use zhiwei_storage::alerts_repo::NotifyChannel;
@@ -4394,11 +4696,11 @@ mod channel_patch_tests {
 
     #[test]
     fn secret_can_be_overwritten_but_not_blanked() {
-        // 空串 = 保持原值（凭据不允许被空串清掉）
+        // Empty string = keep existing value (credentials cannot be cleared by an empty string)
         let merged = merge_channel_patch(channel(), &body(r#"{"secret":"  "}"#)).unwrap();
         assert_eq!(merged.secret, "tok-old");
 
-        // 有值 = 覆盖
+        // With value = overwrite
         let merged = merge_channel_patch(channel(), &body(r#"{"secret":"tok-new"}"#)).unwrap();
         assert_eq!(merged.secret, "tok-new");
     }
@@ -4429,13 +4731,13 @@ mod channel_patch_tests {
         feishu.secret = "sec".into();
         feishu.receive_id = "oc_1".into();
 
-        // 空串不会清掉 App Secret，所以合并后依然完整
+        // Empty string won't clear the App Secret, so the merge stays complete
         let merged = merge_channel_patch(feishu.clone(), &body(r#"{"secret":""}"#)).unwrap();
         assert!(validate(&merged).is_ok(), "{:?}", validate(&merged));
 
-        // 清空接收 ID → 按飞书的必填规则报出来
+        // Clear receive ID -> Feishu validation should report it
         let merged = merge_channel_patch(feishu, &body(r#"{"receive_id":""}"#)).unwrap();
         let msg = validate(&merged).unwrap_err();
-        assert!(msg.contains("接收 ID"), "{msg}");
+        assert!(msg.contains("receive ID"), "{msg}");
     }
 }

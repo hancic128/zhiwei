@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { TableFooter } from "@/components/ui/table";
 
-/** 规范 7.3.4：表格分页栏统一形态（每页条数 + 上一页/下一页 + 第 x / y 页） */
+/** Spec 7.3.4: table pagination bar unified shape (page size + prev/next + page x of y) */
 export const PAGE_SIZES = [10, 20, 50];
 
 export function TablePager({
@@ -21,9 +21,9 @@ export function TablePager({
   pageCount: number;
   pageSize: number;
   onPage: (page: number) => void;
-  /** 不传就隐藏「每页条数」选择器（节点列表这类信息密度高的页面里没必要） */
+  /** When omitted, hide the "page size" selector (not needed on high information-density pages like the nodes list) */
   onPageSize?: (size: number) => void;
-  /** 左下角的统计文案 */
+  /** Statistics text in the bottom-left */
   left?: React.ReactNode;
   className?: string;
 }) {
@@ -75,7 +75,7 @@ export function TablePager({
   );
 }
 
-/** 把数组切成当前页 + 页码总数 */
+/** Slice an array into the current page + total page count */
 export function paginate<T>(rows: T[], page: number, pageSize: number) {
   const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
   const current = Math.min(Math.max(page, 1), pageCount);
@@ -86,7 +86,7 @@ export function paginate<T>(rows: T[], page: number, pageSize: number) {
   };
 }
 
-/** 列表升/降序排序的通用取值器 */
+/** Generic asc/desc value-getter for sorting lists */
 export function sortRows<T>(
   rows: T[],
   dir: "asc" | "desc",

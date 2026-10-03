@@ -10,11 +10,14 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.7"
+version = "0.0.1"
 edition = "2021"
 rust-version = "1.75"
 license = "Apache-2.0"
-repository = "https://github.com/hancic128/zhiwei"
+repository = "https://github.com/zhiwei/zhiwei"
+readme = "../README.md"
+keywords = ["monitoring", "alerting", "infrastructure", "observability", "telemetry"]
+categories = ["network-programming", "database", "cryptography"]
 
 [workspace.dependencies]
 # async
@@ -49,12 +52,11 @@ serde_json = "1"
 # crypto
 ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8", "zeroize"] }
 
-# HTTP client (MCP server 内部调 REST 端点用)
+# HTTP client (MCP server uses it to call internal REST endpoints)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
 rand = "0.8"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
-rustls-pemfile = "2"
 rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring", "x509-parser"] }
 x509-parser = "0.16"
 time = "0.3"

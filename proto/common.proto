@@ -2,64 +2,71 @@ syntax = "proto3";
 
 package zhiwei.common.v1;
 
-// 公用的基础类型
+// Common base types.
 
-// 节点 ID（首次 enroll 后由 monitor 分配；node 自身持久化保存）
+// Node ID — assigned by monitor on first enroll and persisted by the node.
 message NodeId {
   string value = 1;
 }
 
-// 主机名（node 启动时获取）
+// Hostname — captured at node startup.
 message Hostname {
   string value = 1;
 }
 
-// 标签键值对（role=web / env=prod 等）
+// Key/value label (e.g. role=web / env=prod).
 message Label {
   string key = 1;
   string value = 2;
 }
 
-// 时间范围（unix nanos）
+// Time range (unix nanos).
 message TimeRange {
   int64 start_unix_nano = 1;
   int64 end_unix_nano = 2;
 }
 
-// Ed25519 签名（64 字节）
+// Ed25519 signature (64 bytes).
 message Signature {
   bytes value = 1;
 }
 
-// Ed25519 公钥（32 字节）
+// Ed25519 public key (32 bytes).
 message PublicKey {
   bytes value = 1;
 }
 
-// enroll 请求：node 提交自己的 Ed25519 公钥 + 元数据。
-// 不再提交 CSR —— 节点身份已从「X.509 证书」改为「签名密钥」，
-// 因为托管平台会在边缘终止 TLS、不转发客户端证书。
+// Enroll request: node submits its Ed25519 public key + metadata.
+// We no longer take a CSR — node identity moved from "X.509 certificate" to
+// "signing key" because managed platforms terminate TLS at the edge and do not
+// forward client certificates.
 message EnrollRequest {
-  reserved 1;                     // 原 csr_pem（PKCS#10 CSR）
+  reserved 1;                     // formerly csr_pem (PKCS#10 CSR)
   string hostname = 2;
   repeated Label labels = 3;
-  // 节点 Ed25519 公钥（32 字节）。此后所有请求都用对应私钥签名。
+  // Node Ed25519 public key (32 bytes). All subsequent requests are signed
+  // with the matching private key.
   bytes public_key = 4;
-  // 可选：入网时由节点侧（zhiwei-node --alias / install-node.sh --alias）带上，
-  // 省得机器多了还要在控制台一台台补。管理员随后可以在控制台改。
+  // Optional: carried by the node at enroll time
+  // (`zhiwei-node --alias` / `install-node.sh --alias`) so the operator
+  // does not have to fill in aliases for every machine. Admins can still
+  // edit them in the console afterwards.
   string alias = 5;
   repeated string tags = 6;
 }
 
-// enroll 响应：monitor 登记公钥并返回标识
+// Enroll response: monitor registers the public key and returns identifiers.
 message EnrollResponse {
   string node_id = 1;
-  reserved 2;                     // 原 client_cert_pem（不再签发客户端证书）
-  // monitor 的 CA 证书。仅在自建 TLS 部署下用于 pinning；
-  // 置于托管平台边缘之后时为其它形式的服务端证书，此字段可忽略。
+  reserved 2;                     // formerly client_cert_pem (no longer issued)
+  // Monitor CA certificate. Used for pinning on self-hosted deployments
+  // where the monitor terminates TLS itself; on edge-terminated PaaS
+  // deployments the server cert is provided by the platform and this
+  // field can be ignored.
   string ca_cert_pem = 3;
   string monitor_cert_pem = 4;
-  // ops 控制平面公钥（base64）。节点首次入网时存下并用它验证命令签名——
-  // 即 TOFU：此后即便 monitor 被攻陷也无法伪造命令。
+  // Ops control-plane public key (base64). The node persists this on first
+  // enroll and uses it to verify command signatures — TOFU. Even if monitor
+  // is later compromised, it cannot forge commands without ops's key.
   string ops_public_key = 5;
 }

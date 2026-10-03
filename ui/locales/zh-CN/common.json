@@ -725,7 +725,13 @@
     "resolveConfirmTitle": "关闭告警",
     "resolveConfirmMessage": "确定要手动关闭这条告警吗？",
     "criticalCount": "{{n}} 严重",
-    "warningCount": "{{n}} 警告"
+    "warningCount": "{{n}} 警告",
+    "duration_seconds": "持续时间（秒）",
+    "offlineAfterSeconds": "离线判定（秒）",
+    "offlineAfterHint": "节点不可达超过此时间后触发告警。",
+    "daysBeforeExpiry": "到期前天数",
+    "daysBeforeExpiryHint": "证书在此天数内到期时触发告警。",
+    "noChanges": "没有需要保存的更改"
   },
   "settings": {
     "caTitle": "monitor 的 TLS 证书（本地 CA）",
@@ -794,6 +800,8 @@
     "chDeleteConfirmTitle": "删除通知渠道",
     "chDeleteConfirmMessage": "删除后该渠道不再接收告警，此操作不可恢复。",
     "chTest": "测试",
+    "chTesting": "测试中...",
+    "chTestingHint": "正在发送测试通知...",
     "chTestOk": "测试通知已发出，请到接收端确认",
     "chTestFail": "发送失败：{{detail}}",
     "uiTitle": "界面",

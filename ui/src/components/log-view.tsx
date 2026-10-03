@@ -4,21 +4,26 @@ import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
 
 /**
- * 日志视图（容器 / 文件日志共用）。
+ * Log view (shared by container / file logs).
  *
- * 三件事：
- *  1. 着色：优先还原日志里自带的 ANSI 颜色（很多程序往容器 stdout 写 TTY 色彩），
- *     没有转义序列时按 ERROR / WARN / INFO / DEBUG 这类级别关键字整行着色。
- *  2. 粘底：跟随刷新时新内容自动滚到最底；用户手动上滑就不再抢滚动条，
- *     右下角出现「回到底部」，点一下恢复粘底。
- *  3. 等宽深底排版 + 自动换行（长行不撑出横向滚动条）。
+ * Three concerns:
+ *  1. Coloring: prefer ANSI colors embedded in the log (many programs write
+ *     TTY colors to container stdout); if no escape sequences are present,
+ *     fall back to per-line color by level keywords like ERROR / WARN /
+ *     INFO / DEBUG.
+ *  2. Stick-to-bottom: while following, new content auto-scrolls to the
+ *     bottom; once the user scrolls up, we stop grabbing the scrollbar and
+ *     surface a "back to bottom" affordance.
+ *  3. Monospace dark layout + auto-wrap (long lines don't push a horizontal
+ *     scrollbar).
  *
- * 只负责渲染文本，拉取 / 跟随的频率由调用方决定（命令通道要等节点轮询，
- * 盲目并发拉取只会把命令堆在队列里）。
+ * This component only renders text. Fetching / follow cadence is the
+ * caller's responsibility — the command channel has to wait for the node's
+ * poll, and blind concurrent fetches just queue commands up.
  */
 const BOTTOM_EPS = 24;
 
-/** 基础 16 色（前景）→ tailwind 类；深色底所以用浅一档的色值。 */
+/** Basic 16 foreground colors → tailwind classes; dark background uses lighter shades. */
 const ANSI_FG: Record<number, string> = {
   30: "text-ink-400",
   31: "text-rose-400",
@@ -42,7 +47,7 @@ const OTHER_ESCAPES = /\u001b\[[0-9;?]*[A-Za-z]/g;
 
 type Seg = { text: string; cls: string };
 
-/** 有 ANSI SGR 就把一行切成带样式的片段；没有则返回 null（交给级别着色）。 */
+/** If the line has ANSI SGR sequences, split it into styled segments; otherwise return null (fall through to level-based coloring). */
 function ansiSegments(line: string): Seg[] | null {
   if (!line.includes("\u001b[")) return null;
   const segs: Seg[] = [];
@@ -58,7 +63,7 @@ function ansiSegments(line: string): Seg[] | null {
       else if (ANSI_FG[c]) cls = ANSI_FG[c];
       else if (c === 1) cls = cn(cls, "font-semibold");
       else if (c === 22) cls = cls.split(" ").filter((x) => x !== "font-semibold").join(" ");
-      // 背景色 / 下划线等其余属性忽略：深色底上渲染不出可读效果
+      // Ignore other attributes (background / underline): they don't render readably on a dark background
     }
     last = re.lastIndex;
   }
@@ -68,11 +73,11 @@ function ansiSegments(line: string): Seg[] | null {
     .filter((s) => s.text !== "");
 }
 
-/** 没有 ANSI 颜色时按级别整行着色。 */
+/** No ANSI color present — color the whole line by level keywords. */
 function lineClass(line: string): string {
-  if (/\b(?:ERROR|ERR|FATAL|PANIC|CRITICAL|CRIT|SEVERE)\b/i.test(line) || /错误|失败|异常/.test(line))
+  if (/\b(?:ERROR|ERR|FATAL|PANIC|CRITICAL|CRIT|SEVERE)\b/i.test(line) || /error|fail|exception/i.test(line))
     return "text-rose-400";
-  if (/\b(?:WARN|WARNING)\b/i.test(line) || /警告/.test(line)) return "text-amber-300";
+  if (/\b(?:WARN|WARNING)\b/i.test(line) || /warn/i.test(line)) return "text-amber-300";
   if (/\b(?:INFO|NOTICE)\b/i.test(line)) return "text-sky-300";
   if (/\b(?:DEBUG|TRACE|VERBOSE)\b/i.test(line)) return "text-ink-400";
   return "";
@@ -85,7 +90,7 @@ export function LogView({
   className,
 }: {
   text: string;
-  /** 跟随中：只要视图贴着底，新内容到达就继续贴住 */
+  /** While following: as long as the view is pinned to the bottom, stick to bottom whenever new content arrives */
   follow: boolean;
   heightClass?: string;
   className?: string;
@@ -113,9 +118,9 @@ export function LogView({
     setAtBottom(true);
   }, []);
 
-  // 内容变化 / 打开跟随：贴底状态没被用户打断就继续贴底。
-  // 非跟随状态下的内容变化都来自用户主动「拉取」，直接跳到底（新内容才是他要看的）；
-  // 跟随中则尊重用户上滑（否则永远读不到历史）。
+  // Content change / follow turned on: continue sticking to the bottom unless the user has interrupted it.
+  // Content changes in non-follow mode always come from a user-initiated fetch — jump to bottom (that's what they want to see).
+  // While following, respect upward scrolling (otherwise historical lines are unreachable).
   const wasFollow = React.useRef(follow);
   React.useLayoutEffect(() => {
     const turnedOn = follow && !wasFollow.current;

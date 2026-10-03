@@ -3,12 +3,12 @@
 @tailwind utilities;
 
 /* ────────────────────────────────────────────────────────────────────
-   令牌定义 —— 严格遵循 Trilium「前端约束规范」02 / 03。
-   brand 色阶随 [data-theme] 切换；surface / ink 固定不随主题变。
+   Token definitions — strictly follow Trilium "Frontend constraint spec" 02 / 03.
+   brand colors switch with [data-theme]; surface / ink stay fixed regardless of theme.
    ──────────────────────────────────────────────────────────────────── */
 @layer base {
   :root {
-    /* 默认主题：zhiwei（朱砂 #C73225，见 docs/NAMING.md 视觉基线） */
+    /* Default theme: zhiwei (vermilion #C73225, see docs/NAMING.md visual baseline) */
     --brand-50: #fdf2f1;
     --brand-100: #fbe1df;
     --brand-500: #df473a;
@@ -84,7 +84,7 @@
     color: #ffffff; /* surface-0 */
   }
 
-  /* 主题色切换时，所有品牌色元素统一过渡（规范 08：200ms） */
+  /* Theme color switch: all brand-colored elements transition uniformly (spec 08: 200ms) */
   .brand-transition,
   .brand-transition * {
     transition:
@@ -99,7 +99,7 @@
 }
 
 @layer utilities {
-  /* 规范 08：表格横向滚动条 scrollbar-thin，滑块 surface-4 */
+  /* Spec 08: table horizontal scrollbar scrollbar-thin, thumb surface-4 */
   .scrollbar-thin {
     scrollbar-width: thin;
     scrollbar-color: #d4d4d8 transparent;
@@ -121,8 +121,8 @@
 }
 
 /* ────────────────────────────────────────────────────────────────────
-   markdown-body —— 帮助页里把 react-markdown 的原始元素映射到项目令牌。
-   不引 @tailwindcss/typography，自己写一遍更短也更可控。
+   markdown-body — in the help page, maps react-markdown raw elements to project tokens.
+   Skips @tailwindcss/typography; writing it ourselves is shorter and more controllable.
    ──────────────────────────────────────────────────────────────────── */
 @layer components {
   .markdown-body {

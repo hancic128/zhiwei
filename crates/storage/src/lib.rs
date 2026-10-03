@@ -1,5 +1,11 @@
 //! SQLite-backed storage for zhiwei monitor.
 
+#![warn(clippy::pedantic, clippy::nursery, clippy::cargo)]
+// `multiple_crate_versions` flags transitive deps (e.g. ed25519-dalek pulls
+// `rand_core` 0.10 while `rand` 0.8 pulls 0.6; sqlx pulls `thiserror` 2 while
+// we pin 1). Not actionable from project code — pinned by upstream crates.
+#![allow(clippy::multiple_crate_versions)]
+
 pub mod ai_tokens_repo;
 pub mod alerts_repo;
 pub mod cert_sources_repo;
@@ -30,6 +36,12 @@ pub struct Storage {
 }
 
 impl Storage {
+    /// Open a `SQLite` database at `path`, configure `WAL` mode, and run migrations.
+    ///
+    /// # Errors
+    ///
+    /// Returns `anyhow::Error` if the connection fails, the pool cannot be
+    /// created, or migrations fail.
     pub async fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let url = format!("sqlite://{}", path.as_ref().display());
         let opts = SqliteConnectOptions::from_str(&url)?
@@ -47,38 +59,47 @@ impl Storage {
         Ok(Self { pool })
     }
 
-    pub fn pool(&self) -> &SqlitePool {
+    #[must_use]
+    pub const fn pool(&self) -> &SqlitePool {
         &self.pool
     }
 
+    #[must_use]
     pub fn nodes(&self) -> NodeRepo {
         NodeRepo::new(self.pool.clone())
     }
 
+    #[must_use]
     pub fn telemetry(&self) -> TelemetryRepo {
         TelemetryRepo::new(self.pool.clone())
     }
 
+    #[must_use]
     pub fn inventory(&self) -> InventoryRepo {
         InventoryRepo::new(self.pool.clone())
     }
 
+    #[must_use]
     pub fn alerts(&self) -> AlertsRepo {
         AlertsRepo::new(self.pool.clone())
     }
 
+    #[must_use]
     pub fn commands(&self) -> CommandsRepo {
         CommandsRepo::new(self.pool.clone())
     }
 
+    #[must_use]
     pub fn probes(&self) -> ProbesRepo {
         ProbesRepo::new(self.pool.clone())
     }
 
+    #[must_use]
     pub fn cert_sources(&self) -> CertSourcesRepo {
         CertSourcesRepo::new(self.pool.clone())
     }
 
+    #[must_use]
     pub fn ai_tokens(&self) -> AiTokensRepo {
         AiTokensRepo::new(self.pool.clone())
     }

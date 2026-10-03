@@ -1,12 +1,14 @@
-//! 证书路径（来源）管理的 HTTP 接口。
+//! HTTP API for certificate path (source) management.
 //!
-//! 两类调用方：
-//!   - 节点：`GET /v1/cert-config?node_id=`（拉本机要扫的路径），走 Ed25519
-//!     请求签名，只能拉自己；
-//!   - 控制台：`/v1/cert-sources`（增删改查 + 测试），走 admin token。
+//! Two types of callers:
+//!   - Nodes: `GET /v1/cert-config?node_id=` (pull paths for this machine to
+//!     scan), authenticated via Ed25519 request signature, can only pull their
+//!     own;
+//!   - Console: `/v1/cert-sources` (CRUD + test), authenticated via admin token.
 //!
-//! 配置改动后会给节点补发一次 `refresh_inventory`，让新路径立刻生效，
-//! 不必等 5 分钟的快照周期。
+//! On config change the node is sent a one-shot `refresh_inventory` so the new
+//! paths take effect immediately rather than waiting for the 5-minute snapshot
+//! cycle.
 
 use std::collections::HashMap;
 
@@ -27,9 +29,9 @@ use zhiwei_storage::cert_sources_repo::{CertSource, CertSourcePatch};
 const DEFAULT_NOTIFY_DAYS: i64 = 30;
 const MAX_NOTIFY_DAYS: i64 = 365;
 
-// ---------- 节点侧 ----------
+// ---------- node-side ----------
 
-/// `GET /v1/cert-config?node_id=<id>` —— 节点拉取本机要扫描的证书路径
+/// `GET /v1/cert-config?node_id=<id>` — node fetches the certificate paths it should scan
 pub async fn cert_config_handler(
     State(state): State<AppState>,
     method: axum::http::Method,
@@ -37,13 +39,18 @@ pub async fn cert_config_handler(
     Query(q): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
-    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    let pq = uri
+        .path_and_query()
+        .map_or("/", hyper::http::uri::PathAndQuery::as_str);
     let (node_id, _pub) = match verify_node(&state, &headers, method.as_str(), pq, &[]).await {
         Ok(id) => id,
         Err((code, msg)) => return err(code, msg),
     };
     if q.get("node_id").map(String::as_str) != Some(node_id.as_str()) {
-        return err(StatusCode::FORBIDDEN, "Can only fetch this node's certificate config");
+        return err(
+            StatusCode::FORBIDDEN,
+            "Can only fetch this node's certificate config",
+        );
     }
 
     let sources = match state
@@ -68,13 +75,13 @@ pub async fn cert_config_handler(
     Json(serde_json::json!({ "node_id": node_id.as_str(), "sources": list })).into_response()
 }
 
-// ---------- 控制台侧 ----------
+// ---------- console-side ----------
 
 #[derive(Serialize)]
 struct CertSourceView {
     id: String,
     node_id: String,
-    /// node_id 为空串时为 true：这条来源作用于所有节点
+    /// `node_id` is empty string when true: this source applies to all nodes
     all_nodes: bool,
     node_hostname: Option<String>,
     path: String,
@@ -83,18 +90,20 @@ struct CertSourceView {
     notify_days_before: i64,
     created_at_unix_nano: i64,
     updated_at_unix_nano: i64,
-    /// 命中证书数（该来源作用的节点上加总；节点离线或未采集时不计入）
+    /// Number of matched certificates (summed across nodes this source covers;
+    /// nodes offline or without a snapshot don't count)
     matched: i64,
-    /// 相关节点里最近一次快照时间
+    /// Most recent snapshot time among relevant nodes
     snapshot_at_unix_nano: Option<i64>,
-    /// 命中证书里最紧急的剩余天数
+    /// Most urgent remaining days among matched certificates
     nearest_days_left: Option<f64>,
 }
 
-/// 某条来源是否"拥有"这份证书。
+/// Whether a source "owns" a given certificate.
 ///
-/// 新版本节点会在证书条目里带上 `source_id`；老版本节点没有这个字段，
-/// 就退化成用路径规则反查——所以两种节点混跑时命中数都不会丢。
+/// Newer node versions include `source_id` on each certificate entry; older
+/// versions don't have this field, so it falls back to reverse-matching by
+/// path rule — meaning neither side loses matches during mixed-version runs.
 fn cert_belongs_to(source: &CertSource, cert: &serde_json::Value) -> bool {
     let sid = cert.get("source_id").and_then(|v| v.as_str()).unwrap_or("");
     if !sid.is_empty() {
@@ -105,8 +114,9 @@ fn cert_belongs_to(source: &CertSource, cert: &serde_json::Value) -> bool {
         .is_some_and(|p| zhiwei_common::certpath::matches(&source.path, p))
 }
 
-/// 用快照算某条来源的命中数与最近到期。
-/// 「所有节点」来源会把多台机器的快照一起算——命中数是加总，最近到期取最紧急的。
+/// Compute a source's match count and nearest expiry from snapshots.
+/// "All nodes" sources aggregate snapshots from multiple machines — match
+/// counts are summed, nearest expiry is the most urgent.
 fn source_stats(source: &CertSource, snapshots: &[String], now_ns: i64) -> (i64, Option<f64>) {
     let mut matched = 0i64;
     let mut nearest: Option<f64> = None;
@@ -118,13 +128,17 @@ fn source_stats(source: &CertSource, snapshots: &[String], now_ns: i64) -> (i64,
             }
             matched += 1;
             if c.get("parse_error")
-                .and_then(|v| v.as_bool())
+                .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false)
             {
                 continue;
             }
-            if let Some(exp) = c.get("not_after_unix_nano").and_then(|v| v.as_i64()) {
-                let days = (exp - now_ns) as f64 / 86_400_000_000_000.0;
+            if let Some(exp) = c
+                .get("not_after_unix_nano")
+                .and_then(serde_json::Value::as_i64)
+            {
+                let days_i64 = (exp - now_ns) / 86_400_000_000_000;
+                let days = f64::from(i32::try_from(days_i64).unwrap_or(i32::MAX));
                 nearest = Some(nearest.map_or(days, |cur: f64| cur.min(days)));
             }
         }
@@ -132,7 +146,7 @@ fn source_stats(source: &CertSource, snapshots: &[String], now_ns: i64) -> (i64,
     (matched, nearest)
 }
 
-/// `GET /v1/cert-sources`：来源列表（含命中数 / 最近到期 / 快照时间）
+/// `GET /v1/cert-sources`: source list (with hit count / nearest expiry / snapshot time)
 pub async fn list_cert_sources_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -150,7 +164,8 @@ pub async fn list_cert_sources_handler(
     let nodes = state.storage.nodes().list_all().await.unwrap_or_default();
     let now_ns = zhiwei_common::Timestamp::now().unix_nano();
 
-    // 每个节点最多查一次快照（「所有节点」来源会把 N 台机器的快照都拉进来）
+    // At most one snapshot query per node ("all nodes" sources pull
+    // snapshots from N machines)
     let mut snapshots: HashMap<String, (Option<i64>, String)> = HashMap::new();
     let mut out = Vec::with_capacity(sources.len());
     for s in sources {
@@ -218,7 +233,7 @@ pub struct CreateCertSourceBody {
     notify_days_before: Option<i64>,
 }
 
-/// `POST /v1/cert-sources`：新增来源
+/// `POST /v1/cert-sources`: add a source
 pub async fn create_cert_source_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -234,7 +249,8 @@ pub async fn create_cert_source_handler(
         Ok(b) => b,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
     };
-    // 空 node_id = 作用于所有节点（常见场景：每台机器都有同一个 nginx 证书目录）
+    // Empty node_id = applies to all nodes (common case: every machine has
+    // the same nginx cert directory)
     let node_id = b.node_id.trim().to_string();
     if !node_id.is_empty() {
         let node = zhiwei_common::NodeId::from_string(node_id.clone());
@@ -260,17 +276,22 @@ pub async fn create_cert_source_handler(
     {
         Ok(s) => s,
         Err(e) => {
-            // 同一节点同一路径唯一（用户重复添加时给一句人话）
+            // Same node + same path is unique (give a human message on
+            // duplicate add).
             let msg = e.to_string();
             return if msg.contains("UNIQUE") {
-                err(StatusCode::CONFLICT, "A certificate source with this path already exists on this node")
+                err(
+                    StatusCode::CONFLICT,
+                    "A certificate source with this path already exists on this node",
+                )
             } else {
                 err(StatusCode::INTERNAL_SERVER_ERROR, format!("create: {msg}"))
             };
         }
     };
 
-    // 让相关节点立刻重扫：单节点只发一台，「所有节点」逐台发（规模上限内可接受）
+    // Make relevant nodes rescan immediately: single node sends to one
+    // device, "all nodes" sends per device (acceptable within scale limits)
     refresh_scope_inventory(&state, &node_id).await;
     (
         StatusCode::CREATED,
@@ -285,7 +306,7 @@ pub async fn create_cert_source_handler(
 
 #[derive(serde::Deserialize)]
 pub struct PatchCertSourceBody {
-    /// 空串 = 改成「所有节点」
+    /// Empty string = change to "all nodes"
     #[serde(default)]
     node_id: Option<String>,
     #[serde(default)]
@@ -298,7 +319,7 @@ pub struct PatchCertSourceBody {
     notify_days_before: Option<i64>,
 }
 
-/// `PATCH /v1/cert-sources/:id`：改路径 / 启用 / 通知开关 / 到期前天数
+/// `PATCH /v1/cert-sources/:id`: change path / enable / notify toggle / expiry-days-ahead
 pub async fn patch_cert_source_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -328,14 +349,14 @@ pub async fn patch_cert_source_handler(
         },
         None => None,
     };
-    let patch = CertSourcePatch {
+    let update = CertSourcePatch {
         node_id: b.node_id.as_ref().map(|n| n.trim().to_string()),
         path,
         enabled: b.enabled,
         notify_enabled: b.notify_enabled,
         notify_days_before: b.notify_days_before.map(|d| clamp_days(Some(d))),
     };
-    if let Some(node_id) = &patch.node_id {
+    if let Some(node_id) = &update.node_id {
         if !node_id.is_empty() {
             let node = zhiwei_common::NodeId::from_string(node_id.clone());
             match state.storage.nodes().find_by_id(&node).await {
@@ -346,16 +367,20 @@ pub async fn patch_cert_source_handler(
         }
     }
     let now = zhiwei_common::Timestamp::now().unix_nano();
-    if let Err(e) = state.storage.cert_sources().update(&id, &patch, now).await {
+    if let Err(e) = state.storage.cert_sources().update(&id, &update, now).await {
         let msg = e.to_string();
         return if msg.contains("UNIQUE") {
-            err(StatusCode::CONFLICT, "A certificate source with this path already exists on this node")
+            err(
+                StatusCode::CONFLICT,
+                "A certificate source with this path already exists on this node",
+            )
         } else {
             err(StatusCode::INTERNAL_SERVER_ERROR, format!("update: {msg}"))
         };
     }
 
-    // 关闭通知 / 停用 / 换路径后，旧告警要立刻收掉，不能等下一次快照
+    // After disabling notifications / disabling / changing path, old alerts
+    // must be cleared immediately, not wait for the next snapshot.
     if b.notify_enabled == Some(false) || b.enabled == Some(false) || b.path.is_some() {
         let _ = state
             .storage
@@ -363,12 +388,15 @@ pub async fn patch_cert_source_handler(
             .resolve_open_cert_alerts(&id, None, now)
             .await;
     }
-    // 换过作用范围时，新旧两边的节点都要重扫
-    let moved = patch
+    // When the scope changes, both old and new nodes need to rescan.
+    let moved = update
         .node_id
         .as_ref()
         .is_some_and(|n| *n != existing.node_id);
-    let target = patch.node_id.clone().unwrap_or(existing.node_id.clone());
+    let target = update
+        .node_id
+        .clone()
+        .unwrap_or_else(|| existing.node_id.clone());
     refresh_scope_inventory(&state, &target).await;
     if moved {
         refresh_scope_inventory(&state, &existing.node_id).await;
@@ -390,12 +418,12 @@ pub async fn delete_cert_source_handler(
     }
     let existing = match state.storage.cert_sources().find(&id).await {
         Ok(Some(s)) => s,
-        Ok(None) => return err(StatusCode::NOT_FOUND, "证书来源不存在"),
+        Ok(None) => return err(StatusCode::NOT_FOUND, "Certificate source not found"),
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("lookup: {e}")),
     };
     match state.storage.cert_sources().delete(&id).await {
         Ok(true) => {}
-        Ok(false) => return err(StatusCode::NOT_FOUND, "证书来源不存在"),
+        Ok(false) => return err(StatusCode::NOT_FOUND, "Certificate source not found"),
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("delete: {e}")),
     }
     let now = zhiwei_common::Timestamp::now().unix_nano();
@@ -414,10 +442,12 @@ pub struct TestCertSourceBody {
     path: String,
 }
 
-/// `POST /v1/cert-sources/test`：让节点真扫一遍这条路径，返回 command_id。
+/// `POST /v1/cert-sources/test`: have the node actually scan this path,
+/// returns `command_id`.
 ///
-/// 为什么不在 monitor 侧直接扫：路径存在于**节点**的文件系统上，monitor 看不到。
-/// 走既有命令通道（ops 签名 → 节点验签 → 回执），控制台轮询回执即可。
+/// Why not scan on the monitor side: the path lives on the **node's**
+/// filesystem, which the monitor can't see. Use the existing command channel
+/// (ops signs → node verifies → receipt), and the console polls the receipt.
 pub async fn test_cert_source_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -435,7 +465,7 @@ pub async fn test_cert_source_handler(
     };
     let node_id = b.node_id.trim().to_string();
     if node_id.is_empty() {
-return err(StatusCode::BAD_REQUEST, "Must select a node");
+        return err(StatusCode::BAD_REQUEST, "Must select a node");
     }
     let node = zhiwei_common::NodeId::from_string(node_id.clone());
     match state.storage.nodes().find_by_id(&node).await {
@@ -475,7 +505,8 @@ fn clamp_days(v: Option<i64>) -> i64 {
     v.unwrap_or(DEFAULT_NOTIFY_DAYS).clamp(1, MAX_NOTIFY_DAYS)
 }
 
-/// 让节点立刻重采一次快照（best effort：失败只记日志，不影响配置已落库）
+/// Make a node immediately re-collect a snapshot (best effort: failure only
+/// logs, doesn't block the config that was already persisted).
 async fn refresh_node_inventory(state: &AppState, node_id: &str) {
     let payload = serde_json::json!({
         "node_id": node_id,
@@ -488,8 +519,10 @@ async fn refresh_node_inventory(state: &AppState, node_id: &str) {
     }
 }
 
-/// 「所有节点」来源要逐台通知（空 node_id）。节点数量级在定位之内（设计中心 10 台），
-/// 逐台发命令完全可以接受；真到几百台时应该改成节点侧拉配置的时间戳比对。
+/// "All nodes" sources must notify per device (empty `node_id`). Node count
+/// is well within design range (about 10 in the central cluster), so
+/// per-device commands are fine; at hundreds of devices, switch to the node
+/// pulling config by timestamp comparison.
 async fn refresh_scope_inventory(state: &AppState, node_id: &str) {
     if !node_id.is_empty() {
         refresh_node_inventory(state, node_id).await;
@@ -530,7 +563,8 @@ mod tests {
         .to_string()
     }
 
-    /// 「所有节点」来源：命中数跨机器加总，最近到期取最紧急的那台
+    /// "All nodes" source: matches aggregate across machines, nearest expiry
+    /// is the most urgent one
     #[test]
     fn all_nodes_source_aggregates_snapshots() {
         let now = 1_800_000_000_000_000_000i64;
@@ -544,7 +578,7 @@ mod tests {
         assert!((nearest.unwrap() - 3.0).abs() < 0.01);
     }
 
-    /// 老版本节点不带 source_id：按路径规则反查归属
+    /// Old node versions without `source_id`: reverse-match by path rule
     #[test]
     fn falls_back_to_path_matching_without_source_id() {
         let now = 1_800_000_000_000_000_000i64;
@@ -554,11 +588,15 @@ mod tests {
             cert_json("/etc/ssl/other.crt", "", 5, now),
         ];
         let (matched, nearest) = source_stats(&s, &snapshots, now);
-        assert_eq!(matched, 1, "只有目录内的那张算命中");
+        assert_eq!(
+            matched, 1,
+            "only the one inside the directory counts as a match"
+        );
         assert!((nearest.unwrap() - 20.0).abs() < 0.01);
     }
 
-    /// 目录展开是非递归的，子目录里的证书不属于这条来源
+    /// Directory expansion is non-recursive; certs in subdirectories don't
+    /// belong to this source.
     #[test]
     fn directory_source_is_not_recursive() {
         let now = 1_800_000_000_000_000_000i64;

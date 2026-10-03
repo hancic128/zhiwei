@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "ZhiWei monitor-server: data plane (telemetry ingest + UI API)"
 
 [[bin]]
@@ -38,8 +41,7 @@ sqlx = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
 rustls = { workspace = true }
-rustls-pemfile = { workspace = true }
-webpki-roots = "0.26"
+webpki-roots = "1"
 rcgen = { workspace = true }
 x509-parser = { workspace = true }
 base64 = { workspace = true }

@@ -1,7 +1,7 @@
 import * as React from "react";
 import { cn } from "@/lib/utils";
 
-/** 规范 7.3：所有表格复用同一模板。 */
+/** Spec 7.3: all tables reuse the same template. */
 export function TableShell({
   className,
   ...props
@@ -17,7 +17,7 @@ export function TableShell({
   );
 }
 
-/** 表格工具栏：px-6 py-4 border-b，左筛选右搜索 */
+/** Table toolbar: px-6 py-4 border-b, filters on left, search on right */
 export function TableToolbar({
   className,
   ...props
@@ -56,7 +56,7 @@ export function THead({
   );
 }
 
-/** 规范 7.3.1：表头 px-4 py-3，text-xs font-semibold text-ink-500 uppercase */
+/** Spec 7.3.1: header px-4 py-3, text-xs font-semibold text-ink-500 uppercase */
 export function Th({
   className,
   align = "left",
@@ -90,7 +90,7 @@ export function TBody({
   );
 }
 
-/** 规范 7.3.3：行 px-4 py-4，hover:bg-surface-1 */
+/** Spec 7.3.3: row px-4 py-4, hover:bg-surface-1 */
 export function Tr({
   className,
   ...props
@@ -126,7 +126,7 @@ export function Td({
   );
 }
 
-/** 分页栏：px-6 py-4 border-t */
+/** Pagination bar: px-6 py-4 border-t */
 export function TableFooter({
   className,
   ...props

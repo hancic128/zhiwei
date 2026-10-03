@@ -1,22 +1,24 @@
 #!/bin/sh
-# ZhiWei 节点常驻服务卸载器
+# ZhiWei node daemon uninstaller
 #
-#   curl -fsSL https://raw.githubusercontent.com/hancic128/zhiwei/main/scripts/uninstall-node-service.sh \
+#   curl -fsSL https://raw.githubusercontent.com/zhiwei/zhiwei/main/scripts/uninstall-node-service.sh \
 #     | sudo sh
 #
-# 与 install-node-service.sh uninstall 等价，但独立可跑（不依赖 install 脚本）。
+# Equivalent to `install-node-service.sh uninstall`, but standalone (no
+# dependency on the install script).
 #
-# 默认行为：
-#   - 停 + 移除 systemd unit / launchd plist / nohup 进程
-#   - 删 /etc/zhiwei/node.env（以及空目录 /etc/zhiwei）
-#   - 保留 /var/lib/zhiwei-node（里头是 signing.key / node.id，重装不丢身份）
+# Default behavior:
+#   - Stop + remove the systemd unit / launchd plist / nohup process
+#   - Remove /etc/zhiwei/node.env (and the empty /etc/zhiwei directory)
+#   - Keep /var/lib/zhiwei-node (holds signing.key / node.id; reinstall keeps the identity)
 #
-# 参数：
-#   --purge       连 state-dir 一起删（慎重：节点身份永久失效，要重新 enroll）
-#   --keep-binary 保留 /usr/local/bin/zhiwei-node 不动（默认保留）
-#   --remove-binary  顺带 rm /usr/local/bin/zhiwei-node
-#   --state-dir <dir>  默认 /var/lib/zhiwei-node
-#   --env-file   <path> 默认 /etc/zhiwei/node.env
+# Arguments:
+#   --purge          delete the state-dir too (caution: node identity is permanently lost;
+#                    re-enroll is required)
+#   --keep-binary    keep /usr/local/bin/zhiwei-node as-is (default)
+#   --remove-binary  also rm /usr/local/bin/zhiwei-node
+#   --state-dir <dir>  default /var/lib/zhiwei-node
+#   --env-file   <path> default /etc/zhiwei/node.env
 #   -h | --help
 
 set -eu
@@ -27,9 +29,9 @@ BIN="${ZHIWEI_INSTALL_DIR:-/usr/local/bin}/zhiwei-node"
 PURGE=0
 REMOVE_BIN=0
 
-die()  { printf '\033[31m错误:\033[0m %s\n' "$*" >&2; exit 1; }
-note() { printf '\033[36m  ·\033[0m %s\n' "$*" >&2; }
-ok()   { printf '\033[32m  ✓\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+note() { printf '\033[36m  -\033[0m %s\n' "$*" >&2; }
+ok()   { printf '\033[32m  +\033[0m %s\n' "$*" >&2; }
 
 usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; }
 
@@ -38,10 +40,10 @@ while [ $# -gt 0 ]; do
     --purge)         PURGE=1; shift ;;
     --remove-binary) REMOVE_BIN=1; shift ;;
     --keep-binary)   REMOVE_BIN=0; shift ;;
-    --state-dir)     STATE_DIR="${2:?--state-dir 需要一个值}"; shift 2 ;;
-    --env-file)      ENV_FILE="${2:?--env-file 需要一个值}"; shift 2 ;;
+    --state-dir)     STATE_DIR="${2:?--state-dir requires a value}"; shift 2 ;;
+    --env-file)      ENV_FILE="${2:?--env-file requires a value}"; shift 2 ;;
     -h|--help)       usage; exit 0 ;;
-    *) die "未知参数：$1（用 --help 看用法）" ;;
+    *) die "unknown argument: $1 (use --help for usage)" ;;
   esac
 done
 
@@ -50,7 +52,7 @@ have()    { command -v "$1" >/dev/null 2>&1; }
 
 ensure_root() {
   is_root && return 0
-  printf '\033[36m==>\033[0m 自动 sudo 提权\n'
+  printf '\033[36m==>\033[0m auto-escalating with sudo\n'
   exec sudo -E sh "$0" "$@"
 }
 
@@ -64,16 +66,16 @@ detect_init() {
 }
 
 init="$(detect_init)"
-printf '\033[36m==>\033[0m 知微节点常驻服务卸载器（%s）\n' "$init"
+printf '\033[36m==>\033[0m ZhiWei node daemon uninstaller (%s)\n' "$init"
 
-# 1) 停服务
+# 1) Stop the service
 case "$init" in
   systemd)
     systemctl stop    zhiwei-node 2>/dev/null || true
     systemctl disable zhiwei-node 2>/dev/null || true
     rm -f /etc/systemd/system/zhiwei-node.service
     systemctl daemon-reload 2>/dev/null || true
-    ok "已停 + 移除 systemd unit"
+    ok "stopped + removed systemd unit"
     ;;
   launchd)
     uid="$(id -u)"
@@ -82,44 +84,44 @@ case "$init" in
       || launchctl unload "$plist" 2>/dev/null \
       || true
     rm -f "$plist"
-    ok "已停 + 移除 launchd plist"
+    ok "stopped + removed launchd plist"
     ;;
   nohup)
     pkill -f "zhiwei-node --state-dir $STATE_DIR" 2>/dev/null || true
-    ok "已停 nohup 后台进程"
+    ok "stopped nohup background process"
     ;;
 esac
 
-# 2) 清 env 文件
+# 2) Remove the env file
 if [ -f "$ENV_FILE" ]; then
   rm -f "$ENV_FILE"
   rmdir "$(dirname "$ENV_FILE")" 2>/dev/null || true
-  ok "已删 $ENV_FILE"
+  ok "removed $ENV_FILE"
 else
-  note "$ENV_FILE 不存在，跳过"
+  note "$ENV_FILE does not exist; skipped"
 fi
 
 # 3) state-dir
 if [ "$PURGE" = "1" ] && [ -d "$STATE_DIR" ]; then
   rm -rf "$STATE_DIR"
-  ok "已 purge $STATE_DIR（节点身份永久失效，要重新 enroll）"
+  ok "purged $STATE_DIR (node identity permanently lost; re-enroll required)"
 elif [ -d "$STATE_DIR" ]; then
-  note "$STATE_DIR 保留（里头是 signing.key / node.id，重装不丢身份）；--purge 可一并删"
+  note "$STATE_DIR kept (holds signing.key / node.id; reinstall keeps the identity); pass --purge to also remove"
 fi
 
-# 4) 二进制
+# 4) Binary
 if [ "$REMOVE_BIN" = "1" ] && [ -x "$BIN" ]; then
   rm -f "$BIN"
-  ok "已删 $BIN"
+  ok "removed $BIN"
 else
-  note "二进制 $BIN 没动（--remove-binary 可一并删）"
+  note "binary $BIN untouched (pass --remove-binary to also remove)"
 fi
 
 cat <<EOF
 
-\033[32m✓ 卸载完成\033[0m
+\033[32m+ uninstall complete\033[0m
 
-  下次安装：
-    curl -fsSL https://raw.githubusercontent.com/hancic128/zhiwei/main/scripts/install-node-service.sh \\
+  To reinstall:
+    curl -fsSL https://raw.githubusercontent.com/zhiwei/zhiwei/main/scripts/install-node-service.sh \\
       | sudo sh -s -- --token zhi-bt-xxx
 EOF

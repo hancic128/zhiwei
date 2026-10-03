@@ -35,11 +35,16 @@ type Row = (
 );
 
 impl CommandsRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    #[must_use]
+    pub const fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 
-    /// ops-server 签发命令时写入（payload 是含签名的完整 Command protobuf）
+    /// Insert when ops-server issues a command (payload is the full Command protobuf with signature)
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the insert fails (e.g. duplicate `id`).
     #[allow(clippy::too_many_arguments)]
     pub async fn insert(
         &self,
@@ -52,9 +57,9 @@ impl CommandsRepo {
         ttl_seconds: i64,
     ) -> anyhow::Result<()> {
         sqlx::query(
-            r#"INSERT INTO commands
+            r"INSERT INTO commands
                (id, node_id, action, params_json, payload_protobuf, issued_at_unix_nano, ttl_seconds, state)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')"#,
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')",
         )
         .bind(id)
         .bind(node_id)
@@ -68,6 +73,11 @@ impl CommandsRepo {
         Ok(())
     }
 
+    /// Record an audit-log row for a command issuance (outcome = `issued`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the underlying insert fails.
     pub async fn audit(
         &self,
         at_unix_nano: i64,
@@ -89,8 +99,12 @@ impl CommandsRepo {
         .await
     }
 
-    /// 同 [`Self::audit`]，但显式指定 outcome（`issued` / `done` / `failed` / `cancelled`）。
-    /// 「作废未发出的命令再删节点」要留痕，用的就是这个。
+    /// Same as [`Self::audit`], but with explicit outcome (`issued` / `done` / `failed` / `cancelled`).
+    /// Used when "invalidating unsent commands and deleting a node" needs to leave a trace.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the insert fails.
     #[allow(clippy::too_many_arguments)]
     pub async fn audit_with_outcome(
         &self,
@@ -103,9 +117,9 @@ impl CommandsRepo {
         outcome: &str,
     ) -> anyhow::Result<()> {
         sqlx::query(
-            r#"INSERT INTO audit_log
+            r"INSERT INTO audit_log
                (at_unix_nano, actor, node_id, command_id, action, params_json, outcome)
-               VALUES (?, ?, ?, ?, ?, ?, ?)"#,
+               VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(at_unix_nano)
         .bind(actor)
@@ -119,10 +133,14 @@ impl CommandsRepo {
         Ok(())
     }
 
-    /// 某节点「还在路上且仍然有效」的 pending 条数。
+    /// Number of pending commands for a node that are "still in transit and still valid".
     ///
-    /// 只数仍然有效的：过了 TTL 的命令节点侧一律拒收（见 [`PENDING_LIVE_SQL`]），
-    /// 拿它们挡住删除只会把节点永久锁死。
+    /// Only counts still-valid ones: commands past TTL are always rejected by the node side
+    /// (see [`PENDING_LIVE_SQL`]). Including them would permanently lock the node from deletion.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn count_pending_for_node(&self, node_id: &str, now_ns: i64) -> anyhow::Result<i64> {
         let n: i64 = sqlx::query_scalar(&format!(
         "SELECT COUNT(*) FROM commands WHERE node_id = ? AND state = 'pending' AND {PENDING_LIVE_SQL}"
@@ -134,15 +152,20 @@ impl CommandsRepo {
         Ok(n)
     }
 
-    /// 作废某节点全部未发出的命令（`pending` → `expired`），返回被作废的行——
-    /// 调用方要拿它们写 audit_log（节点删掉后命令历史会跟着没了，审计得单独留）。
+    /// Invalidate all unsent commands for a node (`pending` -> `expired`), returns invalidated rows --
+    /// caller needs them to write to `audit_log` (after node deletion, command history disappears,
+    /// audit needs to be stored separately).
     ///
-    /// 与 [`expire_overdue_for_node`] 的区别：这里不看 TTL，是「运维明确要求作废」。
+    /// Difference from [`expire_overdue_for_node`]: this ignores TTL, it's "ops explicitly requested invalidation".
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if any of the queries fail.
     pub async fn cancel_pending_for_node(&self, node_id: &str) -> anyhow::Result<Vec<CommandRow>> {
         let rows = sqlx::query_as::<_, Row>(
-            r#"SELECT id, node_id, action, params_json, issued_at_unix_nano, ttl_seconds, state,
+            r"SELECT id, node_id, action, params_json, issued_at_unix_nano, ttl_seconds, state,
                   result_ok, result_error, result_payload, result_received_at_unix_nano
-           FROM commands WHERE node_id = ? AND state = 'pending' ORDER BY issued_at_unix_nano"#,
+           FROM commands WHERE node_id = ? AND state = 'pending' ORDER BY issued_at_unix_nano",
         )
         .bind(node_id)
         .fetch_all(&self.pool)
@@ -160,7 +183,7 @@ impl CommandsRepo {
             .bind(&row.0)
             .execute(&self.pool)
             .await?;
-            // 并发里被节点拉走了（pending → delivered）就跳过：那条已经不是「未发出」了
+            // Skip if already pulled by node in concurrent scenario (pending -> delivered means it's no longer "unsent")
             if r.rows_affected() > 0 {
                 cancelled.push(map_row(row));
             }
@@ -168,10 +191,14 @@ impl CommandsRepo {
         Ok(cancelled)
     }
 
-    /// 节点拉取待执行命令（含原始 protobuf，节点自行验签）。
+    /// Node pulls pending commands to execute (includes raw protobuf, node verifies signature itself).
     ///
-    /// 先清掉本节点已过 TTL 的 pending（节点拿到也会拒收，见 [`PENDING_LIVE_SQL`]），
-    /// 再取仍然有效的，最后标记为已投递避免重复下发。
+    /// First clears this node's overdue pending commands (node would reject them anyway, see [`PENDING_LIVE_SQL`]),
+    /// then gets the still-valid ones, finally marks them as delivered to avoid duplicate dispatch.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query or any per-row update fails.
     pub async fn pending_for(
         &self,
         node_id: &str,
@@ -193,7 +220,7 @@ impl CommandsRepo {
 
         if !rows.is_empty() {
             let ids: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
-            // 标记为已投递，避免重复下发
+            // Mark as delivered to avoid duplicate dispatch
             for id in ids {
                 let _ = sqlx::query(
                     "UPDATE commands SET state = 'delivered' WHERE id = ? AND state = 'pending'",
@@ -206,7 +233,11 @@ impl CommandsRepo {
         Ok(rows)
     }
 
-    /// 命令归属的节点 id。用于校验回执提交者与命令主人一致。
+    /// Node ID that owns this command. Used to verify receipt submitter matches command owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn owner_of(&self, id: &str) -> anyhow::Result<Option<String>> {
         let owner: Option<String> = sqlx::query_scalar("SELECT node_id FROM commands WHERE id = ?")
             .bind(id)
@@ -215,6 +246,11 @@ impl CommandsRepo {
         Ok(owner)
     }
 
+    /// Record a command execution result (and update the matching audit row outcome).
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if either update query fails.
     pub async fn submit_result(
         &self,
         id: &str,
@@ -224,13 +260,13 @@ impl CommandsRepo {
         now: i64,
     ) -> anyhow::Result<()> {
         sqlx::query(
-            r#"UPDATE commands SET
+            r"UPDATE commands SET
                  state = ?, result_ok = ?, result_error = ?, result_payload = ?,
                  result_received_at_unix_nano = ?
-               WHERE id = ?"#,
+               WHERE id = ?",
         )
         .bind(if ok { "done" } else { "failed" })
-        .bind(if ok { 1 } else { 0 })
+        .bind(i32::from(ok))
         .bind(error)
         .bind(payload)
         .bind(now)
@@ -245,11 +281,16 @@ impl CommandsRepo {
         Ok(())
     }
 
+    /// Look up a command by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn find(&self, id: &str) -> anyhow::Result<Option<CommandRow>> {
         let row: Option<Row> = sqlx::query_as(
-            r#"SELECT id, node_id, action, params_json, issued_at_unix_nano, ttl_seconds, state,
+            r"SELECT id, node_id, action, params_json, issued_at_unix_nano, ttl_seconds, state,
                       result_ok, result_error, result_payload, result_received_at_unix_nano
-               FROM commands WHERE id = ?"#,
+               FROM commands WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -257,11 +298,16 @@ impl CommandsRepo {
         Ok(row.map(map_row))
     }
 
+    /// Most recent commands (newest first).
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn recent(&self, limit: i64) -> anyhow::Result<Vec<CommandRow>> {
         let rows: Vec<Row> = sqlx::query_as(
-            r#"SELECT id, node_id, action, params_json, issued_at_unix_nano, ttl_seconds, state,
+            r"SELECT id, node_id, action, params_json, issued_at_unix_nano, ttl_seconds, state,
                       result_ok, result_error, result_payload, result_received_at_unix_nano
-               FROM commands ORDER BY issued_at_unix_nano DESC LIMIT ?"#,
+               FROM commands ORDER BY issued_at_unix_nano DESC LIMIT ?",
         )
         .bind(limit.clamp(1, 200))
         .fetch_all(&self.pool)
@@ -270,20 +316,21 @@ impl CommandsRepo {
     }
 }
 
-/// 「这条 pending 命令还有效吗」——判断必须与节点侧逐字一致
-/// （`node-agent/src/control.rs::verify`）：`ttl_seconds <= 0` 视为不过期，
-/// 否则签发时刻 + TTL 之后节点一律拒收（默认 TTL 只有 60s，见 ops-server `--ttl`）。
+/// "Is this pending command still valid" -- logic must match node side verbatim
+/// (`node-agent/src/control.rs::verify`): `ttl_seconds <= 0` means never expires,
+/// otherwise node always rejects after `issued_at` + TTL (default TTL is 60s, see ops-server `--ttl`).
 ///
-/// 为什么 monitor 也要判一次：原先它完全不看 TTL，只要有过命令没被拉走，
-/// 节点就永久卡在 `DELETE /v1/nodes/:id` 的前置检查上；而「等节点拉完」在节点
-/// 重装过（`--reinstall` 换掉 node_id）或命令通道坏掉时根本不可能发生。
+/// Why monitor also checks: previously it completely ignored TTL, if any command wasn't pulled,
+/// the node would be permanently stuck on `DELETE /v1/nodes/:id` precheck; and "wait for node to pull"
+/// is impossible when node was reinstalled (`--reinstall` changes `node_id`) or command channel is broken.
 const PENDING_LIVE_SQL: &str =
     "(ttl_seconds <= 0 OR issued_at_unix_nano + ttl_seconds * 1000000000 > ?)";
 
-/// 把某节点「已过 TTL 却还挂着 pending」的行落成 `expired`。
+/// Mark rows "past TTL but still stuck on pending" as `expired`.
 ///
-/// 做在拉取路径上：节点来拉命令的那一刻，正是判断「还有效吗」的唯一时机。
-/// 不这么做这些行会永远停在 pending——节点早就不会再拉，状态也就再也改不了。
+/// Done on the pull path: the moment the node comes to pull commands is the only time
+/// we can judge "is it still valid?". Without this, these rows would stay on pending forever --
+/// the node won't pull again, so the state can never change.
 async fn expire_overdue_for_node(
     pool: &SqlitePool,
     node_id: &str,
@@ -325,8 +372,8 @@ mod tests {
     const NOW: i64 = 1_700_000_000_000_000_000;
     const SEC: i64 = 1_000_000_000;
 
-    /// 每个测试一个独立库文件——同一进程里并行跑，文件名必须区分开
-    /// （这个仓库没有 tempfile，跟 admin.rs 的测试一样用 temp_dir + pid）。
+    /// Each test gets an independent database file -- parallel tests in same process,
+    /// filenames must be distinct (this repo has no tempfile, uses `temp_dir` + pid like admin.rs tests).
     async fn repo(tag: &str) -> CommandsRepo {
         let dir =
             std::env::temp_dir().join(format!("zhiwei-commands-{tag}-{}", std::process::id()));
@@ -353,8 +400,8 @@ mod tests {
         r.find(id).await.unwrap().unwrap().state
     }
 
-    /// 过了 TTL 的命令节点侧一律拒收（control.rs::verify），所以在「还有没有
-    /// 未发出的命令」这件事上也不该再算它们——否则节点永久删不掉。
+    /// Commands past TTL are always rejected by the node side (control.rs::verify), so they
+    /// shouldn't be counted as "unsent commands" either -- otherwise the node can never be deleted.
     #[tokio::test]
     async fn pending_count_skips_commands_whose_ttl_already_passed() {
         let r = repo("count").await;
@@ -367,14 +414,14 @@ mod tests {
         assert_eq!(r.count_pending_for_node("n2", NOW).await.unwrap(), 1);
     }
 
-    /// 拉取时不该把节点注定拒收的命令塞给它；顺手把这些行落成 expired，
-    /// 否则它们会永远停在 pending（节点早就不会再拉，状态再也改不了）。
+    /// Pull should not give the node commands it will definitely reject; also expire those rows
+    /// so they don't stay on pending forever (node won't pull again, state can never change).
     #[tokio::test]
     async fn pending_for_skips_and_expires_overdue_ones() {
         let r = repo("pending").await;
         issue(&r, "live", "n1", 30, 60).await;
         issue(&r, "stale", "n1", 61, 60).await;
-        // 已投递过的过期命令不该被这次清理碰到
+        // Already-delivered overdue command should not be affected by this cleanup
         issue(&r, "delivered", "n1", 86_400, 60).await;
         r.pending_for("n1", 1, NOW - 86_400 * SEC).await.unwrap();
 
@@ -385,19 +432,20 @@ mod tests {
 
         assert_eq!(state_of(&r, "stale").await, "expired");
         assert_eq!(state_of(&r, "delivered").await, "delivered");
-        // 拉走的那条标成已投递，不会被重复下发
+        // The pulled one is marked as delivered, won't be re-dispatched
         assert!(r.pending_for("n1", 10, NOW).await.unwrap().is_empty());
         assert_eq!(state_of(&r, "live").await, "delivered");
     }
 
-    /// 强制删除前的作废：不看 TTL，把所有还没发出的都作废并返回，供调用方写审计。
+    /// Invalidation before forced deletion: ignores TTL, expires all unsent commands and returns them
+    /// for the caller to write audit.
     #[tokio::test]
     async fn cancel_pending_for_node_expires_every_pending_row() {
         let r = repo("cancel").await;
-        // 先造一条「已投递」的：拉走之后就不再是「未发出」了
+        // First create a "delivered" one: after being pulled it's no longer "unsent"
         issue(&r, "delivered", "n1", 30, 60).await;
         r.pending_for("n1", 1, NOW).await.unwrap();
-        // 再补一条过期的 pending：它不会再被拉取路径扫到（节点不会来拉了）
+        // Then add an overdue pending: it won't be hit by the pull path anymore (node won't come)
         issue(&r, "overdue", "n1", 86_400, 60).await;
         issue(&r, "live", "n1", 30, 60).await;
         issue(&r, "other", "n2", 30, 60).await;
@@ -410,14 +458,14 @@ mod tests {
 
         assert_eq!(state_of(&r, "live").await, "expired");
         assert_eq!(state_of(&r, "overdue").await, "expired");
-        // 已投递的不受影响（它已经不是「未发出」），别人的命令也不动
+        // Delivered is not affected (it's no longer "unsent"), others' commands untouched
         assert_eq!(state_of(&r, "delivered").await, "delivered");
         assert_eq!(r.count_pending_for_node("n2", NOW).await.unwrap(), 1);
-        // 幂等：再作废一次没有可作废的行
+        // Idempotent: invalidating again when there's nothing to invalidate
         assert!(r.cancel_pending_for_node("n1").await.unwrap().is_empty());
     }
 
-    /// 作废要留痕：audit_log 里 outcome=cancelled，且不影响既有的 issued 行。
+    /// Invalidation must leave a trace: audit_log has outcome=cancelled, doesn't affect existing issued rows.
     #[tokio::test]
     async fn cancelled_commands_are_audited_with_outcome() {
         let r = repo("audit").await;
@@ -440,7 +488,7 @@ mod tests {
         let rows: Vec<(String, String)> =
             sqlx::query_as("SELECT actor, outcome FROM audit_log WHERE command_id = ? ORDER BY id")
                 .bind("c1")
-                .fetch_all(r_pool(&r).await)
+                .fetch_all(r_pool(&r))
                 .await
                 .unwrap();
         assert_eq!(
@@ -452,8 +500,8 @@ mod tests {
         );
     }
 
-    /// 测试里要直接查 audit_log：借 repo 的池子（同 crate，直接拿 pool）
-    async fn r_pool(r: &CommandsRepo) -> &SqlitePool {
+    /// Tests need direct access to `audit_log`: borrow the repo's pool (same crate, direct pool access)
+    fn r_pool(r: &CommandsRepo) -> &SqlitePool {
         &r.pool
     }
 }

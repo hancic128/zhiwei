@@ -3,10 +3,11 @@ import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 
 /**
- * 顶部大字卡片（概览式指标）。
+ * Top stat cards (overview-style metrics).
  *
- * 待办 / 节点 / 服务 / 证书四个页面共用同一套外壳——各页自己写一遍会让
- * 「整卡可点」「色调随状态变」这类规则在四个地方慢慢走偏。
+ * The four pages Todo / Nodes / Services / Certificates share the same shell —
+ * writing it per-page would let rules like "whole card is clickable" and "tone follows status"
+ * gradually drift across four places.
  */
 export interface StatCard {
   key: string;
@@ -14,10 +15,10 @@ export interface StatCard {
   value: React.ReactNode;
   hint?: string;
   tone?: "neutral" | "danger" | "warn" | "success";
-  /** 有 `to` 渲染成链接；否则配 `onClick` 渲染成按钮（用作就地筛选） */
+  /** With `to`, render as a link; otherwise pair with `onClick` to render as a button (used for inline filtering) */
   to?: string;
   onClick?: () => void;
-  /** 当前正按这张卡筛选 */
+  /** Currently filtering by this card */
   active?: boolean;
   icon?: React.ElementType;
 }

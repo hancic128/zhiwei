@@ -9,9 +9,9 @@ body:
       value: |
         ## Feature Request
 
-        Thanks for your feature request! Before submitting, please read our
-        [positioning document](./docs/POSITIONING.md) to understand our goals
-        and boundaries.
+        Thanks for your feature request! Before submitting, please read
+        [README.md](./README.md) and skim [GOVERNANCE.md](./GOVERNANCE.md)
+        to understand the project's goals and boundaries.
 
         **Key question**: Does this feature help **one person manage N machines**,
         or does it enable **team collaboration**? Only the former fits this project.
@@ -21,7 +21,7 @@ body:
     attributes:
       label: Alignment Check
       options:
-        - label: I have read the [positioning document](./docs/POSITIONING.md)
+        - label: I have read [README.md](./README.md) and [GOVERNANCE.md](./GOVERNANCE.md)
           required: true
         - label: This feature is for a single operator managing multiple machines
           required: true

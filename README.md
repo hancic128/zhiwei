@@ -54,7 +54,7 @@ First monitor startup:
 ### Install Pre-built Binary
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hancic128/zhiwei/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/zhiwei/zhiwei/main/scripts/install.sh | sh
 ```
 
 Supports Linux (x86_64/aarch64 × musl/gnu) and macOS (arm64/x86_64).
@@ -66,6 +66,20 @@ Use `-s -- --bin monitor` to install the server.
 docker build -t zhiwei-monitor .
 docker run -d -p 8443:8443 -v zhiwei-data:/var/lib/zhiwei zhiwei-monitor
 ```
+
+## Screenshots
+
+| Overview | Node detail |
+| --- | --- |
+| ![Overview](./docs/img/overview.png) | ![Node detail](./docs/img/node-detail.png) |
+
+| Certificates | Alerts |
+| --- | --- |
+| ![Certificates](./docs/img/certificates.png) | ![Alerts](./docs/img/alerts.png) |
+
+| Containers | Settings |
+| --- | --- |
+| ![Containers](./docs/img/containers.png) | ![Settings](./docs/img/settings.png) |
 
 ## Architecture
 
@@ -103,8 +117,21 @@ See [docs/DEPLOY.md](./docs/DEPLOY.md) for full deployment guide covering:
 
 - Self-hosted (binary, Docker, systemd)
 - Managed platforms (Render, Railway, Northflank)
-- China / isolated network deployment
+- Isolated / restricted networks (GitHub Releases not reachable)
 - Enrollment via console
+
+## Documentation
+
+- [docs/FAQ.md](./docs/FAQ.md) — short answers to common questions
+- [docs/architecture.md](./docs/architecture.md) — system overview
+- [docs/api.md](./docs/api.md) — REST API and MCP server reference
+- [docs/DEPLOY.md](./docs/DEPLOY.md) — deployment guide
+- [docs/ALERTS.md](./docs/ALERTS.md) — alert rules and notification channels
+- [docs/PROBES.md](./docs/PROBES.md) — service health probes
+- [docs/SERVICE-HEALTH.md](./docs/SERVICE-HEALTH.md) — service health design (current + planned)
+- [docs/BACKUP.md](./docs/BACKUP.md) — backup and restore
+- [docs/TROUBLESHOOTING.md](./docs/TROUBLESHOOTING.md) — common issues
+- [docs/roadmap.md](./docs/roadmap.md) — current status and upcoming work
 
 ## Configuration
 
@@ -128,7 +155,5 @@ read endpoints, write endpoints, AI tokens, MCP server tools, node-side endpoint
 See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## License
-
-Apache-2.0
 
 Apache-2.0

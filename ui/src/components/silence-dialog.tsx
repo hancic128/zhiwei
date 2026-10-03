@@ -5,12 +5,13 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-/** 静默时长档位（小时），按业务诉求定为 1/3/12/24 */
+/** Silence duration tiers (in hours), set to 1/3/12/24 per business requirement */
 const PRESETS_HOURS = [1, 3, 12, 24] as const;
 
 /**
- * 把 Date 截到分钟，再转成本地时区 ISO 串供 `<input type="datetime-local">` 使用。
- * `<input>` 的 value 期望形如 `YYYY-MM-DDTHH:mm`（无时区后缀）。
+ * Truncate a Date to the minute, then convert it to a local-time-zone ISO
+ * string for `<input type="datetime-local">`. The `<input>` value is expected
+ * to look like `YYYY-MM-DDTHH:mm` (no timezone suffix).
  */
 function toLocalInputValue(d: Date): string {
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -20,7 +21,7 @@ function toLocalInputValue(d: Date): string {
   );
 }
 
-/** 把 datetime-local 输入框的字符串转回 Date；输入空 / 非法时返回 null。 */
+/** Convert a datetime-local input string back to Date; returns null on empty / invalid input. */
 function fromLocalInputValue(v: string): Date | null {
   if (!v) return null;
   const d = new Date(v);
@@ -28,15 +29,18 @@ function fromLocalInputValue(v: string): Date | null {
 }
 
 /**
- * 告警静默对话框（规范 §7.10）。
+ * Alert silence dialog (spec §7.10).
  *
- * - 顶部说明「这条告警将静默到 xx:xx」
- * - 中间 4 个预设按钮：1 小时 / 3 小时 / 12 小时 / 24 小时；点选即同步到自定义时间
- * - 底部一个「截止到」`<input type="datetime-local">`，可手填任意未来时间
- *   - 用户改了预设：截止时间立刻同步
- *   - 用户改了自定义：清除预设的「选中」标记（表示偏离了预设）
- * - 「确认静默」按钮在截止时间非未来时禁用
- * - 截止时间换算成「整数分钟」调后端，保证和服务端的契约一致
+ * - Header explains "this alert will be silenced until xx:xx"
+ * - Middle row: 4 preset buttons (1 hour / 3 hours / 12 hours / 24 hours);
+ *   picking one syncs to the custom time field
+ * - Bottom: an "until" `<input type="datetime-local">` for any future time
+ *   - User changed a preset: the until time syncs immediately
+ *   - User changed the custom time: clears the "selected" marker on the
+ *     presets (meaning it has deviated from them)
+ * - "Confirm silence" button is disabled when the until time isn't in the future
+ * - Until time is converted to whole minutes before calling the backend,
+ *   to match the server contract
  */
 export function SilenceDialog({
   open,
@@ -52,7 +56,7 @@ export function SilenceDialog({
   const { t, i18n } = useTranslation();
   const locale = i18n.language || "en-US";
 
-  // 初始值 = 当前 + 1 小时；预设默认选中 1h
+  // Initial value = now + 1 hour; default preset is 1h
   const initialUntil = React.useMemo(() => {
     const d = new Date();
     d.setHours(d.getHours() + 1, 0, 0, 0);
@@ -61,7 +65,7 @@ export function SilenceDialog({
   const [until, setUntil] = React.useState<Date>(() => initialUntil);
   const [selectedPreset, setSelectedPreset] = React.useState<number | null>(1);
 
-  // 每次打开对话框时重置：默认 1 小时
+  // Reset on every dialog open: default 1 hour
   React.useEffect(() => {
     if (!open) return;
     const d = new Date();
@@ -81,7 +85,7 @@ export function SilenceDialog({
     const d = fromLocalInputValue(v);
     if (!d) return;
     setUntil(d);
-    // 自定义时间 → 清除预设高亮（用户改的不是这套档位）
+    // Custom time -> clear preset highlight (user picked something outside this tier set)
     setSelectedPreset(null);
   };
 
@@ -92,7 +96,7 @@ export function SilenceDialog({
   const isFuture = until.getTime() > Date.now();
   const canConfirm = isFuture && minutes > 0;
 
-  // 预设按钮旁的「绝对时间」小字（让用户不必脑算）
+  // "Absolute time" caption next to each preset button (so users don't have to do the math)
   const presetUntilLabel = (h: number) => {
     const d = new Date();
     d.setHours(d.getHours() + h, 0, 0, 0);
@@ -137,7 +141,7 @@ export function SilenceDialog({
                 {t("alerts.silenceDesc")}
               </DialogPrimitive.Description>
 
-              {/* 预设档位：4 个胶囊按钮；选中态用 primary 高亮 */}
+              {/* Preset tiers: 4 pill buttons; selected state highlighted via primary color */}
               <div
                 className="grid grid-cols-4 gap-2"
                 role="radiogroup"
@@ -171,7 +175,7 @@ export function SilenceDialog({
                 })}
               </div>
 
-              {/* 自定义截止时间：datetime-local；非法值（过去 / 空）时禁用确认按钮 */}
+              {/* Custom until time: datetime-local; confirm disabled on invalid value (past / empty) */}
               <div>
                 <label
                   htmlFor="silence-until"

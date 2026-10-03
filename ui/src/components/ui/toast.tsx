@@ -10,8 +10,8 @@ import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
 
 /**
- * 规范 7.11：所有异步操作必须通过 Toast 反馈，禁止 alert()。
- * success / info 3 秒自动消失；error / warn 必须手动关闭；最多同时 3 条。
+ * Spec 7.11: all async operations must give feedback through Toast, no alert() allowed.
+ * success / info auto-dismiss after 3 seconds; error / warn must be closed manually; max 3 at a time.
  */
 export type ToastLevel = "success" | "error" | "warn" | "info";
 
@@ -55,7 +55,7 @@ interface ToastContextValue {
   push: (level: ToastLevel, message: string) => void;
 }
 
-/** 提示自动消失的时间：统一 5 秒 */
+/** Toast auto-dismiss duration: unified 5 seconds */
 const TOAST_TTL = 5000;
 
 const ToastContext = React.createContext<ToastContextValue | null>(null);
@@ -70,7 +70,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   const { t } = useTranslation();
   const [items, setItems] = React.useState<ToastItem[]>([]);
   const nextId = React.useRef(1);
-  /** 每条提示的自动消失定时器：手动关闭 / 卸载时要能取消 */
+  /** Auto-dismiss timer per toast: must be cancelable on manual close / unmount */
   const timers = React.useRef(new Map<number, number>());
 
   const remove = React.useCallback((id: number) => {
@@ -80,9 +80,9 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   const push = React.useCallback(
     (level: ToastLevel, message: string) => {
       const id = nextId.current++;
-      // 最多 3 条，超出时最早的一条被移除
+      // Max 3 entries; beyond that, the earliest one is removed
       setItems((prev) => [...prev, { id, level, message }].slice(-3));
-      // 所有提示都自动消失：常驻的横幅会挡住内容，也容易被当成「还没处理完」
+      // All toasts auto-dismiss: a persistent banner would block content and be misread as "still processing"
       const timer = window.setTimeout(() => {
         timers.current.delete(id);
         remove(id);
@@ -92,7 +92,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     [remove],
   );
 
-  // 手动关掉时把定时器一并清掉，避免它稍后再来删一个已经不在的 id
+  // When manually closed, also clear the timer to prevent it from later deleting an id that's no longer there
   const close = React.useCallback(
     (id: number) => {
       const timer = timers.current.get(id);
@@ -105,7 +105,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     [remove],
   );
 
-  // 卸载时清干净，避免定时器在 provider 消失后触发 setState
+  // Clear on unmount to prevent timers from triggering setState after the provider is gone
   React.useEffect(
     () => () => {
       timers.current.forEach((timer) => window.clearTimeout(timer));
@@ -122,7 +122,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
       <div
         className={cn(
           "fixed top-4 left-1/2 -translate-x-1/2 z-[60] flex flex-col gap-2",
-          // 规范 7.11.3：桌面 min 320 / max 480，移动端收窄到视口内（避免窄屏横向溢出）
+          // Spec 7.11.3: desktop min 320 / max 480, narrow on mobile within the viewport (avoid horizontal overflow on narrow screens)
           "w-[min(480px,calc(100vw-2rem))] min-w-[320px]",
         )}
         role="status"
