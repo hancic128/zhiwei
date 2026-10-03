@@ -1,3 +1,5 @@
+[English](./README.md) | [中文文档](./README.zh-CN.md)
+
 # ZhiWei
 
 > Know the subtle, await the right moment.
@@ -66,6 +68,20 @@ Use `-s -- --bin monitor` to install the server.
 docker build -t zhiwei-monitor .
 docker run -d -p 8443:8443 -v zhiwei-data:/var/lib/zhiwei zhiwei-monitor
 ```
+
+## Screenshots
+
+| Overview | Node detail |
+| --- | --- |
+| ![Overview](./docs/img/overview.png) | ![Node detail](./docs/img/node-detail.png) |
+
+| Certificates | Alerts |
+| --- | --- |
+| ![Certificates](./docs/img/certificates.png) | ![Alerts](./docs/img/alerts.png) |
+
+| Containers | Settings |
+| --- | --- |
+| ![Containers](./docs/img/containers.png) | ![Settings](./docs/img/settings.png) |
 
 ## Architecture
 

@@ -1,0 +1,31 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software in your research or production setup, please
+  cite it using the metadata from this file.
+title: ZhiWei
+abstract: >-
+  Self-hosted, single-binary infrastructure monitoring platform for indie
+  developers and one-person companies — resource monitoring, service
+  health, certificate management, remote operations, alerting, and MCP
+  integration. One human plus one agent, managing N machines.
+type: software
+keywords:
+  - infrastructure-monitoring
+  - observability
+  - self-hosted
+  - single-binary
+  - rust
+  - sqlite
+  - ed25519
+  - mcp
+  - devops
+license: Apache-2.0
+repository-code: https://github.com/hancic128/zhiwei
+url: https://github.com/hancic128/zhiwei
+authors:
+  - family-names: hancic128
+    given-names: hancic128
+    alias: hancic128
+    email: hancic128@users.noreply.github.com
+date-released: 2026-10-03
+version: 0.0.1
