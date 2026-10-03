@@ -1,11 +1,11 @@
-/** 规范 03 / 05 / 10：主题色、明暗、语言、时区、侧边栏状态统一持久化。
- *  key 命名沿用规范（theme / colorScheme / locale / timezone），
- *  侧边栏折叠沿用规范给出的 `tj_sidebar` 约定前缀。
+/** Spec 03 / 05 / 10: theme color, light/dark, locale, timezone, sidebar state persisted uniformly.
+ *  key naming follows the spec (theme / colorScheme / locale / timezone),
+ *  sidebar collapse follows the spec's `tj_sidebar` prefix convention.
  */
 
 import { TIMEZONES } from "@/lib/utils";
 
-/** 6 个可选时区（设置页下拉与界面渲染共用同一份，别在别处再抄一遍） */
+/** 6 selectable timezones (the settings page dropdown and UI rendering share this single source, don't re-copy it elsewhere) */
 const SUPPORTED_TZ: readonly string[] = TIMEZONES.map((z) => z.tz);
 
 export const THEMES = [
@@ -42,7 +42,7 @@ function write(key: string, value: string): void {
   try {
     localStorage.setItem(key, value);
   } catch {
-    /* 隐私模式下 localStorage 可能不可用，忽略 */
+    /* In private mode localStorage may be unavailable, ignore */
   }
 }
 
@@ -74,10 +74,12 @@ export function loadTimezone(): string {
   const browser = Intl.DateTimeFormat().resolvedOptions().timeZone;
   if (SUPPORTED_TZ.includes(browser)) return browser;
 
-  // 兜底必须落在上面这 6 项里：设置页的下拉就这 6 个选项，`<select>` 拿到不认识的
-  // 值会静默退回首项——于是「设置里显示北京 (UTC+8)」而整个界面按浏览器时区
-  // 渲染（容器 / CI / 服务器上常是 UTC），两边对不上。浏览器时区不在列表里时，
-  // 换成**当前 UTC 偏移最接近**的那一项：墙上时间最多差一两个小时，而不是差一整圈。
+  // Fallback must land in the 6 options above: the settings page dropdown has exactly these 6 options,
+  // and `<select>` silently returns to the first item for unrecognized values — so the settings page
+  // shows "Beijing (UTC+8)" while the entire interface renders in the browser's timezone
+  // (often UTC on containers / CI / servers), and the two don't match. When the browser timezone
+  // isn't in the list, fall back to the **closest current UTC offset** option: wall-clock time
+  // will be off by at most an hour or two, rather than a full rotation.
   const target = tzOffsetMinutes(browser);
   let best = SUPPORTED_TZ[0];
   let bestDiff = Number.POSITIVE_INFINITY;
@@ -92,10 +94,10 @@ export function loadTimezone(): string {
 }
 
 /**
- * 某 IANA 时区此刻相对 UTC 的偏移（分钟）。
+ * An IANA timezone's current offset relative to UTC (in minutes).
  *
- * 不走 dayjs：`loadTimezone()` 在模块初始化时就可能被调用，而 dayjs 的 tz 插件
- * 是在 utils.ts 里注册的，这里不能假设它已经生效。
+ * Doesn't use dayjs: `loadTimezone()` may be called during module initialization,
+ * and dayjs's tz plugin is registered in utils.ts — we can't assume it's already active here.
  */
 function tzOffsetMinutes(tz: string, at: Date = new Date()): number {
   try {
@@ -115,23 +117,23 @@ function tzOffsetMinutes(tz: string, at: Date = new Date()): number {
       Number(p.year),
       Number(p.month) - 1,
       Number(p.day),
-      Number(p.hour) % 24, // 某些区域把午夜给成 "24"
+      Number(p.hour) % 24, // Some locales report midnight as "24"
       Number(p.minute),
       Number(p.second),
     );
     return Math.round((asUTC - at.getTime()) / 60000);
   } catch {
-    // 浏览器不认这个时区名 → 当 UTC 处理（继续走最近偏移匹配）
+    // Browser doesn't recognize this timezone name → treat as UTC (continue with nearest-offset matching)
     return 0;
   }
 }
 
-/** 侧边栏折叠态：规范要求首帧恢复，避免刷新闪烁 */
+/** Sidebar collapsed state: spec requires first-frame restoration to avoid refresh flicker */
 export function loadSidebarCollapsed(): boolean {
   return read(KEYS.sidebar) === "collapsed";
 }
 
-/** 在 React 挂载前调用，避免主题/暗色首帧闪烁 */
+/** Called before React mount to avoid theme / dark mode first-frame flicker */
 export function applyThemeEarly(): void {
   const root = document.documentElement;
   root.setAttribute("data-theme", loadTheme());
@@ -147,8 +149,9 @@ export const persist = {
 };
 
 export const getAdminToken = () => read(KEYS.adminToken) ?? "";
-/** 写入时强制 trim：后端 `read_auth_ok` 用长度恒定的常量时间比较，
- *  多一个空格就 401；登录页和设置页的入口 trim 一遍，但把规则放在这里更稳。 */
+/** Force trim on write: backend's `read_auth_ok` uses constant-time comparison with a fixed length,
+ *  one extra space results in 401; the login and settings page entries already trim,
+ *  but keeping the rule here is safer. */
 export const setAdminToken = (v: string) => write(KEYS.adminToken, v.trim());
 export const clearAdminToken = () => {
   try {

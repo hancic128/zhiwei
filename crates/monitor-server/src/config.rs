@@ -5,7 +5,7 @@ pub struct MonitorConfig {
     pub data_dir: PathBuf,
     pub listen: String,
     pub server_cert_cn: String,
-    /// ops-server 的本地地址（仅回环）
+    /// ops-server local address (loopback only)
     pub ops_endpoint: String,
 }
 

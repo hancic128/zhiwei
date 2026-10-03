@@ -49,8 +49,8 @@ curl -sSL {{BASE_URL}}/install-node.sh | \
   bash -s -- --alias beijing-edge --tags "prod bj edge"
 ```
 
-Tags can be separated by spaces, commas, or Chinese 顿号 (same parsing as the
-console input box). They are **only reported on first enroll**: once a node
+Tags can be separated by spaces, commas, or full-width commas `、` (same
+parsing as the console input box). They are **only reported on first enroll**: once a node
 already has `node.id`, enrolling again won't update tags. Edit them from the
 console, or pass `--reinstall` to re-enroll (wipes the old binary / env /
 state dir and assigns a new node_id).

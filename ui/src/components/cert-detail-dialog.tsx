@@ -11,13 +11,13 @@ import { copyText, formatTime } from "@/lib/utils";
 export interface CertDetailTarget extends CertInfo {
   hostname: string;
   nodeId: string;
-  /** 命中的证书路径来源（空 = 内置扫描） */
+  /** Matched certificate path source (empty = built-in scan) */
   sourcePath: string | null;
 }
 
 /**
- * 证书详情：一张证书的全部可读信息（列表列宽有限，SAN / 序列号 / 完整主体
- * 都塞不进表格，但排查「链不对 / 域名没覆盖」时又必须要）。
+ * Certificate detail: all readable info for a certificate (the list column has limited width,
+ * so SAN / serial / full subject don't fit in the table, but are essential when troubleshooting "chain mismatch / domain not covered").
  */
 export function CertDetailDialog({
   cert,

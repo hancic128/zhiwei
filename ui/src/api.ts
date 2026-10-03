@@ -1,10 +1,11 @@
 /**
- * 与 monitor 通信的 API 客户端。
+ * API client that talks to monitor.
  *
- * 控制台走 `Authorization: Bearer <admin token>`；节点走 Ed25519 请求签名，
- * 两套凭据互不影响。
+ * The console uses `Authorization: Bearer <admin token>`; nodes use Ed25519 request signatures.
+ * The two credentials don't affect each other.
  *
- * 后端时间戳是 Unix 纳秒，这里统一转成毫秒，UI 层只处理毫秒。
+ * Backend timestamps are Unix nanoseconds; here they're uniformly converted to milliseconds,
+ * and the UI layer only handles milliseconds.
  */
 
 import { clearAdminToken, getAdminToken } from "@/lib/prefs";
@@ -29,15 +30,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
 
   if (res.status === 401) {
-    // 受保护端点 401：清掉 token，让 App.tsx 回到登录页。
-    // `/v1` 自身永远 200（仅靠 body.authenticated 区分），所以这条事件
-    // 不会被自己误触发。
+    // Protected endpoint 401: clear the token, let App.tsx return to the login page.
+    // `/v1` itself always returns 200 (distinguishes via body.authenticated),
+    // so this event won't be triggered by it.
     window.dispatchEvent(new CustomEvent("zhiwei:unauthorized"));
     throw new ApiError(401, "unauthorized");
   }
   if (!res.ok) {
-    // 服务端会给人话原因（如「signal 只能是 term 或 kill」），优先展示它；
-    // 拿不到才退回状态码，交给 friendlyError 翻译成友好文案
+    // Server gives a human-readable reason (e.g. "signal must be term or kill"), prefer it;
+    // only fall back to status code if unavailable, which friendlyError translates to friendly text
     const text = await res.text().catch(() => "");
     let message = `http_${res.status}`;
     try {
@@ -46,11 +47,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         message = body.error.trim();
       }
     } catch {
-      // 非 JSON 响应体：保持状态码
+      // Non-JSON response body: keep the status code
     }
     throw new ApiError(res.status, message);
   }
-  // 204 与空响应体（如 DELETE / PATCH）没有 JSON
+  // 204 and empty response bodies (e.g. DELETE / PATCH) have no JSON
   if (res.status === 204) return undefined as T;
   const text = await res.text();
   return (text ? JSON.parse(text) : undefined) as T;
@@ -67,7 +68,7 @@ export interface InterfaceInfo {
   loopback: boolean;
 }
 
-/** 节点主机基本信息（见 crates/node-agent 的 build_host_info） */
+/** Node host basic info (see crates/node-agent's build_host_info) */
 export interface HostInfo {
   hostname?: string;
   os_name?: string;
@@ -82,7 +83,7 @@ export interface HostInfo {
   boot_time_unix_seconds?: number;
   interfaces?: InterfaceInfo[];
   agent_version?: string;
-  /** 当前 node-agent 进程启动的 Unix 秒；0 或 undefined = 老 agent / 未知 */
+  /** Unix seconds of the current node-agent process start; 0 or undefined = old agent / unknown */
   agent_started_at_unix_seconds?: number;
 }
 
@@ -100,13 +101,13 @@ interface RawNode {
   command_channel?: RawCommandChannel;
 }
 
-/** 命令通道状态：节点在线却不来拉命令时，启停 / 日志都是死按钮 */
+/** Command channel state: when a node is online but doesn't pull commands, start/stop/log are dead buttons */
 interface RawCommandChannel {
   state: string;
   last_poll_age_ms: number | null;
 }
 
-/** 最新一帧里的关键指标（列表页 CPU / 内存 / 磁盘列直接用，免去每节点一次请求） */
+/** Key metrics in the latest frame (list page CPU / memory / disk columns use these directly, avoiding one request per node) */
 export interface NodeLatest {
   ts_unix_nano: number;
   cpu_percent: number | null;
@@ -123,27 +124,27 @@ export interface NodeView {
   id: string;
   hostname: string;
   labels: Record<string, string>;
-  /** 管理员给的简短别称（≤10 字符），空串表示未设置 */
+  /** Admin-given short alias (≤10 chars), empty string means unset */
   alias: string;
-  /** 管理员给的标签（≤10 个） */
+  /** Admin-given tags (≤10) */
   tags: string[];
   enrolled_at_ms: number;
   last_seen_ms: number | null;
   host_info: HostInfo;
   latest: NodeLatest | null;
-  /** 节点身份公钥（base64）；界面上按「密文」掩码展示 */
+  /** Node identity public key (base64); displayed masked as "secret" on the UI */
   public_key: string;
-  /** 命令通道状态；老 monitor 不带这个字段，按 unknown 处理 */
+  /** Command channel state; older monitors don't include this field, treat as unknown */
   command_channel: CommandChannel;
 }
 
 /**
- * 命令通道状态（见后端 crates/monitor-server/src/control_channel.rs）。
- * `down` = 节点在线却一直不来拉命令，它的启停 / 重启 / 日志都执行不了。
+ * Command channel state (see backend crates/monitor-server/src/control_channel.rs).
+ * `down` = node is online but never pulls commands; its start/stop/restart/log all fail.
  */
 export interface CommandChannel {
   state: "ok" | "down" | "unknown";
-  /** 最近一次拉命令距今多少毫秒；本进程从没见过它拉就是 null */
+  /** Milliseconds since last command pull; null if this process has never seen it pull */
   last_poll_age_ms: number | null;
 }
 
@@ -154,7 +155,7 @@ export interface IndexBody {
   endpoints: string[];
   nodes: number;
   telemetry_batches: number;
-  /** monitor 进程启动时刻（= 最近一次部署 / 重启）；顶栏「部署于 …」用它 */
+  /** monitor process start time (= latest deploy / restart); header's "deployed at …" uses this */
   started_at_unix_nano: number;
 }
 
@@ -184,7 +185,7 @@ export interface SeriesView {
   metric: string;
   points: Array<{ t: number; v: number }>;
   latest: number | null;
-  /** raw = 原始 10 秒数据；hourly = 小时聚合（窗口起点早于原始保留期） */
+  /** raw = raw 10-second data; hourly = hourly aggregate (window start before raw retention) */
   resolution?: "raw" | "hourly";
 }
 
@@ -207,14 +208,14 @@ export const api = {
       latest: n.latest ?? null,
       public_key: n.public_key ?? "",
       command_channel: {
-        // 老 monitor 不返回这个字段：当作「说不好」，别误报故障
+        // Older monitors don't return this field: treat as "unknown", don't misreport a fault
         state: (n.command_channel?.state as CommandChannel["state"]) ?? "unknown",
         last_poll_age_ms: n.command_channel?.last_poll_age_ms ?? null,
       },
     }));
   },
 
-  /** 改管理员维护的别名 / 标签（只传要改的字段） */
+  /** Update admin-maintained alias / tags (only pass fields to change) */
   updateNode: (
     id: string,
     patch: { alias?: string; tags?: string[] },
@@ -228,12 +229,13 @@ export const api = {
       },
     ),
 
-  /** 节点永久删除：连带所有 telemetry / inventory / 探针结果 / 告警一起清掉。
-   * 成功后端返回 204，本接口只关心有没有抛错。
+  /** Permanent node deletion: clears all telemetry / inventory / probe results / alerts.
+   * Backend returns 204 on success; this endpoint only cares whether an error was thrown.
    *
-   * 节点还有「未发出且没过期」的命令时后端返回 409（默认 TTL 只有 60s，
-   * 而节点已经重装过 / 命令通道不通时这些命令永远没人来拉）。force=true 让后端
-   * 先把它们作废（audit_log 里留 outcome=cancelled）再删。 */
+   * Backend returns 409 when there are "unsent and unexpired" commands (default TTL is only 60s,
+   * but the node may have been reinstalled / command channel is down, so these commands
+   * never get pulled). force=true tells backend to invalidate them first (outcome=cancelled
+   * is recorded in audit_log) before deletion. */
   deleteNode: (id: string, force = false) =>
     request<void>(`/v1/nodes/${encodeURIComponent(id)}${force ? "?force=1" : ""}`, {
       method: "DELETE",
@@ -244,7 +246,7 @@ export const api = {
       `/v1/nodes/${encodeURIComponent(id)}/telemetry?limit=${limit}`,
     ),
 
-  /** 趋势图取数：`from`/`to` 是毫秒时间窗；`rate` 对累计型指标做每秒差分 */
+  /** Trend chart data: `from`/`to` are millisecond time windows; `rate` does per-second differencing for cumulative metrics */
   series: (id: string, metric: string, opts: SeriesQuery = {}) => {
     const params = new URLSearchParams({
       metric,
@@ -266,9 +268,9 @@ export interface SeriesQuery {
   rate?: boolean;
 }
 
-// ---------- 跨节点 / 跨服务的聚合趋势 ----------
+// ---------- Aggregated trends across nodes / services ----------
 
-/** 全部节点同一指标的趋势：一条线一个节点 */
+/** Trend for all nodes, same metric: one line per node */
 export interface AllNodesSeriesView {
   metric: string;
   resolution: "raw" | "hourly";
@@ -280,13 +282,13 @@ export interface AllNodesSeriesView {
   }>;
 }
 
-/** 服务健康时间线：每桶里「有多少比例的探测是 ok 的」（百分比） */
+/** Service health timeline: percentage of probes that are "ok" in each bucket */
 export interface ServicesTimelineView {
   from_ms: number;
   to_ms: number;
   bucket_ms: number;
   level: "service" | "probe";
-  /** service 粒度时一条线一个服务；probe 粒度时一条线一个探针（name 带服务名前缀） */
+  /** service granularity: one line per service; probe granularity: one line per probe (name has service name prefix) */
   series: Array<{
     id: string;
     name: string;
@@ -295,7 +297,7 @@ export interface ServicesTimelineView {
   }>;
 }
 
-/** 跨对象趋势的统一取数口 */
+/** Unified data source for cross-object trends */
 export const trendApi = {
   allNodes: (metric: string, opts: SeriesQuery = {}) => {
     const params = new URLSearchParams({
@@ -318,7 +320,7 @@ export const trendApi = {
     ),
 };
 
-/** 本项目当前采集的指标名（见 crates/node-agent 的 build_batch）。 */
+/** Metric names currently collected in this project (see crates/node-agent's build_batch). */
 export const METRICS = {
   cpu: "host.cpu.usage",
   memUsed: "host.mem.used_bytes",
@@ -330,7 +332,7 @@ export const METRICS = {
   netTx: "host.net.tx_bytes",
 } as const;
 
-/** 图表里用到的序列转换 */
+/** Series conversions used in charts */
 export const toPairs = (points: Array<{ t: number; v: number }>) =>
   points.map((p) => [p.t, p.v] as [number, number]);
 
@@ -343,10 +345,10 @@ export function setToken(token: string): void {
   localStorage.setItem("zhiwei.adminToken", token);
 }
 
-/** App.tsx 在收到 `zhiwei:unauthorized` 事件后调用，清掉本地缓存的凭据 */
+/** App.tsx calls this after receiving the `zhiwei:unauthorized` event, clearing the locally cached credentials */
 export { clearAdminToken };
 
-/** 展示用系统标签：优先 sysinfo 的长版本号，回落到 name + version */
+/** Display label for the system: prefer sysinfo's long version, fall back to name + version */
 export function osLabel(host: HostInfo | undefined): string {
   if (!host) return "";
   const long = host.long_os_version?.trim();
@@ -356,7 +358,7 @@ export function osLabel(host: HostInfo | undefined): string {
   return `${name} ${ver}`.trim();
 }
 
-/** 主 IP：优先非回环 IPv4，其次任意非回环地址 */
+/** Primary IP: prefer non-loopback IPv4, then any non-loopback address */
 export function primaryIp(host: HostInfo | undefined): string {
   if (!host?.interfaces) return "";
   const candidates = host.interfaces
@@ -367,19 +369,19 @@ export function primaryIp(host: HostInfo | undefined): string {
   return chosen ? chosen.addr : "";
 }
 
-/** 非回环网卡的地址列表，用于详情页 */
+/** Non-loopback network interface addresses, for the detail page */
 export function hostAddresses(host: HostInfo | undefined) {
   if (!host?.interfaces) return [];
   return host.interfaces
     .filter((i) => !i.loopback)
     .flatMap((i) =>
       i.addresses
-        .filter((a) => !a.addr.startsWith("fe80")) // 过滤链路本地地址
+        .filter((a) => !a.addr.startsWith("fe80")) // Filter link-local addresses
         .map((a) => ({ iface: i.name, addr: a.addr, prefix: a.prefix })),
     );
 }
 
-// ---------- 容器与进程（来自 /v1/inventory，快照） ----------
+// ---------- Containers and processes (from /v1/inventory, snapshot) ----------
 
 export type ContainerState =
   | "running"
@@ -398,26 +400,26 @@ export interface ContainerInfo {
   status: string;
   runtime: string;
   created_at_unix_nano: number;
-  /** 逐容器 inspect 得到；0 = 未知（节点 agent 未上报） */
+  /** From per-container inspect; 0 = unknown (node agent didn't report) */
   started_at_unix_nano?: number;
   finished_at_unix_nano?: number;
-  /** compose 项目 / 服务（自动标签，「应用」维度由它推导）；非 compose 容器为空 */
+  /** compose project / service (auto-tag, "application" dimension derived from it); non-compose containers have this empty */
   compose_project?: string;
   compose_service?: string;
-  /** 内存用量（已扣 page cache）；0 = 未上报 / 未运行 */
+  /** Memory usage (page cache deducted); 0 = not reported / not running */
   mem_usage_bytes?: number;
-  /** 内存限额（docker HostConfig.Memory）；0 = 不限 */
+  /** Memory limit (docker HostConfig.Memory); 0 = unlimited */
   mem_limit_bytes?: number;
-  /** CPU 占用百分比（相对全部核心）；0 = 未上报 / 未运行 */
+  /** CPU usage percentage (relative to all cores); 0 = not reported / not running */
   cpu_percent?: number;
-  /** CPU 限额（纳秒，1e9 = 1 核）；0 = 不限 */
+  /** CPU limit (nanoseconds, 1e9 = 1 core); 0 = unlimited */
   cpu_limit_nano?: number;
 }
 
 /**
- * 容器「异常」——与后端 /v1/overview 的判定保持一致：
- * dead / restarting 算异常；exited 看退出码（`Exited (0)` 之外都算）；
- * running 但健康检查 unhealthy 也算。
+ * Container "failed" — matches the backend's /v1/overview logic:
+ * dead / restarting count as failed; exited checks the exit code (anything other than `Exited (0)` counts);
+ * running but unhealthy health check also counts.
  */
 export function containerIsFailed(c: ContainerInfo): boolean {
   const state = c.state.toLowerCase();
@@ -429,9 +431,9 @@ export function containerIsFailed(c: ContainerInfo): boolean {
 }
 
 /**
- * 容器分桶：卡片之间**互不重叠**，四桶相加 = 容器总数。
- * 异常优先（exited 非 0 的容器同时是「已停止」与「异常」，只计入异常），
- * 这样「已停止 + 异常」不会把同一台容器数两遍。
+ * Container bucketing: cards are **non-overlapping**, the four buckets sum to total containers.
+ * "Failed" takes precedence (a container with exited non-0 is both "stopped" and "failed", only counted in failed),
+ * so "stopped + failed" doesn't double-count the same container.
  */
 export type ContainerBucket = "running" | "stopped" | "failed" | "other";
 
@@ -443,7 +445,7 @@ export function containerBucket(c: ContainerInfo): ContainerBucket {
   return "other";
 }
 
-/** 容器「上次更新」= 最近一次状态变化（inspect 的 StartedAt / FinishedAt 取大者，毫秒） */
+/** Container "last update" = most recent state change (max of inspect's StartedAt / FinishedAt, in milliseconds) */
 export function containerLastChangeMs(c: ContainerInfo): number {
   return Math.max(
     Math.floor((c.finished_at_unix_nano ?? 0) / 1e6),
@@ -463,7 +465,7 @@ export interface ProcessInfo {
 export interface ContainerGroup {
   node_id: string;
   hostname: string;
-  /** 管理员别名（空串=未设置）；节点下拉优先显示它 */
+  /** Admin alias (empty string = unset); node dropdowns prefer it */
   alias: string;
   ts_unix_nano: number | null;
   containers: ContainerInfo[];
@@ -487,7 +489,7 @@ export const containersApi = {
     ),
 };
 
-/** 容器状态 → Badge 语义色 */
+/** Container state → Badge semantic color */
 export function containerTone(
   state: ContainerState,
 ): "success" | "warn" | "danger" | "neutral" {
@@ -505,10 +507,10 @@ export function containerTone(
   }
 }
 
-/** Docker 容器 ID 短写（前 12 位） */
+/** Short form of Docker container ID (first 12 chars) */
 export const shortId = (id: string) => id.slice(0, 12);
 
-// ---------- 证书（来自 /v1/inventory 快照） ----------
+// ---------- Certificates (from /v1/inventory snapshot) ----------
 
 export interface CertInfo {
   path: string;
@@ -519,7 +521,7 @@ export interface CertInfo {
   domains: string[];
   serial: string;
   parse_error: boolean;
-  /** 命中的证书路径来源 id；空 = 内置 / 命令行 glob 扫到的 */
+  /** Matched certificate source id; empty = built-in / scanned from command-line glob */
   source_id?: string;
 }
 
@@ -534,12 +536,12 @@ export const certsApi = {
   all: () => request<NodeCertsGroup[]>("/v1/certificates"),
 };
 
-// ---------- 证书路径（来源）配置 ----------
+// ---------- Certificate path (source) configuration ----------
 
 export interface CertSourceView {
   id: string;
   node_id: string;
-  /** node_id 为空串：这条来源作用于所有节点 */
+  /** node_id is empty string: this source applies to all nodes */
   all_nodes: boolean;
   node_hostname: string | null;
   path: string;
@@ -548,11 +550,11 @@ export interface CertSourceView {
   notify_days_before: number;
   created_at_unix_nano: number;
   updated_at_unix_nano: number;
-  /** 最新快照里命中这条来源的证书数 */
+  /** Number of certificates matching this source in the latest snapshot */
   matched: number;
-  /** 该节点最近一次快照时间 */
+  /** Most recent snapshot time for this node */
   snapshot_at_unix_nano: number | null;
-  /** 命中证书里最紧急的剩余天数 */
+  /** Most urgent days-left among matched certificates */
   nearest_days_left: number | null;
 }
 
@@ -564,7 +566,7 @@ export interface CertSourceInput {
 }
 
 export interface CertSourcePatch {
-  /** 空串 = 改成「所有节点」 */
+  /** Empty string = change to "all nodes" */
   node_id?: string;
   path?: string;
   enabled?: boolean;
@@ -572,7 +574,7 @@ export interface CertSourcePatch {
   notify_days_before?: number;
 }
 
-/** 「测试」回执（节点侧 scan_certs 命令的 JSON 产物） */
+/** "Test" receipt (JSON output from the node-side scan_certs command) */
 export interface CertScanResult {
   path: string;
   patterns: string[];
@@ -606,7 +608,7 @@ export const certSourcesApi = {
     request<void>(`/v1/cert-sources/${encodeURIComponent(id)}`, {
       method: "DELETE",
     }),
-  /** 让节点真扫一遍这条路径，返回 command_id（用 waitForCommand 等结果） */
+  /** Let the node actually scan this path, returns command_id (use waitForCommand for the result) */
   test: (nodeId: string, path: string) =>
     request<{ command_id: string }>("/v1/cert-sources/test", {
       method: "POST",
@@ -615,12 +617,12 @@ export const certSourcesApi = {
     }),
 };
 
-/** 剩余天数（负数表示已过期） */
+/** Days left (negative means already expired) */
 export function daysLeft(notAfterNs: number): number {
   return (notAfterNs / 1e6 - Date.now()) / 86_400_000;
 }
 
-/** 到期紧急度：过期 / 30 天内 / 正常 */
+/** Expiry urgency: expired / within 30 days / normal */
 export function expiryTone(
   days: number,
 ): "danger" | "warn" | "success" | "neutral" {
@@ -630,7 +632,7 @@ export function expiryTone(
   return "success";
 }
 
-// ---------- 告警 ----------
+// ---------- Alerts ----------
 
 export interface Alert {
   id: number;
@@ -647,9 +649,9 @@ export interface Alert {
   started_at_unix_nano: number;
   resolved_at_unix_nano: number | null;
   silenced_until_unix_nano: number | null;
-  /** rule = 指标规则告警；probe = 服务探针状态告警 */
+  /** rule = metric rule alert; probe = service probe state alert */
   source: "rule" | "probe" | string;
-  /** source = probe 时为 probe_id */
+  /** when source = probe, this is probe_id */
   source_ref: string;
 }
 
@@ -676,15 +678,15 @@ export interface NotifyChannel {
   name: string;
   /** `feishu` / `slack` / `bluebird` / `webhook` */
   kind: string;
-  /** Slack / 青鸟通用来源 / 通用 webhook 的地址；飞书不用（地址由 receive_id 决定） */
+  /** URL for Slack / bluebird generic source / generic webhook; not used for feishu (URL is determined by receive_id) */
   url: string;
-  /** 按类型复用：飞书 = App Secret，青鸟 / 通用 webhook = 投递 Token */
+  /** Reused by type: feishu = App Secret, bluebird / generic webhook = delivery Token */
   secret: string;
-  /** 飞书应用 App ID */
+  /** Feishu app App ID */
   app_id: string;
-  /** 飞书接收 ID（群 chat_id / 用户 open_id 等） */
+  /** Feishu receive ID (group chat_id / user open_id etc.) */
   receive_id: string;
-  /** 飞书接收 ID 类型：chat_id / open_id / user_id / union_id / email */
+  /** Feishu receive ID type: chat_id / open_id / user_id / union_id / email */
   receive_id_type: string;
   enabled: boolean;
   min_severity: string;
@@ -759,7 +761,7 @@ export const builtinAlertsApi = {
     }),
 };
 
-/** 数据留存策略——数字来自后端 retention.rs，前端不硬编码 */
+/** Data retention policy — numbers come from backend retention.rs, no hard-coding on the frontend */
 export interface RetentionView {
   raw_days: number;
   hourly_days: number;
@@ -769,7 +771,7 @@ export const retentionApi = {
   get: () => request<RetentionView>("/v1/retention"),
 };
 
-/** 可选的告警指标（与 node-agent 采集的指标名一致） */
+/** Selectable alert metrics (matches the metric names collected by node-agent) */
 export const ALERT_METRICS = [
   "host.cpu.usage",
   "host.mem.usage",
@@ -784,7 +786,7 @@ export const OP_LABEL: Record<string, string> = {
   eq: "=",
 };
 
-// ---------- 控制通道（命令）----------
+// ---------- Control channel (commands) ----------
 
 export interface CommandHistoryRow {
   id: string;
@@ -797,14 +799,15 @@ export interface CommandHistoryRow {
   ttl_seconds: number;
   result_ok: boolean | null;
   result_error: string | null;
-  /** 动作产物（日志文本之类），UTF-8 */
+  /** Action output (log text etc.), UTF-8 */
   result_text: string | null;
   result_received_at_unix_nano: number | null;
 }
 
 /**
- * 控制台发起命令。命令由 ops-server 私钥签名、节点验签后执行，
- * 这里只负责把动作与参数递进去，拿到 command_id 后轮询执行结果。
+ * The console issues commands. Commands are signed with ops-server's private key
+ * and verified by the node before execution; this only forwards the action and params,
+ * then polls the execution result via command_id.
  */
 export const commandsApi = {
   exec: (nodeId: string, action: string, params: Record<string, unknown> = {}) =>
@@ -814,21 +817,21 @@ export const commandsApi = {
       body: JSON.stringify({ node_id: nodeId, action, params }),
     }),
   history: () => request<CommandHistoryRow[]>("/v1/commands/history"),
-  /** 单条命令的当前状态（等回执时用，比拉整段 history 轻得多） */
+  /** Current state of a single command (used when waiting for receipt, lighter than pulling entire history) */
   get: (id: string) =>
     request<CommandHistoryRow>(`/v1/commands/${encodeURIComponent(id)}`),
 };
 
 /**
- * 轮询某条命令的执行结果。
+ * Poll a command's execution result.
  *
- * 只有 **终态**（done / failed）才算结束：`delivered` 只是「节点已取走」，
- * 慢动作（docker stop 要等 10s 信号超时）会长时间停在这一步，早退会把
- * 「还在跑」误判成「执行失败」。
+ * Only **terminal states** (done / failed) count as finished: `delivered` only means "node picked it up";
+ * slow actions (docker stop waits 10s for the signal timeout) will sit at this step for a while,
+ * and bailing early would mistake "still running" for "execution failed".
  *
- * 节点改成挂起式长轮询后命令几乎是秒到，所以前几轮用 400ms 快速试探，
- * 之后逐步退避到 1.5s，最长等 60s（命令 TTL 也是 60s）。TTL 一过节点不会
- * 再执行，直接按「已下发，未见回执」返回 null，不谎报成功。
+ * After nodes switched to hung long-polling, commands arrive in ~1s, so the first few rounds use 400ms
+ * to probe quickly, then back off to 1.5s, max wait 60s (command TTL is also 60s). Once TTL passes
+ * the node won't execute it anymore; return null as "dispatched, no receipt" rather than lie about success.
  */
 export async function waitForCommand(
   commandId: string,
@@ -852,7 +855,7 @@ export async function waitForCommand(
   }
 }
 
-// ---------- CA / 设置 ----------
+// ---------- CA / Settings ----------
 
 export interface CaView {
   subject: string;
@@ -861,7 +864,7 @@ export interface CaView {
   serial: string;
   fingerprint_sha256: string;
   nodes_enrolled: number;
-  /** 本进程是否自己终结 TLS；false 表示这个 CA 在当前部署里用不到 */
+  /** Whether this process itself terminates TLS; false means this CA isn't used in the current deployment */
   tls_terminated_locally: boolean;
 }
 
@@ -871,15 +874,15 @@ export const settingsApi = {
   createChannel: (body: {
     name: string;
     kind?: string;
-    /** Slack / 通用 webhook 的地址；飞书留空 */
+    /** Slack / generic webhook URL; feishu leaves this empty */
     url?: string;
-    /** 飞书 = App Secret，通用 webhook = 投递 Token（可选） */
+    /** feishu = App Secret, generic webhook = delivery Token (optional) */
     secret?: string;
-    /** 飞书应用 App ID */
+    /** Feishu app App ID */
     app_id?: string;
-    /** 飞书接收 ID（群 chat_id / 用户 open_id 等） */
+    /** Feishu receive ID (group chat_id / user open_id etc.) */
     receive_id?: string;
-    /** 飞书接收 ID 类型，缺省 chat_id */
+    /** Feishu receive ID type, defaults to chat_id */
     receive_id_type?: string;
     min_severity?: string;
   }) =>
@@ -894,7 +897,7 @@ export const settingsApi = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ enabled }),
     }),
-  /** 编辑渠道：缺省字段 = 保持原值；secret 传空串同样保持原值（凭据只允许覆盖） */
+  /** Edit channel: omitted field = keep current value; secret passed as empty string also keeps the value (credentials can only be overwritten) */
   updateChannel: (
     id: number,
     body: {
@@ -915,7 +918,7 @@ export const settingsApi = {
     }),
   deleteChannel: (id: number) =>
     request<unknown>(`/v1/channels/${id}`, { method: "DELETE" }),
-  /** 拿当前填的参数真发一条测试通知（保存之前就能点） */
+  /** Send a real test notification with the current parameters (can be triggered before saving) */
   testChannel: (body: {
     kind: string;
     url?: string;
@@ -929,7 +932,7 @@ export const settingsApi = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
-  /** 改控制台凭据：要带当前凭据，新凭据至少 16 字符 */
+  /** Change console credentials: needs current credential, new credential must be at least 16 chars */
   changeToken: (current: string, next: string) =>
     request<{ ok: boolean }>("/v1/admin/token", {
       method: "POST",
@@ -938,7 +941,7 @@ export const settingsApi = {
     }),
 };
 
-// ---------- 控制通道 ----------
+// ---------- Control channel ----------
 
 export interface CommandHistoryItem {
   id: string;
@@ -956,7 +959,7 @@ export interface CommandHistoryItem {
 }
 
 export const controlApi = {
-  /** 发起命令（monitor 转给 ops-server 签名） */
+  /** Issue command (monitor forwards to ops-server for signing) */
   exec: (nodeId: string, action: string, params: unknown) =>
     request<{ command_id: string }>("/v1/exec", {
       method: "POST",
@@ -966,9 +969,9 @@ export const controlApi = {
   history: () => request<CommandHistoryItem[]>("/v1/commands/history"),
 };
 
-// ---------- 待办（默认页） ----------
+// ---------- Todo (default page) ----------
 
-/** rule = 指标规则；probe = 服务探活；cert = 证书到期；node_offline = 节点离线 */
+/** rule = metric rule; probe = service probe; cert = certificate expiry; node_offline = node offline */
 export type TodoSource =
   | "rule"
   | "probe"
@@ -980,10 +983,10 @@ export interface TodoItem {
   id: string;
   source: TodoSource;
   severity: string;
-  /** 告警类是规则名；节点离线是主机名 */
+  /** Alert category is the rule name; node offline is the hostname */
   title: string;
   detail: string;
-  /** 下一步做什么，取 i18n 键 todo.hint.* */
+  /** What to do next, takes i18n key todo.hint.* */
   hint_key: string;
   node_id: string;
   hostname: string;
@@ -995,9 +998,9 @@ export interface TodoItem {
 export interface TodoSummary {
   nodes_online: number;
   nodes_total: number;
-  /** 健康探针数（按探针维度） */
+  /** Number of healthy probes (per probe dimension) */
   probes_healthy: number;
-  /** 探针总数 */
+  /** Total probes */
   probes_total: number;
   certs_total: number;
   containers_total: number;
@@ -1017,9 +1020,9 @@ export const todoApi = {
   get: () => request<TodoView>("/v1/todo"),
 };
 
-// ---------- 服务健康度 ----------
+// ---------- Service health ----------
 
-/** ok / degraded / down，尚未检查过为 unknown */
+/** ok / degraded / down, never checked is unknown */
 export type ProbeStateName = "ok" | "degraded" | "down" | "unknown";
 
 export interface ProbeStateView {
@@ -1043,9 +1046,9 @@ export interface ProbeView {
   interval_seconds: number;
   timeout_ms: number;
   failure_threshold: number;
-  /** 绑定的执行节点；空数组 = 任意节点 */
+  /** Bound execution nodes; empty array = any node */
   node_ids: string[];
-  /** 绑定节点的展示名（别名优先，回落主机名），与 node_ids 同序 */
+  /** Display name for bound nodes (alias preferred, falls back to hostname), same order as node_ids */
   node_labels: string[];
   location: string;
   enabled: boolean;
@@ -1076,7 +1079,7 @@ export interface ProbeInputBody {
   interval_seconds?: number;
   timeout_ms?: number;
   failure_threshold?: number;
-  /** 空数组 = 任意节点 */
+  /** Empty array = any node */
   node_ids?: string[];
   enabled?: boolean;
 }
@@ -1129,7 +1132,7 @@ export const servicesApi = {
     }),
   removeProbe: (id: string) =>
     request<unknown>(`/v1/probes/${id}`, { method: "DELETE" }),
-  /** 新建 / 编辑探针时的一次性测试：由 monitor 立即执行一遍，不落库 */
+  /** One-shot test when creating / editing a probe: monitor executes it immediately, not persisted */
   test: (body: {
     kind: string;
     target_json: string;
@@ -1143,36 +1146,36 @@ export const servicesApi = {
     }),
 };
 
-/** 探针测试结果：state 与探针状态同名（ok / degraded / down） */
+/** Probe test result: state uses same names as probe state (ok / degraded / down) */
 export interface ProbeTestResult {
   state: "ok" | "degraded" | "down";
   latency_ms: number | null;
   status_code: number | null;
-  /** 机器可读的原因码，用来选文案（ok / timeout / connect / status / body / ...） */
+  /** Machine-readable reason code, used to pick the text (ok / timeout / connect / status / body / ...) */
   reason: string;
-  /** 原因码的参数（如 needle、阈值、目标地址） */
+  /** Arguments for the reason code (e.g. needle, threshold, target address) */
   args: Record<string, unknown>;
 }
 
-// ---------- 入网令牌（运行时生成的临时 bootstrap 命令） ----------
+// ---------- Enrollment tokens (runtime-generated temporary bootstrap commands) ----------
 
-/** 后端 BootstrapTokens::list_active 返回的元信息 */
+/** Metadata returned by backend's BootstrapTokens::list_active */
 export interface EnrollTokenMeta {
   id: string;
   label: string;
   created_at_unix: number;
   expires_at_unix: number;
-  /** 来自 ZHIWEI_BOOTSTRAP_TOKEN（永不失效），与 UI 临时生成的区分 */
+  /** From ZHIWEI_BOOTSTRAP_TOKEN (never expires), distinguished from UI-generated tokens */
   permanent: boolean;
 }
 
-/** POST /v1/enroll-tokens 返回。多带 `enroll_command` 完整一行复制可用的命令。 */
+/** Returned by POST /v1/enroll-tokens. Also includes `enroll_command` as a complete copy-pasteable line. */
 export interface EnrollTokenCreated extends EnrollTokenMeta {
-  /** 明文 token，形如 `zhi-bt-<hex>` */
+  /** Plaintext token, shaped like `zhi-bt-<hex>` */
   token: string;
-  /** 后端从 X-Forwarded-Proto + Host 推断，UI 一般用不到 */
+  /** Backend infers from X-Forwarded-Proto + Host, UI generally doesn't need it */
   monitor_url: string;
-  /** 拼接好的整段安装命令 */
+  /** Concatenated full install command */
   enroll_command: string;
 }
 
@@ -1192,7 +1195,7 @@ export const enrollTokens = {
     ),
 };
 
-// ---------- AI Token（外部 agent 用，长期） ----------
+// ---------- AI Token (for external agents, long-term) ----------
 
 export interface AiTokenMeta {
   id: string;
@@ -1204,7 +1207,7 @@ export interface AiTokenMeta {
 
 export const aiTokens = {
   list: () => request<{ tokens: AiTokenMeta[] }>("/v1/ai-tokens"),
-  /** 注意：明文 token **只这一次**返回——展示后必须立即让用户复制下来 */
+  /** Note: plaintext token is returned **only this one time** — user must copy it immediately after display */
   create: (name: string) =>
     request<{
       id: string;
@@ -1224,7 +1227,7 @@ export const aiTokens = {
     ),
 };
 
-// ---------- 帮助页 markdown ----------
+// ---------- Help page markdown ----------
 
 export const help = {
   /** Fetch help page markdown for the given locale; falls back to en-US. */

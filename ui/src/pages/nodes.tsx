@@ -50,7 +50,7 @@ import {
   nodeLabel,
 } from "@/lib/utils";
 
-/** 存活状态排序：升序 = 正常在前（离线排最后） */
+/** Liveness sort order: ascending = healthy first (node offline last) */
 const LIVENESS_RANK: Record<string, number> = {
   online: 0,
   lagging: 1,
@@ -59,8 +59,8 @@ const LIVENESS_RANK: Record<string, number> = {
 };
 
 /**
- * 用率阈值配色：≤60% 绿、>60% ≤80% 黄、>80% 红。
- * 入参为 0..100 的百分比，null / undefined 走「无数据」分支。
+ * Usage threshold coloring: ≤60% green, >60% ≤80% yellow, >80% red.
+ * Input is 0..100 percentage; null / undefined goes to "no data" branch.
  */
 function usageTone(pct: number | null | undefined): string {
   if (pct === null || pct === undefined) {
@@ -73,18 +73,18 @@ function usageTone(pct: number | null | undefined): string {
 
 export function Nodes() {
   const { t } = useTranslation();
-  // 默认按状态排、有问题的在前（设计：默认排序＝最需要关注的在前）。
+  // Default sort by status, problematic first (design: default sort = most attention-needed first).
   const [page, setPage] = React.useState(1);
   const [range, setRange] = React.useState<TimeRange>(() => presetRange("3h"));
-  /** 生成入网命令的弹窗——空状态点击按钮触发 */
+  /** Dialog to generate enroll command — triggered by button on empty state */
   const [enrollDialogOpen, setEnrollDialogOpen] = React.useState(false);
-  /** 「接入帮助」：自动生成并复制命令，点开即用 */
+  /** "Onboarding help": auto-generates and copies command, ready to use on open */
   const [onboardDialogOpen, setOnboardDialogOpen] = React.useState(false);
-  /** 正在编辑别名 / 标签的节点（null = 关窗） */
+  /** Node currently editing alias / tags (null = dialog closed) */
   const [metaNode, setMetaNode] = React.useState<NodeView | null>(null);
-  /** 待删除节点（null = 关窗） */
+  /** Node pending deletion (null = dialog closed) */
   const [deleteNode, setDeleteNode] = React.useState<NodeView | null>(null);
-  /** 删除被 409 挡下（还有未发出的命令）后，把弹窗换成「作废并删除」再确认一次 */
+  /** When deletion is blocked by 409 (pending commands exist), switch dialog to "force delete" confirmation */
   const [forceDelete, setForceDelete] = React.useState(false);
   const [deleting, setDeleting] = React.useState(false);
   const toast = useToast();
@@ -101,8 +101,9 @@ export function Nodes() {
     return { used, total, pct };
   };
 
-  // 磁盘：用量最高的挂载点（节点侧已算好），百分比直接用后端的读数；
-  // 老节点没上报 host.disk.usage 时按 used / total 兜底，两个都没有就是「无数据」。
+  // Disk: the mount point with highest usage (precomputed on the node side); use the
+  // percentage from the backend directly. Older nodes that don't report host.disk.usage
+  // fall back to used / total; both missing = "no data".
   const diskOf = (n: NodeView) => {
     const used = n.latest?.disk_used_bytes ?? null;
     const total = n.latest?.disk_total_bytes ?? null;
@@ -112,8 +113,8 @@ export function Nodes() {
     return { used, total, pct };
   };
 
-  // 默认排序：状态 rank + 上次心跳降序（最久没上报的排后）。
-  // 使用稳定的排序：优先保持节点在列表中的相对位置，除非节点状态真的变了
+  // Default sort: status rank + last heartbeat descending (oldest heartbeat last).
+  // Stable sort: preserve relative position unless the node's status actually changes.
   const rows = React.useMemo(() => {
     const list = [...nodes].sort((a, b) => {
       const ra = LIVENESS_RANK[livenessOf(a.last_seen_ms)] ?? 9;
@@ -124,11 +125,11 @@ export function Nodes() {
     return list;
   }, [nodes]);
 
-  // 每页 10 个，不显示切换控件
+  // 10 per page, no page-size switcher
   const PAGE_SIZE = 10;
   const { pageCount, current, visible: visibleRows } = paginate(rows, page, PAGE_SIZE);
 
-  // ── 顶部大字卡片：按存活状态分桶 ──
+  // ── Top large cards: bucketed by liveness ──
   const liveCount = (k: string) =>
     nodes.filter((n) => livenessOf(n.last_seen_ms) === k).length;
   const cards: StatCard[] = [
@@ -169,12 +170,14 @@ export function Nodes() {
   return (
     <>
     <div className="space-y-4">
-    {/* 删除节点：成功 / 404（已被别人删）都当作成功，关窗并刷新列表；失败只弹 toast。
-        复用了 node-detail.tsx 同样的语义（detail.deleteNodeMessage 描述得很详细，
-        不要在这里再简写文案，免得「删不干净的风险」前后描述不一致）。
-        409 = 还有未发出的命令：后端默认 TTL 只有 60s，节点不再来拉的行永远有效不了，
-        所以这里把弹窗换成「作废并删除」的二次确认（force 走 ?force=1），
-        而不是丢一句用户没法执行的 toast。 */}
+    {/* Delete node: success / 404 (already deleted by someone else) both count as success,
+        close dialog and refresh list; failure only shows toast.
+        Reuses the same semantics as node-detail.tsx (detail.deleteNodeMessage describes this
+        in detail — don't simplify the wording here to avoid inconsistency about
+        "risk of incomplete deletion").
+        409 = pending commands: the backend's default TTL is only 60s; if the node stops polling,
+        those commands will never be consumed, so here we switch the dialog to a "force delete"
+        second confirmation (force via ?force=1), rather than showing a toast the user can't act on. */}
     <ConfirmDialog
       open={deleteNode !== null}
       title={t(forceDelete ? "detail.deleteNodeForceTitle" : "detail.deleteNode")}
@@ -412,8 +415,8 @@ export function Nodes() {
                     </Td>
 
                     <Td align="right">
-                      {/* 操作列：编辑（别名/标签）+ 删除。
-                          删除用 rose 配色与「命令危险动作」语义对齐。 */}
+                      {/* Actions column: edit (alias/tags) + delete.
+                          Delete uses rose color to align with "dangerous command" semantics. */}
                       <div className="inline-flex items-center gap-1">
                         <Tooltip content={t("nodeMeta.edit")}>
                           <Button
@@ -465,7 +468,8 @@ export function Nodes() {
       open={enrollDialogOpen}
       onClose={() => setEnrollDialogOpen(false)}
     />
-    {/* 接入帮助：打开即生成命令并自动复制，省掉「先选 TTL 再点创建」 */}
+    {/* Onboarding help: opens and immediately generates the command and copies it,
+        skipping the "choose TTL then click create" step */}
     <EnrollTokenDialog
       autoCreate
       open={onboardDialogOpen}
@@ -477,15 +481,18 @@ export function Nodes() {
 }
 
 /**
- * 全部节点趋势：**一条线一个节点**，带图例。
+ * All nodes trend: one line per node, with legend.
  *
- * 抽稀与长窗口切源都由后端统一处理（`/v1/series/nodes`），这里只管画。
- * 系列名用别名（没设别名回落主机名），并且以**已入网节点**为准建系列——
- * 后端只返回有数据的节点，直接照抄会让离线 / 刚入网的机器整条从图例里消失。
+ * Downsampling and long-window source switching are handled by the backend
+ * (`/v1/series/nodes`); this component only draws.
+ * Series names use the alias (falls back to hostname), and series are built
+ * from **enrolled nodes** — the backend only returns nodes with data, so using
+ * the response directly would make offline / newly-enrolled nodes disappear from the legend.
  *
- * 指标切换：CPU / 内存 / 磁盘按 0–100% 画；网络（上行 / 下行）是计数器，
- * 切到 `rate=1` 让后端按相邻两点差分 / dt 转成 bytes/s，前端再按速率格式
- * 显示（避免「累计字节数」一直单调递增，曲线贴在 99% 附近没有信息量）。
+ * Metric switching: CPU / memory / disk drawn as 0–100%; network (up/down) is a counter,
+ * so switch to `rate=1` to let the backend convert adjacent-point differences / dt into
+ * bytes/s; the frontend then displays as rate (to avoid the "cumulative bytes" line
+ * monotonically increasing and sitting flat at 99%).
  */
 type TrendMetric = "cpu" | "mem" | "disk" | "netUp" | "netDown";
 
@@ -535,12 +542,13 @@ function NodesTrend({
     }));
   }, [nodes, q.data]);
 
-  // 全都没数据时才给空状态：图例本身要一直显示（它承担「图上有哪些节点」），
-  // 但一条点都没有时，一张空网格不如明说「这段时间没有数据」。
+  // Only show empty state when there's no data at all: legend should always be visible
+  // (it carries "which nodes are on the chart"), but with zero points an empty grid
+  // is worse than saying "no data in this window".
   const hasAnyPoint = series.some((s) => s.data.length > 0);
 
-  // 网络指标的曲线没有自然上限（峰值依赖环境），让 Y 轴自动；
-  // 百分比类指标固定 0–100。
+  // Network metric has no natural upper bound (peaks depend on environment), so let Y auto-scale;
+  // percentage metrics fixed at 0–100.
   const isPercent = cfg.unit === "%";
 
   return (

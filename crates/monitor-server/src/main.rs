@@ -2,15 +2,17 @@
 //!
 //! Endpoints:
 //!   POST /v1/enroll      — bootstrap token + node Ed25519 public key → node_id
-//!   POST /v1/telemetry   — 签名请求（Ed25519），protobuf TelemetryBatch
+//!   POST /v1/telemetry   — signed request (Ed25519), protobuf TelemetryBatch
 //!   GET  /healthz        — liveness
 //!
-//! 节点身份由请求签名承担（见 `zhiwei_common::auth`），不依赖客户端证书：
-//! 托管平台在边缘终止 TLS、不向容器转发客户端证书，所以必须能在「明文
-//! HTTP + 边缘 TLS」下工作（`--plain-http`）。自建部署仍可用内置 rustls
-//! 直接终结 TLS（只配服务端证书，不要求客户端证书）。
+//! Node identity is carried by request signatures (see `zhiwei_common::auth`),
+//! not client certificates: managed platforms terminate TLS at the edge and do
+//! not forward client certificates to containers, so the service must work
+//! under "plain HTTP + edge TLS" (`--plain-http`). Self-hosted deployments can
+//! still use the built-in rustls to terminate TLS directly (server certificate
+//! only; no client certificate required).
 //!
-//! hyper-util 的 auto builder 按连接协商 HTTP/1.1 或 HTTP/2。
+//! hyper-util's auto builder negotiates HTTP/1.1 or HTTP/2 per connection.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -66,14 +68,16 @@ struct Args {
     #[arg(long, env = "ZHIWEI_UI_DIR", default_value = "ui/dist")]
     ui_dir: PathBuf,
 
-    /// 以明文 HTTP 提供服务，TLS 由前置边缘（PaaS / 反代）终止。
-    /// 节点身份靠请求签名，不依赖传输层，因此明文传输不影响鉴权强度。
-    /// 环境变量接受 1/0/true/false/yes/no/on/off（PaaS 面板里常填 1）。
+    /// Serve plain HTTP; TLS is terminated by the upstream edge (PaaS / reverse proxy).
+    /// Node identity comes from request signatures, not the transport layer, so
+    /// plain transport does not weaken authentication.
+    /// The env var accepts 1/0/true/false/yes/no/on/off (PaaS panels commonly use 1).
     ///
-    /// 裸 `--plain-http`（不带值）等价于 `--plain-http 1`——文档里
-    /// 「加 --plain-http」就是这个意思；传 0/false 显式关闭。
-    /// 完全不传时，才按常见 PaaS 环境变量自动判断：
-    /// `RENDER` / `RAILWAY_*` / `NORTHFLANK_*` / `DYNO`（Heroku）下默认 true。
+    /// Bare `--plain-http` (no value) is equivalent to `--plain-http 1` — when docs
+    /// say "add --plain-http" this is what they mean. Pass 0/false to explicitly
+    /// turn it off.
+    /// Only when not passed at all do we auto-detect from common PaaS env vars:
+    /// `RENDER` / `RAILWAY_*` / `NORTHFLANK_*` / `DYNO` (Heroku) default to true.
     #[arg(
         long,
         env = "ZHIWEI_PLAIN_HTTP",
@@ -84,36 +88,40 @@ struct Args {
     plain_http: Option<bool>,
 }
 
-/// 是否处于「边缘终结 TLS 的 PaaS」环境：Render / Railway / Northflank / Heroku。
-/// 仅作为 `--plain-http` 未显式配置时的默认判断，自建主机不受影响。
-///
-/// 注意：这只是一层便利。Northflank 这类平台既不注入 `PORT`、也没有稳定的
-/// 环境变量前缀（实测 `listen` 会落到默认的回环地址），自动判断覆盖不到，
-/// 必须显式设 `ZHIWEI_PLAIN_HTTP=1`。`--plain-http` 的显式配置永远优先。
+/// Whether we are running in a "PaaS that terminates TLS at the edge" environment:
+/// Render / Railway / Northflank / Heroku.
+    /// Only used as a default when `--plain-http` is not explicitly configured;
+    /// self-hosted hosts are not affected.
+    ///
+    /// Note: this is just a convenience layer. Platforms like Northflank neither
+    /// inject `PORT` nor have a stable env var prefix (in practice `listen` falls
+    /// back to the default loopback), so auto-detection does not cover them —
+    /// you must explicitly set `ZHIWEI_PLAIN_HTTP=1`. An explicit `--plain-http`
+    /// always wins over auto-detection.
 fn detect_paas_edge_terminates_tls() -> bool {
-    // Render 永远注入 `RENDER=true`。
+    // Render always injects `RENDER=true`.
     if std::env::var("RENDER").ok().as_deref() == Some("true") {
         return true;
     }
-    // Railway 注入 RAILWAY_*（任一存在即视为 Railway）。
+    // Railway injects RAILWAY_* (any one is enough to consider it Railway).
     if std::env::vars().any(|(k, _)| k.starts_with("RAILWAY_")) {
         return true;
     }
-    // Northflank 没有单一稳定标记，组合几个常见变量。
+    // Northflank has no single stable marker; combine a few common variables.
     if std::env::vars().any(|(k, _)| k.starts_with("NORTHFLANK_")) {
         return true;
     }
-    // Heroku / 旧式 PaaS。
+    // Heroku / older PaaS.
     if std::env::var("DYNO").is_ok() {
         return true;
     }
     false
 }
 
-/// 监听地址是否是回环。
+/// Whether the listen address is a loopback address.
 ///
-/// 只做字符串判断——传入的是 `host:port`，不需要真正解析 IP。
-/// IPv6 形如 `[::1]:8443`，所以要把方括号剥掉再比。
+/// Plain string check — the input is `host:port`, no need to actually parse an IP.
+/// IPv6 looks like `[::1]:8443`, so strip the square brackets before comparing.
 fn listen_is_loopback(listen: &str) -> bool {
     let host = match listen.rsplit_once(':') {
         Some((h, _)) => h,
@@ -123,17 +131,19 @@ fn listen_is_loopback(listen: &str) -> bool {
     matches!(host, "localhost" | "::1") || host.starts_with("127.")
 }
 
-/// TLS 握手失败的告警间隔（秒）。
+/// Alert interval (seconds) for repeated TLS handshake failures.
 ///
-/// 托管平台的健康检查会按固定节奏戳容器，配置错了就是每来一次打一条。
-/// 不设窗口的话启动信息会被刷掉，真正的原因反而看不见。
+/// Managed platforms' health checks poke containers at a fixed cadence; if the config
+/// is wrong, every probe triggers a log line. Without a window the startup info gets
+/// scrolled away and the real cause becomes invisible.
 const TLS_WARN_INTERVAL_SECS: u64 = 60;
 
-/// 打一条 TLS 握手失败告警，同一窗口内只打一次。
+/// Emit one TLS handshake-failure warning per window.
 ///
-/// 特意把 `InvalidContentType` 认出来：那条错误的含义是「对方发的是明文 HTTP，
-/// 本进程却按 TLS 解析」，在托管平台上是典型的「忘了开 `--plain-http`」。
-/// 光看 rustls 的原文根本猜不到，所以这里直接给出下一步动作。
+/// `InvalidContentType` is recognized specifically: the meaning is "the peer sent
+/// plain HTTP, but this process is parsing it as TLS" — on managed platforms the
+/// typical cause is "didn't enable `--plain-http`". The raw rustls message gives no
+/// hint of this, so the next action is called out here.
 fn warn_tls_handshake_once(
     err: &std::io::Error,
     peer: std::net::SocketAddr,
@@ -145,13 +155,13 @@ fn warn_tls_handshake_once(
         .unwrap_or(0);
     let prev = last_warn.load(Ordering::Relaxed);
 
-    // 窗口内已经报过，或者抢输了 CAS（别的任务刚报过）→ 降级为 debug
+    // Already reported within the window, or lost the CAS race (another task just reported) → demote to debug
     if now.saturating_sub(prev) < TLS_WARN_INTERVAL_SECS
         || last_warn
             .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
             .is_err()
     {
-        tracing::debug!(error = %err, %peer, "TLS handshake failed (同类告警已限流)"); // already has context
+        tracing::debug!(error = %err, %peer, "TLS handshake failed (similar warning throttled)"); // already has context
         return;
     }
 
@@ -159,16 +169,17 @@ fn warn_tls_handshake_once(
         tracing::warn!(
             error = %err,
             %peer,
-            "TLS 握手失败：对方发的是明文 HTTP，而本进程按 TLS 处理。\
-             部署在托管平台（边缘已终结 TLS）后面时，请设 ZHIWEI_PLAIN_HTTP=1 并重新部署；\
-             自建部署请检查客户端是不是用 http:// 连了 https 端口。"
+            "TLS handshake failed: the peer sent plain HTTP, but this process is handling it as TLS.\
+             When deployed behind a managed platform (TLS already terminated at the edge),\
+             set ZHIWEI_PLAIN_HTTP=1 and redeploy;\
+             for self-hosted deployments, check whether the client used http:// to connect to an https port."
         );
     } else {
         tracing::warn!(error = %err, %peer, "TLS handshake failed");
     }
 }
 
-/// 从 ops endpoint（`http://127.0.0.1:8444/exec`）里取出 `(host, port)`。
+/// Extract `(host, port)` from the ops endpoint (`http://127.0.0.1:8444/exec`).
 fn endpoint_host_port(endpoint: &str) -> Option<(String, u16)> {
     let authority = endpoint.strip_prefix("http://")?;
     let host_port = authority.split('/').next()?;
@@ -178,7 +189,7 @@ fn endpoint_host_port(endpoint: &str) -> Option<(String, u16)> {
     }
 }
 
-/// 端口上有人监听就算「在跑」，重试 `attempts` 次（每次间隔 150ms）。
+/// Someone listening on the port means "running"; retry up to `attempts` times (150 ms apart).
 async fn wait_for_port(host: &str, port: u16, attempts: u32) -> bool {
     for _ in 0..attempts {
         if tokio::net::TcpStream::connect((host, port)).await.is_ok() {
@@ -189,7 +200,7 @@ async fn wait_for_port(host: &str, port: u16, attempts: u32) -> bool {
     false
 }
 
-/// ops-server 二进制的候选路径：`ZHIWEI_OPS_BIN` 优先，其次与 monitor 同目录。
+/// Candidate paths for the ops-server binary: `ZHIWEI_OPS_BIN` first, then a sibling of the monitor.
 fn ops_binary_candidates(exe: Option<&Path>) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Ok(p) = std::env::var("ZHIWEI_OPS_BIN") {
@@ -211,25 +222,28 @@ fn locate_ops_binary() -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// 命令通道的兜底启动：等价于 `scripts/docker-entrypoint.sh` 里那段 `start_ops`，
-/// 但放进 monitor 进程内，好让「只装了一个二进制」的部署也能用写操作。
+/// Fallback startup for the command channel — same effect as the `start_ops` block in
+/// `scripts/docker-entrypoint.sh`, but inlined into the monitor process so that
+/// "single-binary" deployments also get write operations.
 ///
-/// 边界没变：ops 仍是独立进程，签名私钥只在它手里，monitor 只读 `ops.pub`。
+/// Boundaries unchanged: ops is still an independent process, the signing private
+/// key lives only inside it, and monitor reads `ops.pub`.
 ///
-/// - `ZHIWEI_OPS_DISABLE=1` → 明确声明「只跑数据平面」，不动
-/// - 端口上已经在监听 → 外部已经起了（entrypoint / dev.sh / 自建 unit）
-/// - 找不到 `zhiwei-ops` → 给一句可操作的提示，不假装成功
+/// - `ZHIWEI_OPS_DISABLE=1` → explicitly declare "data plane only"; do nothing.
+/// - Port is already listening → external instance is up (entrypoint / dev.sh / self-hosted unit).
+/// - `zhiwei-ops` not found → print an actionable hint instead of pretending success.
 async fn ensure_ops_control_plane(data_dir: &Path, endpoint: &str) {
     if std::env::var("ZHIWEI_OPS_DISABLE").ok().as_deref() == Some("1") {
         tracing::info!("ZHIWEI_OPS_DISABLE=1: not starting ops-server, command channel unavailable (data plane still running)");
         return;
     }
     let Some((host, port)) = endpoint_host_port(endpoint) else {
-        tracing::warn!(%endpoint, "ops endpoint 不是 http://host:port 形态，跳过兜底启动");
+        tracing::warn!(%endpoint, "ops endpoint is not in http://host:port form, skipping fallback startup");
         return;
     };
-    // 外部可能已经在跑（entrypoint / dev.sh / 自建 unit）。给它一点重试窗口，
-    // 别因为几毫秒的启动差把第二个 ops 也拉起来。
+    // External instance may already be running (entrypoint / dev.sh / self-hosted unit).
+    // Give it a short retry window so a few-millisecond startup gap doesn't cause a
+    // second ops to be launched.
     if wait_for_port(&host, port, 8).await {
         tracing::debug!(%endpoint, "ops-server already running (command channel available)");
         return;
@@ -238,17 +252,17 @@ async fn ensure_ops_control_plane(data_dir: &Path, endpoint: &str) {
     let Some(bin) = locate_ops_binary() else {
         tracing::warn!(
             %endpoint,
-            "命令通道不可用：该地址上没有进程在监听，也没找到 zhiwei-ops 二进制。\
-             把 zhiwei-ops 与 zhiwei-monitor 放在同一目录（或用 ZHIWEI_OPS_BIN 指定路径）后重启；\
-             只想跑数据平面的话显式设 ZHIWEI_OPS_DISABLE=1。"
+            "Command channel unavailable: no process is listening at this address, and the zhiwei-ops binary was not found.\
+             Place zhiwei-ops in the same directory as zhiwei-monitor (or set ZHIWEI_OPS_BIN to its path) and retry;\
+             to run the data plane only, set ZHIWEI_OPS_DISABLE=1 explicitly."
         );
         return;
     };
 
     match tokio::process::Command::new(&bin)
         .env("ZHIWEI_DATA_DIR", data_dir)
-        // 让被拉起的 ops 监听 monitor 真正要连的那个地址（ops 默认 8444，
-        // 配置里改过 ops_endpoint 时不能靠默认值撞运气）
+        // Let the spawned ops listen on the address monitor actually connects to
+        // (ops defaults to 8444; if ops_endpoint is overridden in config, don't gamble on the default).
         .env("ZHIWEI_OPS_LISTEN", format!("{host}:{port}"))
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
@@ -261,21 +275,25 @@ async fn ensure_ops_control_plane(data_dir: &Path, endpoint: &str) {
                 pid = child.id().unwrap_or(0),
                 "Started ops-server (control plane); signing key only in its process"
             );
-            // 等它「就绪」再往下走，判据是端口能被连上，而不是 ops.pub 存在：
-            // ops 是先开库跑迁移、后 bind，所以端口通了同时意味着
-            //   ① ops.pub 已落盘——monitor 启动时读一次并缓存，读早了新入网
-            //      节点会拿到空公钥、命令通道静默失效；
-            //   ② 迁移已跑完——两个进程同时对同一个 SQLite 跑 `CREATE TABLE`
-            //      会撞车（实测 monitor 直接起不来：`table nodes already exists`）。
+            // Wait for it to become "ready" before proceeding — the test is that the port
+            // is connectable, not that ops.pub exists:
+            // ops opens the DB and runs migrations before binding, so the port being
+            // up simultaneously means:
+            //   ① ops.pub has been written to disk — monitor reads it once at startup
+            //      and caches it; reading too soon gives new nodes an empty public key
+            //      and the command channel silently fails.
+            //   ② Migrations have finished — two processes running `CREATE TABLE`
+            //      on the same SQLite will collide (verified in practice, monitor
+            //      fails to start: `table nodes already exists`).
             if wait_for_port(&host, port, 60).await {
                 tracing::info!(%endpoint, "ops-server ready (command channel available)");
             } else {
                 tracing::warn!(%endpoint, "ops-server did not start within 9 seconds, command channel may be unavailable");
             }
-            // 交给 tokio 的 SIGCHLD 收尸，这里不 wait（monitor 会一直跑）
+            // Let tokio's SIGCHLD handler reap it; no wait() here (monitor runs forever).
             drop(child);
         }
-        Err(e) => tracing::warn!(bin = %bin.display(), error = %e, "拉起 ops-server 失败"),
+        Err(e) => tracing::warn!(bin = %bin.display(), error = %e, "failed to spawn ops-server"),
     }
 }
 
@@ -297,14 +315,16 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("creating data dir {}", data_dir.display()))?;
 
-    // 命令通道（控制台里的删容器 / 拉日志 / 重启主机…）由 ops-server 签发。
-    // 镜像的 entrypoint 与 dev.sh 都会先起它；只有「直接跑二进制」的部署没有
-    // 第二个进程的位置，控制台里所有写操作都会报「ops-server 不可用」。
-    // 这里做兜底：连不上且旁边就有 zhiwei-ops 时自己把它拉起来。
+    // The command channel (delete container / pull logs / restart host ... in the console)
+    // is signed by ops-server. The image's entrypoint and dev.sh start it first; only
+    // "running the binary directly" deployments have no place for a second process,
+    // and every console write operation will report "ops-server unavailable".
+    // Here we add a fallback: if it's unreachable and a zhiwei-ops is right next to us, start it ourselves.
     ensure_ops_control_plane(&data_dir, &cfg.ops_endpoint).await;
 
-    // 没有显式传 --plain-http / ZHIWEI_PLAIN_HTTP 时，按 PaaS 环境自动判断。
-    // 显式 false 永远覆盖自动判断——自建部署保持 TLS 本地终结。
+    // When neither --plain-http nor ZHIWEI_PLAIN_HTTP is set explicitly, auto-detect
+    // based on the PaaS environment. An explicit false always overrides auto-detection —
+    // self-hosted deployments keep TLS terminated locally.
     let plain_http = args
         .plain_http
         .unwrap_or_else(detect_paas_edge_terminates_tls);
@@ -316,14 +336,16 @@ async fn main() -> anyhow::Result<()> {
         "starting zhiwei-monitor"
     );
 
-    // 绑回环在「自建 + 本机反代」下是对的，在容器里几乎一定是错的：
-    // 平台边缘从容器外部转发进来，回环地址它够不着，表现为健康检查失败 / 502。
-    // 这个坑光看日志很难反应过来（端口明明对），所以主动喊一声。
+    // Binding to loopback is correct in "self-hosted + local reverse proxy" setups,
+    // but almost always wrong inside containers: the platform edge forwards traffic
+    // from outside the container, can't reach the loopback, and you'll see health
+    // checks fail / 502s. This pitfall is hard to spot from logs alone (the port
+    // looks right), so we announce it explicitly.
     if listen_is_loopback(&listen) {
         tracing::warn!(
             %listen,
-            "监听在回环地址：本机之外的任何东西（托管平台边缘、浏览器、其它主机）都连不上。\
-             托管平台请设 ZHIWEI_LISTEN=0.0.0.0:<端口>，或直接设 PORT=<端口>（本程序检测到 PORT 会自动绑 0.0.0.0）。"
+            "Listening on a loopback address: nothing outside this host (managed platform edge, browser, other hosts) can connect. \
+             On managed platforms, set ZHIWEI_LISTEN=0.0.0.0:<port>, or just set PORT=<port> (this program auto-binds 0.0.0.0 when PORT is detected)."
         );
     }
 
@@ -335,7 +357,7 @@ async fn main() -> anyhow::Result<()> {
     let ca = ca::Ca::load_or_init(&data_dir)
         .await
         .context("initializing CA")?;
-    // 明文模式下 TLS 由前置边缘终结，不需要本地签发服务端证书
+    // In plain-HTTP mode TLS is terminated by the upstream edge; no local server cert needed
     let server_cert = if plain_http {
         None
     } else {
@@ -345,8 +367,8 @@ async fn main() -> anyhow::Result<()> {
         )
     };
 
-    // ops 公钥由 ops-server 首次启动时写入；没有它时 enroll 会下发空串，
-    // 节点将拒绝任何命令（安全侧默认拒绝）。
+    // ops public key is written by ops-server on its first startup; without it enroll
+    // will return an empty string, and nodes will reject every command (security default).
     let ops_pub_path = data_dir.join("ops.pub");
     let ops_public_key = tokio::fs::read_to_string(&ops_pub_path)
         .await
@@ -363,8 +385,9 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("initializing admin token")?;
     match admin_token_source {
-        // 本次生成的：只在这里打印一次。托管平台免费层拿不到 Shell 时，
-        // 这行日志是唯一的出口（日志面板免费可看）。
+        // Generated this time: printed once right here. On managed-platform free tiers
+        // with no console shell access, this log line is the only way out (the log
+        // viewer is free to read).
         admin::TokenSource::Generated => {
             eprintln!(
                 "\
@@ -379,13 +402,13 @@ async fn main() -> anyhow::Result<()> {
                 "admin token ready (use `cat <data-dir>/admin.token`)"
             );
         }
-        // 来自环境变量：token 已经在部署面板里，不重复打印（日志里不该留明文凭据）。
+        // From env var: token is already in the deploy panel; don't reprint (logs must not hold plaintext credentials).
         admin::TokenSource::Env => {
             tracing::info!(
-                "admin token ready (来自 ZHIWEI_ADMIN_TOKEN，不会写盘、也不会随重启变化)"
+                "admin token ready (sourced from ZHIWEI_ADMIN_TOKEN; not written to disk, does not change across restarts)"
             );
         }
-        // 来自文件：自建 / 有持久卷的常规路径。
+        // From file: normal path for self-hosted / persistent-volume deployments.
         admin::TokenSource::File => {
             tracing::info!(
                 ?data_dir,
@@ -395,33 +418,37 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let bootstrap_tokens = Arc::new(routes::BootstrapTokens::default());
-    // 固定入网令牌优先：托管平台（免费层没 Shell、没持久卷）用它替掉
-    // 「抢启动日志里 10 分钟有效期的一次性 token」这套流程。
+    // Fixed enrollment token takes priority: managed platforms (free tiers have no
+    // shell, no persistent volume) use it to replace the "grab a one-time 10-minute
+    // token from startup logs" flow.
     match std::env::var("ZHIWEI_BOOTSTRAP_TOKEN") {
         Ok(raw) => {
-            // 太短一律拒绝，理由同 admin token：它长期有效、又暴露在公网边缘，
-            // 短了就能被暴力猜解并注册假节点。拒绝后照旧生成一次性 token 兜底，
-            // 所以服务不会起不来，但绝不会接受一个弱凭据。
+            // Reject anything too short, same reasoning as admin token: it has long
+            // validity and is exposed on the public edge, so a short one could be
+            // brute-forced and used to register fake nodes. After rejection we still
+            // generate a one-time token as fallback — service won't fail to start —
+            // but we never accept a weak credential.
             match admin::validate_env_token("ZHIWEI_BOOTSTRAP_TOKEN", &raw) {
                 Ok(token) => {
-                    // 刻意不打印值：它已经在部署面板里，日志不该留明文凭据。
+                    // Intentionally do not print the value: it's already in the deploy
+                    // panel; logs must not hold plaintext credentials.
                     tracing::info!("Enrollment token from ZHIWEI_BOOTSTRAP_TOKEN (persistent, survives restarts)");
                     bootstrap_tokens.add_static(token);
                 }
                 Err(reason) => {
                     tracing::error!(
                         %reason,
-                        "ZHIWEI_BOOTSTRAP_TOKEN 不可用，已忽略；本次改回一次性 token"
+                        "ZHIWEI_BOOTSTRAP_TOKEN is unusable; ignored, falling back to one-time token"
                     );
                 }
             }
         }
         Err(std::env::VarError::NotPresent) => {}
         Err(e) => {
-            tracing::warn!(error = %e, "读取 ZHIWEI_BOOTSTRAP_TOKEN 失败，改走一次性 token");
+            tracing::warn!(error = %e, "Failed to read ZHIWEI_BOOTSTRAP_TOKEN, falling back to one-time token");
         }
     }
-    // 没有固定令牌时才随机生成一个一次性 token 并打印（自建 / 本地开发）。
+    // Only when no fixed token is set do we mint a random one-time token and print it (self-hosted / local dev).
     if bootstrap_tokens.is_empty().await {
         let token = routes::BootstrapTokens::mint();
         bootstrap_tokens.add(token.clone(), 600).await;
@@ -435,12 +462,13 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // 帮助页与入网脚本都是 `include_str!` 内嵌的常量，这里只是挂到 state 上。
+    // The help page and enrollment script are `include_str!`-embedded constants; here we just attach them to state.
     let help = load_help_markdown();
     let install_script = INSTALL_NODE_SH.to_string();
 
-    // 自建分发源（可选）：设了它，控制台生成的入网命令会自动带 `ZHIWEI_BASE_URL`，
-    // 节点不再从 GitHub Releases 拉二进制。国内 / 隔离网络部署用。
+    // Self-hosted distribution base URL (optional): when set, console-generated
+    // enrollment commands automatically include `ZHIWEI_BASE_URL`, so nodes no
+    // longer pull the binary from GitHub Releases. For China / air-gapped deployments.
     let node_base_url = std::env::var("ZHIWEI_NODE_BASE_URL")
         .ok()
         .map(|v| v.trim().to_string())
@@ -462,8 +490,8 @@ async fn main() -> anyhow::Result<()> {
         tls_terminated_locally: !plain_http,
         ui_dir: ui_dir.clone(),
         help,
-        // MCP server 调自己 REST 时用。listen 是 host:port，
-        // 内部通信强制走 127.0.0.1（外面到不了）。
+        // Used by the MCP server to call its own REST. `listen` is host:port,
+        // and internal traffic is forced to 127.0.0.1 (not reachable from outside).
         mcp_base_url: format!(
             "http://127.0.0.1:{}",
             listen.rsplit(':').next().unwrap_or("8443")
@@ -479,7 +507,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!(error = %e, "Failed to write default alert rules");
     }
 
-    // 探针结果明细滚动保留 7 天（启动先清一次，之后每 6 小时一次）
+    // Probe result detail rolling retention of 7 days (one sweep at startup, then every 6 hours)
     {
         let state = state.clone();
         tokio::spawn(async move {
@@ -496,13 +524,13 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // 遥测留存：原始 10 秒数据滚动保留 + 小时聚合长期保留。
-    // 失败会开一条平台告警进待办，见 retention.rs 与设计文档 §8。
+    // Telemetry retention: raw 10-second data rolling + hourly aggregates kept long-term.
+    // On failure a platform-level alert enters the todo queue; see retention.rs and design doc §8.
     retention::spawn(state.clone());
 
-    // 节点离线告警：每 30s 巡检一次节点的 last_seen_unix_nano，
-    // 超过 60s 没上报即视为离线，写一条 source='node_offline' 的真告警 + 通知。
-    // 见 alerts::spawn_node_liveness_watcher。
+    // Node-offline alerting: every 30s, scan nodes' last_seen_unix_nano; if no
+    // report within 60s, the node is considered offline — write a real alert with
+    // source='node_offline' and notify. See alerts::spawn_node_liveness_watcher.
     alerts::spawn_node_liveness_watcher(state.clone());
 
     let app = routes::router(state);
@@ -518,8 +546,9 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("binding {listen}"))?;
 
-    // 明文模式：TLS 由前置边缘终结。节点身份来自请求签名而非传输层，
-    // 所以这里不做任何额外鉴权——每条请求都要自证。
+    // Plain-HTTP mode: TLS is terminated by the upstream edge. Node identity comes
+    // from request signatures, not the transport layer, so we do no extra
+    // authentication here — every request has to prove itself.
     if server_cert.is_none() {
         tracing::info!(%listen, "zhiwei-monitor ready (plain HTTP, TLS terminated at edge)");
         loop {
@@ -552,8 +581,9 @@ async fn main() -> anyhow::Result<()> {
     let acceptor = TlsAcceptor::from(Arc::new(rustls_config));
     tracing::info!(%listen, "zhiwei-monitor ready (built-in TLS)");
 
-    // 同类失败在窗口内只打一条：托管平台的健康检查会每分钟戳一次，
-    // 每次都打完整日志会把启动信息刷没，反而看不清真正的问题。
+    // One log line per similar failure within the window: managed-platform health
+    // checks probe once per minute; logging the full message every time would
+    // scroll the startup info away and obscure the real issue.
     let last_tls_warn = Arc::new(AtomicU64::new(0));
 
     loop {
@@ -570,7 +600,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
             let io = TokioIo::new(tls_stream);
-            // 不要求也不读取客户端证书：节点身份一律由请求签名证明
+            // We neither require nor read client certificates: node identity is always proven by request signatures
             let svc =
                 hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
                     let app = app.clone();
@@ -586,19 +616,22 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// 内嵌的节点入网安装脚本。
+/// Embedded node enrollment install script.
 ///
-/// 用 `include_str!` 编进二进制，而不是运行时读文件：Docker 运行镜像只拷
-/// `zhiwei-monitor` + `ui/dist`，不带 `crates/`，运行时路径根本不存在。
-/// 内嵌同时也让「单二进制 + 无外部资源」这个定位成立。
+/// Embedded via `include_str!` rather than read at runtime: Docker runtime images
+/// only copy `zhiwei-monitor` + `ui/dist` and do not include `crates/` — the
+/// runtime path simply does not exist. Embedding also preserves the
+/// "single-binary, no external resources" positioning.
 ///
-/// 路径直接指向仓库根的 `scripts/install-node.sh`，**不在这里留副本**：
-/// 之前 `assets/` 下有一份拷贝，改了 `scripts/` 那份忘了同步，线上
-/// `GET /install-node.sh` 吐的还是旧脚本（国内 `ZHIWEI_BASE_URL` 因此不生效）。
-/// 单一来源后不存在漂移可能；代价是 Dockerfile 构建阶段要 `COPY scripts/`。
+/// The path points directly to the repo-root file, **no duplicate is kept here**:
+/// previously there was a copy under `assets/`; changing the `scripts/` one and
+/// forgetting to sync meant the deployed `GET /install-node.sh` still served the
+/// old script (so `ZHIWEI_BASE_URL` did not take effect in China). With a single
+/// source, drift is impossible; the trade-off is that the Dockerfile build stage
+/// must `COPY scripts/`.
 const INSTALL_NODE_SH: &str = include_str!("../../../scripts/install-node.sh");
 
-/// 内嵌的帮助页 markdown（理由同上）。
+/// Embedded help-page markdown (same reasoning).
 const HELP_MD_ZH: &str = include_str!("../assets/help.md");
 const HELP_MD_EN: &str = include_str!("../assets/help.en.md");
 
@@ -621,20 +654,21 @@ mod listen_tests {
             endpoint_host_port("http://127.0.0.1:8444/exec"),
             Some(("127.0.0.1".to_string(), 8444))
         );
-        // 没有端口时按 ops 的默认 8444
+        // No port → use ops default 8444
         assert_eq!(
             endpoint_host_port("http://127.0.0.1/exec"),
             Some(("127.0.0.1".to_string(), 8444))
         );
-        // 只支持本机明文 http（ops 的监听形态）
+        // Only plain http on localhost is supported (ops' listen form)
         assert_eq!(endpoint_host_port("https://127.0.0.1:8444/exec"), None);
         assert_eq!(endpoint_host_port("127.0.0.1:8444"), None);
     }
 
     #[test]
     fn ops_binary_candidates_include_sibling() {
-        // 不设 ZHIWEI_OPS_BIN 时，候选里必须有「与自己同目录的 zhiwei-ops」，
-        // 否则单独装二进制（release 包把两个二进制放一起）的部署永远拉不起命令通道
+        // When ZHIWEI_OPS_BIN is unset, candidates must include a "zhiwei-ops next to self";
+        // otherwise, deployments that install just the binary (release package puts both binaries together)
+        // can never spin up the command channel
         let list = ops_binary_candidates(Some(Path::new("/usr/local/bin/zhiwei-monitor")));
         assert!(
             list.contains(&std::path::PathBuf::from("/usr/local/bin/zhiwei-ops")),
@@ -644,7 +678,7 @@ mod listen_tests {
 
     #[test]
     fn flags_loopback_addresses() {
-        // 这些在容器里都意味着「平台边缘够不着」，要触发告警
+        // In containers, all of these mean "the platform edge can't reach it" — must trigger an alert
         for addr in [
             "127.0.0.1:8443",
             "127.0.0.1:10000",
@@ -653,13 +687,13 @@ mod listen_tests {
             "[::1]:8443",
             "::1:8443",
         ] {
-            assert!(listen_is_loopback(addr), "{addr} 应判为回环");
+            assert!(listen_is_loopback(addr), "{addr} should be classified as loopback");
         }
     }
 
     #[test]
     fn does_not_flag_reachable_addresses() {
-        // 这些是本机之外能连上的绑定，不该告警——否则自建用户会被误导
+        // These binds are reachable from beyond localhost; should NOT alert — otherwise self-hosted users would be misled
         for addr in [
             "0.0.0.0:8443",
             "0.0.0.0:10000",
@@ -668,7 +702,7 @@ mod listen_tests {
             "10.0.0.5:8443",
             "monitor.internal:8443",
         ] {
-            assert!(!listen_is_loopback(addr), "{addr} 不应判为回环");
+            assert!(!listen_is_loopback(addr), "{addr} should not be classified as loopback");
         }
     }
 }

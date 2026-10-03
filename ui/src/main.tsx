@@ -9,7 +9,7 @@ import { ToastProvider } from "@/components/ui/toast";
 import { applyThemeEarly } from "@/lib/prefs";
 import "./index.css";
 
-// 首帧应用主题 / 暗色，避免闪烁
+// Apply theme / dark mode on first frame to avoid flash
 applyThemeEarly();
 
 const queryClient = new QueryClient({
@@ -17,7 +17,7 @@ const queryClient = new QueryClient({
     queries: {
       refetchInterval: 5000,
       refetchOnWindowFocus: true,
-      // 规范 08：失败态常驻并由组件提供「重试」，不静默重试
+      // Spec 08: failure state stays resident and components provide a "retry" button, no silent retries
       retry: false,
       staleTime: 2000,
     },

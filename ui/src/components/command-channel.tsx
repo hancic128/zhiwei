@@ -1,11 +1,15 @@
 /**
- * 「命令通道不可用」标记。
+ * "Command channel unavailable" indicator.
  *
- * 控制台上的启停 / 重启 / 拉日志都是「签发命令 → 节点主动来拉」的形态。节点要是
- * 一直不来拉，这些按钮点下去不会有任何反应，而节点页看起来一切正常（指标照常
- * 上报、状态还是「在线」）——用户只能登机器翻日志。
+ * Start / stop / restart / fetch-logs in the console all work in the form of
+ * "issue command -> node pulls it actively". If a node stops pulling, these
+ * buttons do nothing while the node page looks perfectly normal (metrics keep
+ * arriving, state still shows "online") — users have to SSH in and read logs
+ * to figure out what happened.
  *
- * 判定在后端 `crates/monitor-server/src/control_channel.rs`，这里只负责把它讲出来。
+ * The determination lives in the backend at
+ * `crates/monitor-server/src/control_channel.rs`; this component only
+ * surfaces it.
  */
 import { useTranslation } from "react-i18next";
 import { PlugZap } from "lucide-react";

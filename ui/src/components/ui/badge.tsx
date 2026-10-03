@@ -2,7 +2,7 @@ import * as React from "react";
 import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
-/** 规范 7.5：仅 4 种语义色组合，禁止自创颜色。 */
+/** Spec 7.5: only 4 semantic color combinations; no custom colors allowed. */
 const badgeVariants = cva(
   "inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium whitespace-nowrap",
   {
@@ -30,7 +30,7 @@ export function Badge({ className, tone, ...props }: BadgeProps) {
   return <span className={cn(badgeVariants({ tone }), className)} {...props} />;
 }
 
-/** 规范 7.5.3：带圆点 Badge */
+/** Spec 7.5.3: Badge with dot */
 export function DotBadge({
   tone = "neutral",
   children,

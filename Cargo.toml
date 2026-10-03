@@ -49,7 +49,7 @@ serde_json = "1"
 # crypto
 ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8", "zeroize"] }
 
-# HTTP client (MCP server 内部调 REST 端点用)
+# HTTP client (MCP server uses it to call internal REST endpoints)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
 rand = "0.8"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }

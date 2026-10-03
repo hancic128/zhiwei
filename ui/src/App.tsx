@@ -45,7 +45,7 @@ export default function App() {
   const [hasToken, setHasToken] = React.useState(() => !!getToken());
 
   if (!hasToken) {
-    // 规范 07-3.3：登录页不显示导航栏，但**保留**右下角悬浮控制面板（主题 / 语言）
+    // Spec 07-3.3: login page hides the nav, but keeps the floating controls (theme / locale)
     return (
       <>
         <LoginPage onSubmit={() => setHasToken(true)} />
@@ -76,19 +76,22 @@ function Console({ onLogout }: { onLogout: () => void }) {
     refetchInterval: 10000,
   });
 
-  // 最近部署时间 = monitor 进程启动时刻，由 /v1 带回来。拿不到（断网 / 老后端不认
-  // 这个字段）就先不显示——顶栏宁可少一块，也不给一个猜出来的时间。
+  // Latest deploy time = monitor process start time, returned by /v1. If unavailable
+  // (network down / older backend that doesn't know this field), don't show it —
+  // the header is better off with one less item than with a guessed timestamp.
   const deployedAtMs = indexQ.data?.started_at_unix_nano
     ? Math.floor(indexQ.data.started_at_unix_nano / 1e6)
     : null;
-  // Tooltip 里点明用的是哪个时区（"北京 (UTC+8)"）——顶栏时间跟着设置走，写出来
-  // 就不用去设置页对照了。设置页那 6 个之外的值（理论上进不来）直接显示 IANA 名。
+  // Tooltip makes it explicit which timezone is used ("Beijing (UTC+8)") — the header
+  // time follows the setting, so showing it avoids having to compare in the settings page.
+  // Timezone values outside the 6 in the settings page (shouldn't happen) display the IANA name.
   const tzKey = TIMEZONES.find((z) => z.tz === timezone)?.key;
   const tzLabel = tzKey ? t(`tz.${tzKey}`) : timezone;
 
-  // token 失效 → 清掉本地 token、回到登录页。
-  // 受保护端点（/v1/todo 等）在 api.ts 里 dispatch `zhiwei:unauthorized`；
-  // 这里挂监听器负责收尾——只清 token、不弹错误 toast（401 本身就是「请重登」的提示）。
+  // Token expired → clear local token, return to login page.
+  // Protected endpoints (/v1/todo etc.) dispatch `zhiwei:unauthorized` from api.ts;
+  // this listener handles cleanup — only clears the token, no error toast (401 itself
+  // is the "please re-login" prompt).
   React.useEffect(() => {
     const handler = () => {
       clearAdminToken();
@@ -98,8 +101,8 @@ function Console({ onLogout }: { onLogout: () => void }) {
     return () => window.removeEventListener("zhiwei:unauthorized", handler);
   }, [onLogout]);
 
-  // /v1 永不返回 401（仅靠 body.authenticated 区分鉴权结果），
-  // 但如果未来加了其它全局探测端点导致这里也回 401，仍按老逻辑兜底。
+  // /v1 never returns 401 (it only uses body.authenticated to convey auth state),
+  // but if a future global probe endpoint also returns 401, fall back to the old logic.
   React.useEffect(() => {
     if (indexQ.error instanceof ApiError && indexQ.error.status === 401) {
       clearAdminToken();
@@ -120,7 +123,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
     <div className="flex h-screen overflow-hidden">
       <Sidebar collapsed={collapsed} onToggle={toggle} />
 
-      {/* 手机端抽屉（规范 04：< md 侧边栏隐藏，汉堡菜单触发） */}
+      {/* Mobile drawer (spec 04: < md sidebar hidden, hamburger menu triggers it) */}
       <MobileDrawer open={drawer} onClose={() => setDrawer(false)} />
 
       <div className="flex-1 flex flex-col min-w-0">
@@ -134,8 +137,8 @@ function Console({ onLogout }: { onLogout: () => void }) {
             >
               <Menu className="w-5 h-5 text-ink-700 dark:text-surface-4" aria-hidden="true" />
             </button>
-            {/* 节点详情页把「Nodes / 家用电脑 · 状态 · 入网时间」投递到 header；
-                其余页面继续显示单段标题，外观不变。 */}
+            {/* Node detail page pushes "Nodes / Home PC · Status · Enroll time" into the header;
+                Other pages keep showing a single title, no visual change. */}
             {pathname.startsWith("/nodes/") ? (
               <BreadcrumbOutlet />
             ) : (
@@ -147,15 +150,18 @@ function Console({ onLogout }: { onLogout: () => void }) {
             )}
           </div>
 
-          {/* 页面自己的工具栏（节点详情：时间范围 / 刷新频率 / 节点操作）投递到这里，
-              不再压在内容区顶部 —— 内容区从第一块卡片开始。
-              窄屏（<lg）折成独立一行：横排在 390px 上会把标题和版本徽章顶出屏幕。 */}
+          {/* The page's own toolbar (node detail: time range / refresh rate / node actions) pushes here,
+              no longer stuck at the top of the content area — content starts from the first card.
+              Narrow screens (<lg) wrap to a separate row: inline at 390px would push the title and
+              version badge off-screen. */}
           <HeaderActions className="order-last w-full justify-end shrink-0 gap-2 lg:order-none lg:w-auto" />
 
           <div className="flex items-center gap-2 shrink-0">
-            {/* 最近部署时间：绝对时间按「设置 → 界面偏好 → 时区」的全局时区渲染
-                （同一时刻，时区变了这里跟着变），相对时间放 Tooltip——相对时间
-                与时区无关，不占顶栏宽度。窄屏隐藏，别把版本徽章挤走。 */}
+            {/* Latest deploy time: absolute time rendered in the global timezone from
+                "Settings → Interface preferences → Timezone" (the same instant changes here
+                when the timezone changes), relative time goes in the Tooltip — relative time
+                is timezone-agnostic and doesn't take header width. Hide on narrow screens so
+                the version badge isn't pushed off. */}
             {deployedAtMs !== null && (
               <Tooltip
                 side="bottom"
@@ -172,7 +178,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
                 </span>
               </Tooltip>
             )}
-            {/* 版本徽章：写死的构建常量，不随在线状态波动 */}
+            {/* Version badge: hard-coded build constant, doesn't fluctuate with online status */}
             <Badge tone="neutral">{APP_VERSION}</Badge>
             <DotBadge
               tone={indexQ.isSuccess ? "success" : "danger"}
@@ -194,7 +200,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
                 <Route path="/services" element={<Services />} />
                 <Route path="/help" element={<HelpPage />} />
                 <Route path="/containers" element={<Containers />} />
-                {/* 日志菜单已下线：容器日志在容器页行内，文件日志走容器页工具栏 */}
+                {/* Logs menu removed: container logs are inline in the containers page, file logs via the containers page toolbar */}
                 <Route path="/logs" element={<Navigate to="/containers" replace />} />
                 <Route path="/certificates" element={<Certificates />} />
                 <Route path="/alerts" element={<Alerts />} />
@@ -211,7 +217,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
   );
 }
 
-/** 手机端抽屉导航 */
+/** Mobile drawer navigation */
 const MOBILE_NAV = [
   { to: "/", key: "todo", icon: Inbox },
   { to: "/nodes", key: "nodes", icon: Server },

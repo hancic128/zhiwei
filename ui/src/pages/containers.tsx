@@ -49,7 +49,7 @@ import {
 type Filter = "all" | ContainerBucket;
 type SortKey = "name" | "node" | "state" | "cpu" | "mem";
 
-/** 状态排序：异常最前，其次运行中，最后已停止 */
+/** State sort order: failed first, then running, then stopped */
 const STATE_RANK: Record<string, number> = {
   dead: 0,
   restarting: 1,
@@ -62,7 +62,7 @@ const STATE_RANK: Record<string, number> = {
 interface Row extends ContainerInfo {
   nodeId: string;
   hostname: string;
-  /** 节点别名（空串=未设置）；列展示与过滤都用 nodeLabel */
+  /** Node alias (empty string = unset); both column display and filtering use nodeLabel */
   alias: string;
 }
 
@@ -78,7 +78,7 @@ export function Containers() {
   const [page, setPage] = React.useState(1);
   const [pageSize, setPageSize] = React.useState(10);
 
-  // 概览卡片会带 ?state=failed 进来，这里按 query 初始化筛选
+  // Overview cards arrive with ?state=failed; initialize filter from the query
   const [filter, setFilter] = React.useState<Filter>(() => {
     const raw = (params.get("state") ?? "").toLowerCase();
     return raw === "failed" || raw === "running" || raw === "stopped"
@@ -116,7 +116,7 @@ export function Containers() {
     [groups],
   );
 
-  /** 四张卡片：互斥分桶，相加 = 总数 */
+  /** Four cards: mutually exclusive buckets, sum equals the total */
   const counts = React.useMemo(() => {
     const c = { all: rows.length, running: 0, stopped: 0, failed: 0, other: 0 };
     for (const r of rows) c[containerBucket(r)] += 1;
@@ -135,7 +135,7 @@ export function Containers() {
     [groups],
   );
 
-  /** 应用 = 容器自带的 compose 项目标签。非 compose 起的容器为空，不进这个列表 */
+  /** App = the compose project label carried by the container. Containers not started via compose have no label and don't appear in this list */
   const apps = React.useMemo(
     () =>
       Array.from(
@@ -176,7 +176,7 @@ export function Containers() {
           case "node":
             return nodeLabel(c).toLowerCase();
           case "cpu":
-            // 未运行 / 未上报 = 0，统一落到 -1 沉底（默认降序：占用高的在前）
+            // Not running / no report = 0, normalized to -1 so it sinks (default desc: highest usage first)
             return c.cpu_percent ?? -1;
           case "mem":
             return c.mem_usage_bytes ?? -1;
@@ -200,7 +200,7 @@ export function Containers() {
     setSortDir(key === "name" || key === "node" ? "asc" : "desc");
   };
 
-  // 顶部大字卡片一律复用 shared StatCards（规范 7.2：禁止为不同卡片写不同外壳）
+  // Top large cards always reuse the shared StatCards (spec 7.2: forbid different shells for different cards)
   const baseCards: Array<{
     key: Filter;
     label: string;
@@ -260,7 +260,7 @@ export function Containers() {
             <p className="text-sm text-ink-500 mt-0.5">{t("containers.subtitle")}</p>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
-            {/* 固定宽度：别名要能整段显示，长度不随内容变化 */}
+            {/* Fixed width: the alias must display in full, length does not vary with content */}
             <Select
               wrapperClassName="w-64"
               value={nodeFilter}
@@ -386,7 +386,7 @@ export function Containers() {
                   return (
                     <Tr key={`${c.nodeId}-${c.id}`}>
                       <Td>
-                        {/* 名称 + ID 同一列：名是头、ID 用 mono 标记成身份号，便于一眼看清「是哪一台」 */}
+                        {/* Name + ID in the same column: name as the header, ID shown in mono as an identifier so it's clear at a glance "which node is this" */}
                         <div className="flex items-center gap-2 min-w-0">
                           <span className="text-sm font-medium text-ink-900 dark:text-surface-0 truncate max-w-[220px]">
                             {c.name}
@@ -425,7 +425,7 @@ export function Containers() {
                           {containerStatusLabel(c, t)}
                         </div>
                       </Td>
-                      {/* CPU：占用 + 限额两行 + 进度条；未运行 / 未上报按「—」处理 */}
+                      {/* CPU: usage + limit two lines + bar; not running / no report shown as "—" */}
                       <Td className="hidden md:table-cell" align="right">
                         <div className="inline-flex flex-col items-end gap-1">
                           <div className="text-sm tabular-nums text-ink-700 dark:text-ink-100">
@@ -455,7 +455,7 @@ export function Containers() {
                           />
                         </div>
                       </Td>
-                      {/* 内存：用量 / 限额 + 进度条；限额 0 = 不限，只显示用量且无条 */}
+                      {/* Memory: usage / limit + bar; limit 0 = unlimited, only show usage with no bar */}
                       <Td className="hidden xl:table-cell" align="right">
                         <div className="inline-flex flex-col items-end gap-1">
                           <span

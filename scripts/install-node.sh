@@ -1,81 +1,93 @@
 #!/bin/sh
 # shellcheck shell=bash
-# ZhiWei 节点入网安装脚本。
+# ZhiWei node onboarding install script.
 #
-#   # 一次性命令：admin在UI里点「生成入网命令」后,目标机器执行下面这一条：
+#   # One-shot command: after admin clicks "Generate Onboarding Command" in the UI,
+#   # the target machine runs the following line:
 #   curl -sSL https://<monitor>/install-node.sh | \
 #     ZHIWEI_MONITOR_URL=https://<monitor> \
 #     ZHIWEI_BOOTSTRAP_TOKEN=<token> \
 #     bash -s
 #
-#   # 卸载：
+#   # Uninstall:
 #   curl -sSL https://<monitor>/install-node.sh | sudo bash -s -- --uninstall
 #
-#   # 干净重装（换身份：清掉旧二进制 / env / 状态文件后重新入网）：
+#   # Clean reinstall (new identity: wipe old binary / env / state files, then onboard again):
 #   curl -sSL https://<monitor>/install-node.sh | \
 #     ZHIWEI_MONITOR_URL=https://<monitor> \
 #     ZHIWEI_BOOTSTRAP_TOKEN=<token> \
 #     sudo -E bash -s -- --reinstall
 #
-#   # 升级到最新版（就地换二进制 + 刷新服务配置，保留身份与 env，不重新入网）：
+#   # Upgrade to latest (in-place binary swap + refresh service config, keep identity and env, no re-onboarding):
 #   curl -sSL https://<monitor>/install-node.sh | sudo bash -s -- --upgrade
 #
-# 做的事：
-#   1. 从 GitHub release 下载 zhiwei-<triple>.tar.gz（内含 zhiwei-node + VERSION）
-#   2. 写环境文件（默认 /etc/zhiwei-node.env，mode 0600，仅 root 可读）
-#   3. 写常驻服务配置，启动并设置开机自启：
-#        Linux  → /etc/systemd/system/zhiwei-node.service（systemd：enable --now）
-#        macOS  → /Library/LaunchDaemons/com.zhiwei.node.plist（launchd：bootstrap）
-#   4. 本次如果要重新入网（--reinstall / 换 monitor / 本机还没有身份），先把上一份
-#      二进制 / env / 状态文件清掉再完整装一份，保证新身份不带旧残留
-#   5. 等节点写回 node.id，确认真的入网了——「脚本跑通」不等于「节点入网」
+# What it does:
+#   1. Download zhiwei-<triple>.tar.gz from GitHub release (contains zhiwei-node + VERSION)
+#   2. Write env file (default /etc/zhiwei-node.env, mode 0600, root-only readable)
+#   3. Write daemon service config, start it, and enable on boot:
+#        Linux  -> /etc/systemd/system/zhiwei-node.service (systemd: enable --now)
+#        macOS  -> /Library/LaunchDaemons/com.zhiwei.node.plist (launchd: bootstrap)
+#   4. If this run re-onboards (--reinstall / switched monitor / no local identity yet),
+#      wipe the previous binary / env / state files before doing a full install, so the
+#      new identity is not contaminated by leftover state
+#   5. Wait for the node to write back node.id to confirm it really onboarded --
+#      "script ran successfully" does NOT mean "node is onboarded"
 #
-# --upgrade 走的是「装一份新的二进制 + 刷新服务配置」这一步：不删身份、不重写 env、
-# 不重新入网，所以不需要 monitor URL 与入网令牌。
+# --upgrade takes the "install new binary + refresh service config" path: it does not delete
+# identity, does not rewrite env, and does not re-onboard, so it does not need the monitor
+# URL nor the onboarding token.
 #
-# 平台：Linux（x86_64 / aarch64，systemd）与 macOS（arm64 / x86_64，launchd）；
-#       必须 root 运行（请用 sudo）。
+# Platforms: Linux (x86_64 / aarch64, systemd) and macOS (arm64 / x86_64, launchd);
+#            must be run as root (please use sudo).
 #
-# 参数：
-#   --alias <名字>  可选：入网时一并设置别名（≤10 字符）
-#   --tags <列表>   可选：入网时一并设置标签，空格 / 逗号 / 顿号分隔（最多 10 个）
-#   --uninstall     停服务 + 删 binary / env / unit（保留 state-dir 数据）
-#   --reinstall     干净重装并重新入网：先停服务，删掉已装二进制 / env 与 state-dir 里的
-#                   节点状态（node.id、signing.key、ops.pub、ca.crt.pem），再完整装一份。
-#                   ⚠️ 会分配新的 node_id：控制台里旧节点记录不会自动消失，要手动删
-#                   （历史 / 别名 / 标签都留在旧记录上）。也是补回缺失 ops.pub 的手段。
-#   --upgrade       原地升级：装最新版二进制 + 刷新服务配置（unit / plist 变了才覆盖），
-#                   **保留** state-dir 身份与 env 文件，不重新入网，不需要 monitor URL /
-#                   入网令牌。升级不想要新版本时可以 ZHIWEI_VERSION=<版本> 指定。
-#                   动作类参数（--upgrade / --reinstall / --uninstall）一次只能给一个。
-#   --no-cache      忽略本地安装包缓存，重新下载（排查「缓存是不是坏了」时用）
+# Arguments:
+#   --alias <name>   Optional: set alias on onboarding (<=10 chars)
+#   --tags <list>    Optional: set tags on onboarding, space / comma / dunhao separator (max 10)
+#   --uninstall      Stop service + delete binary / env / unit (keep state-dir data)
+#   --reinstall      Clean reinstall and re-onboard: stop service, delete installed binary /
+#                    env and node state from state-dir (node.id, signing.key, ops.pub, ca.crt.pem),
+#                    then do a full install.
+#                    Warning: a new node_id will be assigned; old node records in the console
+#                    will not disappear automatically and must be removed manually (history /
+#                    alias / tags all stay on the old record). Also a way to recover a missing ops.pub.
+#   --upgrade        In-place upgrade: install latest binary + refresh service config
+#                    (overwrite only if unit / plist changed), **keeps** state-dir identity
+#                    and env file, does not re-onboard, does not need monitor URL / onboarding
+#                    token. To pin a version when upgrading: ZHIWEI_VERSION=<version>.
+#                    Action arguments (--upgrade / --reinstall / --uninstall) are mutually
+#                    exclusive; only one at a time.
+#   --no-cache       Ignore local installer cache, re-download (for debugging "is the cache broken")
 #   -h | --help
 #
-# 环境变量：
-#   ZHIWEI_MONITOR_URL       monitor URL（必填，仅安装 / 重装；--upgrade 不需要）
-#   ZHIWEI_BOOTSTRAP_TOKEN   入网令牌（必填，仅安装 / 重装；--upgrade 不需要）
-#   ZHIWEI_NODE_ALIAS        同 --alias
-#   ZHIWEI_NODE_TAGS         同 --tags
-#   ZHIWEI_VERSION           可选，仅用于日志/兜底；真实版本从包内 VERSION 读。
-#                            不设也能装（资产名不含版本号）。
-#   ZHIWEI_REPO              仓库 owner/name（默认 hancic128/zhiwei）
-#   ZHIWEI_INSTALL_DIR       二进制目录（默认 /usr/local/bin）
-#   ZHIWEI_STATE_DIR         状态目录（默认 /var/lib/zhiwei-node）
-#   ZHIWEI_ENV_FILE          env 文件路径（默认 /etc/zhiwei-node.env）
-#   ZHIWEI_SERVICE_FILE      服务配置路径（默认按平台：systemd unit / launchd plist）
-#   ZHIWEI_LOG_FILE          仅 macOS：launchd 捕获的日志文件（默认 /var/log/zhiwei-node.log）
-#   ZHIWEI_BASE_URL          自建下载源（同 install.sh 语义）。设了就不走 GitHub Releases。
-#                            任何按 <owner>/<repo>/v<tag>/<file> 排布的镜像都支持
-#                            （ghcr clone / 内部站点 / 自建），例：
+# Environment variables:
+#   ZHIWEI_MONITOR_URL       Monitor URL (required, install / reinstall only; --upgrade does not need it)
+#   ZHIWEI_BOOTSTRAP_TOKEN   Onboarding token (required, install / reinstall only; --upgrade does not need it)
+#   ZHIWEI_NODE_ALIAS        Same as --alias
+#   ZHIWEI_NODE_TAGS         Same as --tags
+#   ZHIWEI_VERSION           Optional, used only for log / fallback; the real version is read from
+#                            VERSION in the package. Not setting it is fine (asset name has no version).
+#   ZHIWEI_REPO              Repository owner/name (default hancic128/zhiwei)
+#   ZHIWEI_INSTALL_DIR       Binary directory (default /usr/local/bin)
+#   ZHIWEI_STATE_DIR         State directory (default /var/lib/zhiwei-node)
+#   ZHIWEI_ENV_FILE          Env file path (default /etc/zhiwei-node.env)
+#   ZHIWEI_SERVICE_FILE      Service config path (default per platform: systemd unit / launchd plist)
+#   ZHIWEI_LOG_FILE          macOS only: log file captured by launchd (default /var/log/zhiwei-node.log)
+#   ZHIWEI_BASE_URL          Self-hosted download source (same semantics as install.sh). When set,
+#                            GitHub Releases is bypassed. Any mirror laid out as
+#                            <owner>/<repo>/v<tag>/<file> is supported (ghcr clone / internal
+#                            site / self-hosted), e.g.:
 #                              - https://mirror.example.com/releases/<owner>/<repo>
-#                            安装时设了会一并记进 env 文件，之后 `--upgrade` 自动沿用。
-#   ZHIWEI_CACHE_DIR         安装包缓存目录（默认 /var/cache/zhiwei-node）。重复入网时先取
-#                            远端的 .sha256（几百字节）比对缓存：一致就直接用缓存，不再
-#                            下载整个包。取不到 .sha256 时一定不复用（宁可多花一次带宽）。
-#   ZHIWEI_NO_CACHE=1        同 --no-cache
+#                            When set during install, it is also recorded in the env file; subsequent
+#                            `--upgrade` reuses it automatically.
+#   ZHIWEI_CACHE_DIR         Installer cache directory (default /var/cache/zhiwei-node). On repeated
+#                            onboardings, first fetch the remote .sha256 (a few hundred bytes) and
+#                            compare with the cache: identical -> use it; no remote .sha256 -> never
+#                            reuse the cache (prefer one more download over a broken/old package).
+#   ZHIWEI_NO_CACHE=1        Same as --no-cache
 #
-# 别名 / 标签只在本机**第一次入网**时上报：已经有 node.id 的机器不会再 enroll，
-# 重复执行本脚本改不了它们——请在控制台改，或加 --reinstall 重新入网。
+# Alias / tags are reported only on this machine's **first onboarding**: machines that already
+# have a node.id will not enroll again, so re-running this script cannot change them -- change
+# them in the console, or add --reinstall to re-onboard.
 
 set -euo pipefail
 umask 077
@@ -91,88 +103,93 @@ SERVICE_NAME="zhiwei-node"
 SERVICE_LABEL="com.zhiwei.node"
 
 log() { printf '[zhiwei-install] %s\n' "$*" >&2; }
-die() { printf '[zhiwei-install] 错误: %s\n' "$*" >&2; exit 1; }
+die() { printf '[zhiwei-install] error: %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# 环境文件 0600 只给 root；macOS 没有 coreutils 时也能用（install 是 BSD 自带，但别赌）
+# Env file is 0600 root-only; works even on macOS without coreutils (install ships with BSD, but don't rely on it)
 install_file() { # install_file <mode> <src> <dest>
   if have install; then install -m "$1" "$2" "$3"; else cp "$2" "$3" && chmod "$1" "$3"; fi
 }
 
-# 头部注释到第一个空行为止（比写死行号稳，注释加减不用同步改 usage）。
-# 管道执行时 $0 是 "bash"，读不到文件——退化成一行用法，别让 sed 报错把 --help 打断。
+# Header comment up to the first blank line (more robust than hardcoded line numbers,
+# so adding/removing comments does not require syncing usage).
+# When piped, $0 is "bash" and the file is not readable -- degrade to a one-line usage
+# instead of letting sed fail and break --help.
 usage() {
   if [ -r "$0" ]; then
     sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
   else
-    printf '用法: curl -sSL <monitor>/install-node.sh | \\\n  ZHIWEI_MONITOR_URL=<url> ZHIWEI_BOOTSTRAP_TOKEN=<token> bash -s [-- --upgrade|--reinstall|--uninstall]\n'
+    printf 'Usage: curl -sSL <monitor>/install-node.sh | \\\n  ZHIWEI_MONITOR_URL=<url> ZHIWEI_BOOTSTRAP_TOKEN=<token> bash -s [-- --upgrade|--reinstall|--uninstall]\n'
   fi
 }
 
-# ---- 参数解析 ----
+# ---- Argument parsing ----
 ACTION="install"
-# 动作类参数只能有一个：--upgrade / --reinstall / --uninstall 语义互斥（一个原地升级、
-# 一个换身份重装、一个卸载），同时给两个多半是手滑，静默按最后一个走会让人以为
-# 「升级了」而其实是「换了身份」——直接报错更安全。
+# Action arguments are mutually exclusive: --upgrade / --reinstall / --uninstall have
+# incompatible semantics (one upgrades in place, one re-onboards with new identity, one
+# uninstalls). Supplying two at once is almost certainly a slip; silently honoring the last
+# one would make people think they "upgraded" when they actually "changed identity" --
+# failing fast is the right call.
 set_action() {
   if [ "$ACTION" != "install" ] && [ "$ACTION" != "$1" ]; then
-    die "--$1 与 --$ACTION 互斥，一次只能给一个动作"
+    die "--$1 and --$ACTION are mutually exclusive; only one action at a time"
   fi
   ACTION="$1"
 }
-# 安装包缓存：默认开启（环境变量 ZHIWEI_NO_CACHE=1 或 --no-cache 关掉）
+# Installer cache: enabled by default (disabled via ZHIWEI_NO_CACHE=1 or --no-cache)
 USE_CACHE=1
 [ -n "${ZHIWEI_NO_CACHE:-}" ] && USE_CACHE=0
-# 可选元数据：入网时一并上报（也可以走 ZHIWEI_NODE_ALIAS / ZHIWEI_NODE_TAGS）
+# Optional metadata: reported on onboarding (also via ZHIWEI_NODE_ALIAS / ZHIWEI_NODE_TAGS)
 NODE_ALIAS="${ZHIWEI_NODE_ALIAS:-}"
 NODE_TAGS="${ZHIWEI_NODE_TAGS:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --alias)
-      [ $# -ge 2 ] || die "--alias 后面要跟一个值"
+      [ $# -ge 2 ] || die "--alias requires a value"
       NODE_ALIAS="$2"; shift 2 ;;
     --alias=*) NODE_ALIAS="${1#*=}"; shift ;;
     --tags)
-      [ $# -ge 2 ] || die "--tags 后面要跟一个值"
+      [ $# -ge 2 ] || die "--tags requires a value"
       NODE_TAGS="$2"; shift 2 ;;
     --tags=*) NODE_TAGS="${1#*=}"; shift ;;
     --uninstall) set_action uninstall; shift ;;
     --reinstall) set_action reinstall; shift ;;
     --upgrade)   set_action upgrade; shift ;;
-    --no-cache)  USE_CACHE=0; shift ;;
-    # `bash -s -- --alias x` 时 bash 自己吃掉一个 `--`，但直连 `sh install-node.sh -- --alias x`
-    # 会把它留给我们，跳过即可
+    # `bash -s -- --alias x`: bash itself consumes the `--`, but `sh install-node.sh -- --alias x`
+    # leaves it for us -- just skip it
     --) shift ;;
     -h|--help)   usage; exit 0 ;;
-    *) die "未知参数: $1（用 --help 看用法）" ;;
+    *) die "unknown argument: $1 (use --help for usage)" ;;
   esac
 done
 
-# ---- root 检查（必须在所有写盘操作之前）----
+# ---- Root check (must come before any disk write) ----
 if [ "$(id -u)" -ne 0 ]; then
-  die "必须 root 运行，请用 sudo: curl ... | sudo bash -s"
+  die "must be run as root, please use sudo: curl ... | sudo bash -s"
 fi
 
-# ---- 上一次安装指向哪台 monitor（必须在覆盖 ${ENV_FILE} 之前读）----
-# 见「旧节点身份」一节的用途；identity_state 记本次是否沿用了旧身份，
-# 决定最后能不能说「节点已入网」（沿用旧身份时 node.id 本来就在，证明不了什么）。
+# ---- Which monitor did the previous install point to (must read before overwriting ${ENV_FILE}) ----
+# See the "Old identity" section for usage; identity_state records whether this run kept the
+# old identity, which decides whether we can claim "node onboarded" at the end (when the old
+# identity is kept, node.id was already there, so it proves nothing).
 prev_monitor_url=""
-# 上一次安装用的下载源（国内机器装的时候带了 ZHIWEI_BASE_URL，升级时照抄，
-# 免得每次都得回忆那个地址）。--upgrade 时它是「没显式给 BASE_URL 就用它」的兜底。
+# The download source used by the previous install (machines in CN install with ZHIWEI_BASE_URL;
+# upgrade reuses it so we don't have to remember the address every time). On --upgrade, it is
+# the fallback when BASE_URL is not explicitly given.
 prev_base_url=""
-# 覆盖前的二进制版本（收尾汇报用；--upgrade 要说清「从哪个版本升到哪个版本」）
+# Binary version before overwrite (for the final report; --upgrade needs to say "from version X to version Y")
 prev_version=""
 identity_state="none"
 if [ -f "${ENV_FILE}" ]; then
   prev_monitor_url="$(sed -n 's/^ZHIWEI_MONITOR_URL=//p' "${ENV_FILE}" | tail -n1)"
   prev_base_url="$(sed -n 's/^ZHIWEI_BASE_URL=//p' "${ENV_FILE}" | tail -n1)"
 fi
-# 本次实际生效的下载源：显式传入优先，其次沿用 env 里记着的那份
+# The download source actually used this run: explicit env wins, otherwise reuse what the env file recorded
 if [ -z "${ZHIWEI_BASE_URL:-}" ]; then
   ZHIWEI_BASE_URL="${prev_base_url}"
 fi
 
-# ---- 平台检测 ----
+# ---- Platform detection ----
 os="$(uname -s)"
 arch="$(uname -m)"
 case "$os" in
@@ -181,7 +198,7 @@ case "$os" in
     case "$arch" in
       x86_64|amd64)   target="x86_64-unknown-linux-musl" ;;
       aarch64|arm64)  target="aarch64-unknown-linux-musl" ;;
-      *) die "暂不支持的架构: ${arch}（Linux 目前有 x86_64 / aarch64）" ;;
+      *) die "unsupported architecture: ${arch} (Linux currently supports x86_64 / aarch64)" ;;
     esac
     ;;
   Darwin)
@@ -189,16 +206,17 @@ case "$os" in
     case "$arch" in
       x86_64)         target="x86_64-apple-darwin" ;;
       arm64|aarch64)  target="aarch64-apple-darwin" ;;
-      *) die "暂不支持的架构: ${arch}（macOS 目前有 arm64 / x86_64）" ;;
+      *) die "unsupported architecture: ${arch} (macOS currently supports arm64 / x86_64)" ;;
     esac
     ;;
   *)
-    die "暂不支持的系统: ${os}（目前有 Linux / macOS；Windows 请用 WSL）"
+    die "unsupported system: ${os} (currently Linux / macOS; for Windows use WSL)"
     ;;
 esac
 
-# 服务配置落盘位置随 init 系统走；用 LaunchDaemon（不是 LaunchAgent）是因为
-# 本脚本本来就要求 root，而 daemon 不依赖「有人登录桌面」也开机自启。
+# Service config lands at a path depending on the init system; using LaunchDaemon (not
+# LaunchAgent) because this script already requires root, and a daemon does not depend on
+# "someone logged into a desktop" to auto-start.
 if [ "$init" = "launchd" ]; then
   SERVICE_FILE="${ZHIWEI_SERVICE_FILE:-/Library/LaunchDaemons/${SERVICE_LABEL}.plist}"
   LOG_FILE="${ZHIWEI_LOG_FILE:-/var/log/${SERVICE_NAME}.log}"
@@ -207,17 +225,17 @@ else
   LOG_FILE=""
 fi
 
-# ---- 工具检查 ----
-have curl || die "需要 curl"
-have tar  || die "需要 tar"
+# ---- Tool checks ----
+have curl || die "curl is required"
+have tar  || die "tar is required"
 if [ "$init" = "systemd" ]; then
-  have systemctl || die "需要 systemctl（systemd）"
-  [ -d /run/systemd/system ] || die "/run/systemd/system 不存在，systemd 未运行"
+  have systemctl || die "systemctl is required (systemd)"
+  [ -d /run/systemd/system ] || die "/run/systemd/system does not exist; systemd is not running"
 else
-  have launchctl || die "需要 launchctl（macOS launchd）"
+  have launchctl || die "launchctl is required (macOS launchd)"
 fi
 
-# 最近的服务日志：systemd 走 journald，launchd 走 plist 里的 StandardErrorPath
+# Recent service logs: systemd -> journald, launchd -> StandardErrorPath in the plist
 recent_log() {
   if [ "$init" = "systemd" ]; then
     journalctl -u "${SERVICE_NAME}" --since '-2min' --no-pager 2>/dev/null
@@ -226,16 +244,18 @@ recent_log() {
   fi
 }
 
-# 停掉常驻服务（卸载与干净重装共用）。systemd 顺带 disable，launchd 逐级回退。
-# 必须在删 node.id / 二进制之前调用：进程还在跑的话，删除后它可能立刻又写回
-# node.id，新进程看到这个文件就跳过 enroll，「重装」换来的还是旧身份。
+# Stop the daemon (shared by uninstall and clean reinstall). systemd also disables it,
+# launchd falls back step by step.
+# Must be called before deleting node.id / binary: if the process is still running, it may
+# immediately write back node.id after deletion, and the new process sees the file and
+# skips enroll, so "reinstall" still yields the old identity.
 stop_service() {
   if [ "$init" = "systemd" ]; then
     systemctl disable --now "${SERVICE_NAME}" 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
   else
-    # LaunchDaemon 的 domain 是 system；bootout 支持「plist 路径」和「domain/label」
-    # 两种目标写法，老版本 macOS 只有 unload，逐级回退。
+    # LaunchDaemon's domain is system; bootout accepts both "plist path" and "domain/label",
+    # older macOS only has unload -- fall back step by step.
     launchctl bootout system "${SERVICE_FILE}" 2>/dev/null \
       || launchctl bootout "system/${SERVICE_LABEL}" 2>/dev/null \
       || launchctl unload "${SERVICE_FILE}" 2>/dev/null \
@@ -244,50 +264,55 @@ stop_service() {
 }
 
 # ============================================================
-# 卸载
+# Uninstall
 # ============================================================
 if [ "$ACTION" = "uninstall" ]; then
-  log "卸载 ${SERVICE_NAME}（${init}）"
+  log "uninstalling ${SERVICE_NAME} (${init})"
   stop_service
   rm -f "${INSTALL_DIR}/${BIN_NAME}" "${ENV_FILE}" "${SERVICE_FILE}"
-  log "已卸载，但保留 ${STATE_DIR} 数据目录（里头是 signing.key / node.id，重装不丢身份）"
-  log "若要连数据一起清，请手动: rm -rf ${STATE_DIR}"
-  log "  或下次重装时加 --reinstall（会清掉身份并分配新的 node_id）"
+  log "uninstalled, but kept ${STATE_DIR} data directory (it holds signing.key / node.id; identity survives reinstall)"
+  log "to also wipe the data, run manually: rm -rf ${STATE_DIR}"
+  log "  or add --reinstall next time (wipes identity and assigns a new node_id)"
   exit 0
 fi
 
 # ============================================================
-# 安装前置：版本与必填配置
+# Install prerequisites: version and required config
 # ============================================================
-# --upgrade 只换二进制 + 刷新服务配置，不 enroll，用不到 monitor URL 与令牌；
-# 但本机得真的装过东西，否则「升级」无从谈起。
+# --upgrade only swaps the binary + refreshes service config; it does not enroll, so it
+# does not need the monitor URL or token; but the machine must have something installed
+# already, otherwise "upgrading" is meaningless.
 if [ "$ACTION" = "upgrade" ]; then
   if [ ! -f "${ENV_FILE}" ] && [ ! -f "${SERVICE_FILE}" ]; then
-    die "本机没有装过 ${SERVICE_NAME}（${ENV_FILE} 与 ${SERVICE_FILE} 都不存在）——--upgrade 只能升级已安装的节点；首次安装请跑入网命令"
+    die "${SERVICE_NAME} is not installed on this machine (neither ${ENV_FILE} nor ${SERVICE_FILE} exists) -- --upgrade can only upgrade an already-installed node; run the onboarding command for first install"
   fi
 else
   if [ -z "${ZHIWEI_MONITOR_URL:-}" ]; then
-    die "ZHIWEI_MONITOR_URL 未设置（enroll 命令会自动注入）"
+    die "ZHIWEI_MONITOR_URL is not set (the enroll command injects it automatically)"
   fi
   if [ -z "${ZHIWEI_BOOTSTRAP_TOKEN:-}" ]; then
-    die "ZHIWEI_BOOTSTRAP_TOKEN 未设置（enroll 命令会自动注入）"
+    die "ZHIWEI_BOOTSTRAP_TOKEN is not set (the enroll command injects it automatically)"
   fi
 fi
 
-log "平台 ${target} / 版本 ${VERSION:-latest}"
+log "platform ${target} / version ${VERSION:-latest}"
 
 # ============================================================
-# 下载（带本地缓存）
+# Download (with local cache)
 #
-# 国内服务器 / 隔离网络可设 ZHIWEI_BASE_URL 走自建镜像；不设就走 GitHub Releases latest。
+# Domestic / air-gapped servers can set ZHIWEI_BASE_URL to use a self-hosted mirror;
+# otherwise GitHub Releases latest is used.
 #
-# 入网命令经常会被重复执行（补别名 / 换 token / 排查问题 / 换 monitor），每次都把
-# 完整安装包（十几 MB）重新拉一遍纯属浪费带宽。这里按 target 缓存安装包：
-#   1. 先取远端那个几百字节的 .sha256（资产本身很小，作为「远端当前版本」的指纹）
-#   2. 本地缓存包的 sha256 与它一致 → 直接复用缓存，不下载
-#   3. 不一致 / 没有缓存 / 取不到 .sha256 → 老实下载，校验通过后再写回缓存
-# 取不到远端 .sha256 时**绝不复用缓存**：没有「它仍是最新」的可信证据，宁可多花一次
-# 带宽，也不能把旧包（甚至残包）装上去。
+# The onboarding command is often re-run (fix alias / swap token / debug / switch monitor),
+# and pulling the full installer package (10+ MB) every time is pure waste. Cache by target:
+#   1. First fetch the few-hundred-byte remote .sha256 (the asset itself is small; it serves
+#      as a fingerprint of "what's current on the remote")
+#   2. If the local cached package's sha256 matches -> reuse the cache, no download
+#   3. If it does not match / no cache / cannot fetch .sha256 -> download honestly, validate,
+#      then write back to cache
+# If the remote .sha256 cannot be fetched, **never reuse the cache**: without trustworthy
+# proof that "it is still current", we prefer one more download over installing an old
+# (or corrupted) package.
 # ============================================================
 asset="zhiwei-${target}.tar.gz"
 if [ -n "${ZHIWEI_BASE_URL:-}" ]; then
@@ -302,7 +327,7 @@ fi
 tmpdir="$(mktemp -d 2>/dev/null || mktemp -d -t zhiwei)"
 trap 'rm -rf "$tmpdir"' EXIT INT TERM
 
-sha256_file() { # sha256_file <path> → 十六进制摘要；两个工具都没有时输出空
+sha256_file() { # sha256_file <path> -> hex digest; outputs empty when neither tool is available
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$1" | awk '{print $1}'
   elif command -v shasum >/dev/null 2>&1; then
@@ -324,70 +349,77 @@ if [ "${USE_CACHE}" = "1" ] && [ -n "${remote_sha}" ] && [ -s "${cached_pkg}" ];
 fi
 
 if [ "${reuse_cache}" = "1" ]; then
-  log "复用本地缓存 ${cached_pkg}（sha256 与远端一致，跳过下载）"
+  log "reusing local cache ${cached_pkg} (sha256 matches remote, skipping download)"
   cp "${cached_pkg}" "${tmpdir}/${asset}"
 else
-  log "下载 ${url}"
+  log "downloading ${url}"
   if ! curl -fSL -o "${tmpdir}/${asset}" "$url"; then
-    die "下载失败: ${url}。可能原因:release 还没产出该平台 / 资产命名不匹配 / 仓库私有（需要 GITHUB_TOKEN）"
+    die "download failed: ${url}. Possible causes: release has not produced this platform yet / asset name does not match / repo is private (needs GITHUB_TOKEN)"
   fi
-  # SHA256 校验（若有 .sha256）
+  # SHA256 validation (when .sha256 is available)
   if [ -n "${remote_sha}" ]; then
     actual="$(sha256_file "${tmpdir}/${asset}")"
     if [ -n "${actual}" ] && [ "${remote_sha}" != "${actual}" ]; then
-      die "SHA256 不匹配（期望 ${remote_sha}，实际 ${actual}）"
+      die "SHA256 mismatch (expected ${remote_sha}, got ${actual})"
     fi
-    log "SHA256 校验 ok"
+    log "SHA256 verification ok"
   else
-    log "! 远端没有 .sha256，跳过校验（建议补上）"
+    log "! remote has no .sha256, skipping verification (recommended to add one)"
   fi
-  # 校验通过才落缓存——缓存里不该出现没验过 / 半截的包
+  # Only write to cache after verification passes -- cache must never contain unverified / partial packages
   if mkdir -p "${CACHE_DIR}" 2>/dev/null && [ -w "${CACHE_DIR}" ]; then
     cp "${tmpdir}/${asset}" "${cached_pkg}" 2>/dev/null \
-      && log "已缓存安装包 ${cached_pkg}" || true
+      && log "cached installer package ${cached_pkg}" || true
   fi
 fi
 
 # ============================================================
-# 解压 + 安装二进制（幂等：版本比较后覆盖）
+# Extract + install binary (idempotent: overwrite only after version compare)
 # ============================================================
 tar -xzf "${tmpdir}/${asset}" -C "$tmpdir"
-[ -f "${tmpdir}/${BIN_NAME}" ] || die "包内没有 ${BIN_NAME}，解包结果: $(ls "$tmpdir")"
+[ -f "${tmpdir}/${BIN_NAME}" ] || die "package does not contain ${BIN_NAME}, extract result: $(ls "$tmpdir")"
 pkg_version="$(cat "${tmpdir}/VERSION" 2>/dev/null || echo "${VERSION:-unknown}")"
 
 # ============================================================
-# 重装清理：本次只要会重新入网，就把上一份产物清干净再装一份新的。
+# Reinstall cleanup: whenever this run is about to re-onboard, wipe the previous
+# artifacts cleanly before installing a new one.
 #
-# 二进制与 env 都是「装一份新的」语义，而原来的逻辑在同版本时会跳过覆盖，留下
-# 上一次安装的那份文件；换身份重装要的是干净、可复现的一份，不是拼出来的。
+# Both binary and env follow "install a new one" semantics, but the old logic skipped
+# overwriting when the version was identical, leaving the previous install's files;
+# what a re-onboard with new identity needs is a clean, reproducible set, not a Frankenstein.
 #
-# 状态文件的清理时机有讲究（2026-09-22 踩过）：节点只要看到 <state>/node.id 存在
-# 就认为「已入网」，不再 enroll；而一个 node_id 只对签发它的那台 monitor 有效。
-# 旧身份配新 monitor，节点会一直 401「节点签名校验失败」，控制台里永远看不到这台
-# 机器，本脚本却一路报成功。所以先停服务（免得旧进程在删除后又写回 node.id），再删。
+# The timing of state-file cleanup matters (tripped on 2026-09-22): as long as the node
+# sees <state>/node.id it considers itself "onboarded" and skips enroll; and a node_id
+# is only valid for the monitor that issued it. An old identity paired with a new monitor
+# makes the node keep getting 401 (node signature verification failed), the console never
+# sees this machine, yet the script keeps printing success. So stop the service first
+# (so the old process doesn't write back node.id after deletion), then delete.
 #
-# 这里在解包 + 校验之后才执行：下载失败 / 包不完整时一个字节都还没动。
+# This runs after extract + validation: on download failure / incomplete package, not
+# a single byte has been touched.
 #
-# --upgrade 例外：升级的全部意义就是「保住身份」，所以这整段清理都跳过。
+# --upgrade is the exception: the whole point of upgrading is "keep the identity",
+# so this whole cleanup block is skipped.
 # ============================================================
 mkdir -p "${STATE_DIR}"
 wipe_reason=""
 if [ "$ACTION" = "upgrade" ]; then
-  log "升级模式：保留现有身份（${STATE_DIR}）与 ${ENV_FILE}，不重新入网"
+  log "upgrade mode: keep existing identity (${STATE_DIR}) and ${ENV_FILE}, do not re-onboard"
 elif [ "$ACTION" = "reinstall" ]; then
-  wipe_reason="--reinstall 干净重装"
+  wipe_reason="--reinstall clean reinstall"
 elif [ ! -f "${STATE_DIR}/node.id" ]; then
-  wipe_reason="本机还没有节点身份，将重新入网"
+  wipe_reason="this machine has no node identity yet, will re-onboard"
 elif [ -n "$prev_monitor_url" ] && [ "$prev_monitor_url" != "$ZHIWEI_MONITOR_URL" ]; then
-  wipe_reason="monitor 由 ${prev_monitor_url} 换成 ${ZHIWEI_MONITOR_URL}，旧身份作废"
+  wipe_reason="monitor changed from ${prev_monitor_url} to ${ZHIWEI_MONITOR_URL}; old identity is invalid"
 fi
 
 if [ -n "$wipe_reason" ]; then
   case "${STATE_DIR}" in
-    "/"|"") die "ZHIWEI_STATE_DIR 不安全（${STATE_DIR}），拒绝清理" ;;
+    "/"|"") die "ZHIWEI_STATE_DIR is unsafe (${STATE_DIR}), refusing to clean" ;;
   esac
-  log "${wipe_reason}：清掉上一份二进制 / env / 节点状态"
-  # 记下「本来就有东西」：全新机器上首次安装不该被说成「干净重装」
+  log "${wipe_reason}: wiping previous binary / env / node state"
+  # Record "there was something before": a brand-new machine's first install should
+  # not be labeled "clean reinstall"
   had_previous=0
   for f in "${INSTALL_DIR}/${BIN_NAME}" "${ENV_FILE}" \
            "${STATE_DIR}/node.id" "${STATE_DIR}/signing.key" \
@@ -396,13 +428,14 @@ if [ -n "$wipe_reason" ]; then
   done
   stop_service
   rm -f "${INSTALL_DIR}/${BIN_NAME}" "${ENV_FILE}"
-  # 节点在 state-dir 里只写这 4 个（见 node-agent/src/main.rs）。其余文件不是本程序
-  # 的，列出来保留——清理不等于删掉别人放在同一个目录里的东西。
+  # The node only writes these 4 in state-dir (see node-agent/src/main.rs). Other files
+  # are not ours -- listing them preserves them; cleanup does not mean deleting whatever
+  # else lives in the same directory.
   rm -f "${STATE_DIR}/node.id" "${STATE_DIR}/signing.key" \
         "${STATE_DIR}/ops.pub" "${STATE_DIR}/ca.crt.pem"
   leftovers="$(ls -A "${STATE_DIR}" 2>/dev/null || true)"
   if [ -n "$leftovers" ]; then
-    log "! ${STATE_DIR} 里还有非节点文件，已保留: $(printf '%s' "$leftovers" | tr '\n' ' ')"
+    log "! ${STATE_DIR} still contains non-node files, preserved: $(printf '%s' "$leftovers" | tr '\n' ' ')"
   fi
   if [ "$had_previous" = "1" ] || [ "$ACTION" = "reinstall" ]; then
     identity_state="fresh"
@@ -411,62 +444,66 @@ fi
 
 mkdir -p "$INSTALL_DIR"
 if [ -x "${INSTALL_DIR}/${BIN_NAME}" ]; then
-  # 已装：读版本（假设 binary --version 最后一行最后字段是版本号；不识别则当作 ? 强制覆盖）
+  # Already installed: read the version (assume the last field on the last line of
+  # binary --version is the version; if unrecognizable, treat as ? and force overwrite)
   #
-  # `|| true` 必须留着：v0.1.1 之前的二进制没开 clap 的 version，`--version`
-  # 会以 2 退出，而 `set -o pipefail` 让这个管道整体失败，赋值语句一失败
-  # `set -e` 就把整个脚本终止在这里——偏偏 `2>/dev/null` 把唯一的报错也吞了，
-  # 于是只有最前面几行日志、后面 env 文件 / unit / 服务全都没写，看起来却像
-  # 装成功了（2026-09-22 就是这么踩的）。
+  # `|| true` must stay: binaries before v0.1.1 don't enable clap's version, so
+  # `--version` exits with 2, and `set -o pipefail` makes this whole pipeline fail,
+  # the assignment failing makes `set -e` terminate the script right here -- yet
+  # `2>/dev/null` swallows the only error message, so only the first few log lines
+  # show up, env file / unit / service are never written, yet it appears to have
+  # installed successfully (this is exactly how 2026-09-22 tripped).
   installed_ver="$("${INSTALL_DIR}/${BIN_NAME}" --version 2>/dev/null \
     | tail -n1 | awk '{print $NF}' || true)"
-  # 供收尾汇报用（--upgrade 要说清「从哪个版本升到哪个版本」）
+  # For the final report (--upgrade needs to say "from version X to version Y")
   prev_version="$installed_ver"
   if [ -n "$installed_ver" ] && [ "$installed_ver" = "$pkg_version" ]; then
-    log "${BIN_NAME} ${pkg_version} 已装，跳过覆盖"
+    log "${BIN_NAME} ${pkg_version} already installed, skipping overwrite"
   else
     install_file 0755 "${tmpdir}/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
-    log "覆盖 ${BIN_NAME}: ${installed_ver:-?} -> ${pkg_version}"
+    log "overwriting ${BIN_NAME}: ${installed_ver:-?} -> ${pkg_version}"
   fi
 else
   install_file 0755 "${tmpdir}/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
-  log "安装 ${BIN_NAME} ${pkg_version} -> ${INSTALL_DIR}/${BIN_NAME}"
+  log "installed ${BIN_NAME} ${pkg_version} -> ${INSTALL_DIR}/${BIN_NAME}"
 fi
 
 # ============================================================
-# 写 env 文件（0600，仅 root 可读）
+# Write env file (0600, root-only readable)
 # ============================================================
-# 父目录先备好：/etc 与 /etc/systemd/system 本来就在，但路径可被环境变量改掉；
-# launchd 还会往 LOG_FILE 写 stdout/stderr，日志目录不存在它起不来。
+# Parent directories first: /etc and /etc/systemd/system already exist, but the path
+# can be overridden via env vars; launchd also writes stdout/stderr to LOG_FILE,
+# and if the log directory does not exist it won't start.
 mkdir -p "$(dirname "${ENV_FILE}")" "$(dirname "${SERVICE_FILE}")"
 if [ -n "${LOG_FILE}" ]; then
   mkdir -p "$(dirname "${LOG_FILE}")"
 fi
-# 升级不动配置：env 文件里的 monitor URL / 令牌 / 别名都保持原样
-# （也就是升级不会顺手把 token 换成新签的那把）。
+# Upgrade does not touch config: monitor URL / token / alias in the env file stay as-is
+# (so an upgrade does not silently swap the token for a freshly-issued one).
 if [ "$ACTION" = "upgrade" ]; then
-  log "保留 ${ENV_FILE} 不动（升级不改配置）"
+  log "keeping ${ENV_FILE} unchanged (upgrade does not change config)"
 else
-  log "写 ${ENV_FILE}（mode 0600）"
-  # env 文件既被 systemd 的 EnvironmentFile 读，也被 macOS 的 `set -a; . file` 读；
-  # 先去会破坏这两种解析的字符，再整体加双引号，两边都能原样取回。
+  log "writing ${ENV_FILE} (mode 0600)"
+  # The env file is read by both systemd's EnvironmentFile and macOS's `set -a; . file`;
+  # strip characters that break either parser, then double-quote the whole thing, so
+  # both can round-trip it as-is.
   env_quote() { printf '"%s"' "$(printf '%s' "$1" | sed 's/["\\]//g')"; }
   {
-    echo "# ZhiWei 节点配置（由 install-node.sh 生成，请勿手工编辑；重跑脚本会覆盖）"
-    echo "# ZHIWEI_MONITOR_URL:    monitor 服务器地址（节点要上报到的目标）"
-    echo "# ZHIWEI_BOOTSTRAP_TOKEN: 入网令牌（首次启动后可在 monitor 撤销；节点本地有 signing.key，不再需要它）"
+    echo "# ZhiWei node config (generated by install-node.sh, do not edit by hand; rerunning the script will overwrite)"
+    echo "# ZHIWEI_MONITOR_URL:    monitor server address (the target the node reports to)"
+    echo "# ZHIWEI_BOOTSTRAP_TOKEN: onboarding token (can be revoked on the monitor after first start; node has signing.key locally, does not need it after)"
     echo "ZHIWEI_MONITOR_URL=${ZHIWEI_MONITOR_URL}"
     echo "ZHIWEI_BOOTSTRAP_TOKEN=${ZHIWEI_BOOTSTRAP_TOKEN}"
     if [ -n "${ZHIWEI_BASE_URL:-}" ]; then
-      echo "# ZHIWEI_BASE_URL:       安装包下载源（自建镜像 / 制品库）；--upgrade 会沿用这一行"
+      echo "# ZHIWEI_BASE_URL:       installer package download source (self-hosted mirror / artifact store); --upgrade reuses this line"
       echo "ZHIWEI_BASE_URL=${ZHIWEI_BASE_URL}"
     fi
     if [ -n "${NODE_ALIAS}" ]; then
-      echo "# ZHIWEI_NODE_ALIAS:     入网时上报的别名（只影响本机第一次 enroll）"
+      echo "# ZHIWEI_NODE_ALIAS:     alias reported on onboarding (only affects this machine's first enroll)"
       echo "ZHIWEI_NODE_ALIAS=$(env_quote "${NODE_ALIAS}")"
     fi
     if [ -n "${NODE_TAGS}" ]; then
-      echo "# ZHIWEI_NODE_TAGS:      入网时上报的标签（只影响本机第一次 enroll）"
+      echo "# ZHIWEI_NODE_TAGS:      tags reported on onboarding (only affects this machine's first enroll)"
       echo "ZHIWEI_NODE_TAGS=$(env_quote "${NODE_TAGS}")"
     fi
   } > "${tmpdir}/node.env"
@@ -474,14 +511,16 @@ else
 fi
 
 # ============================================================
-# 写服务配置
-# systemd：注释行必须独立行 —— 不能放在 ExecStart= 命令行行尾，
-# 否则 systemd 会把 # 当成参数传给 zhiwei-node，触发 crash loop
-# （见 7a90a8b「systemd unit ExecStart 行内 # 注释挪到独立行」）。
-# launchd：plist 是 0644，**不能内嵌 bootstrap token**，所以让 /bin/sh 先
-# source 0600 的 env 文件再 exec 二进制（等价 systemd 的 EnvironmentFile）。
+# Write service config
+# systemd: comment lines must be on their own line -- they cannot go at the end of
+# the ExecStart= line, otherwise systemd treats # as an argument passed to zhiwei-node
+# and triggers a crash loop (see 7a90a8b "move systemd unit ExecStart inline # comment
+# to its own line").
+# launchd: the plist is 0644 and **must not embed the bootstrap token**, so let
+# /bin/sh source the 0600 env file first, then exec the binary (equivalent to systemd's
+# EnvironmentFile).
 # ============================================================
-log "写 ${SERVICE_FILE}"
+log "writing ${SERVICE_FILE}"
 if [ "$init" = "systemd" ]; then
   tmp_service="${tmpdir}/zhiwei-node.service"
   cat > "$tmp_service" <<EOF
@@ -492,7 +531,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# 上报频率与 monitor URL / bootstrap token 走 EnvironmentFile，不再写在 ExecStart 命令行里
+# Report frequency and monitor URL / bootstrap token go through EnvironmentFile, no longer written in the ExecStart command line
 EnvironmentFile=${ENV_FILE}
 ExecStart=${INSTALL_DIR}/${BIN_NAME} --state-dir ${STATE_DIR}
 Restart=on-failure
@@ -508,8 +547,8 @@ SyslogIdentifier=zhiwei-node
 
 NoNewPrivileges=true
 ProtectSystem=strict
-# read-only 而不是 true：证书默认扫描位置含 /root/nginx-certs，
-# ProtectHome=true 会把 /root 挂成空目录 → 那批证书永远扫不到（且不报错）。
+# read-only instead of true: the default certificate scan location includes /root/nginx-certs;
+# ProtectHome=true would mount /root as an empty directory -> those certs are never found (and no error).
 ProtectHome=read-only
 PrivateTmp=true
 
@@ -542,44 +581,47 @@ else
 </dict>
 </plist>
 EOF
-  # 老 install-node-service.sh 用同一个 label 装 LaunchAgent（gui 域），
-  # 跟这个 LaunchDaemon（system 域）互不干扰地各跑一个节点——控制台里会多一台。
+  # The old install-node-service.sh used the same label to install a LaunchAgent (gui domain),
+  # coexisting with this LaunchDaemon (system domain) running one node each -- the console
+  # will show two. The old LaunchAgent takes over the same binary, conflicts.
   for d in /Users/*/Library/LaunchAgents /var/root/Library/LaunchAgents; do
     if [ -f "${d}/${SERVICE_LABEL}.plist" ]; then
-      log "! 发现旧的 LaunchAgent ${d}/${SERVICE_LABEL}.plist（install-node-service.sh 装的）——"
-      log "  它和本 daemon 会各跑一个节点，控制台里会看到两台；建议先卸掉它"
+      log "! found old LaunchAgent ${d}/${SERVICE_LABEL}.plist (installed by install-node-service.sh) --"
+      log "  it and this daemon each run a node; the console will show two; recommend uninstalling it first"
     fi
   done
 fi
 
-# 幂等：配置内容比较，变了才覆盖 + reload
+# Idempotent: compare config contents, only overwrite + reload when changed
 service_changed=0
 if [ -f "${SERVICE_FILE}" ] && diff -q "${SERVICE_FILE}" "$tmp_service" >/dev/null 2>&1; then
-  log "服务配置内容未变，跳过覆盖"
+  log "service config content unchanged, skipping overwrite"
 else
   install_file 0644 "$tmp_service" "${SERVICE_FILE}"
   service_changed=1
-  log "更新 ${SERVICE_FILE}"
+  log "updated ${SERVICE_FILE}"
 fi
 
 # ============================================================
-# 保留旧身份的机器（node.id 还在，上面「重装清理」判定为不需清）：这里只汇报，
-# 顺便提醒它可能对不上当前 monitor——那是节点静悄悄地留在控制台外面的原因。
-# --upgrade 不在此列：它本来就不碰身份，说这些只会干扰升级输出。
+# Machines keeping old identity (node.id still present, and "reinstall cleanup" above
+# decided no wipe): just report here, and note it might not match the current monitor
+# -- that's why the node quietly stays out of the console.
+# --upgrade is excluded: it does not touch identity by design; saying so would only
+# clutter the upgrade output.
 # ============================================================
 if [ "$ACTION" != "upgrade" ] && [ -f "${STATE_DIR}/node.id" ]; then
-  log "本机已有节点身份（保留 ${STATE_DIR}/node.id）"
-  log "  若控制台里看不到它，多半是这个身份不属于 ${ZHIWEI_MONITOR_URL}："
-  log "  加 --reinstall 重跑本脚本（清掉身份 + 二进制 + env 后重新入网）"
+  log "this machine already has node identity (kept ${STATE_DIR}/node.id)"
+  log "  if you don't see it in the console, this identity likely does not belong to ${ZHIWEI_MONITOR_URL}:"
+  log "  add --reinstall and rerun this script (wipes identity + binary + env, then re-onboards)"
   if [ -n "${NODE_ALIAS}${NODE_TAGS}" ]; then
-    log "! --alias / --tags 只在第一次入网时上报；这台已经有身份，本次不会推送这些改动"
-    log "  想改它们请在控制台里改（节点页面 → 编辑），或加 --reinstall 重新入网"
+    log "! --alias / --tags are only reported on the first onboarding; this machine already has an identity, so this run will not push these changes"
+    log "  to change them, edit in the console (node page -> edit), or add --reinstall to re-onboard"
   fi
   identity_state="kept"
 fi
 
 # ============================================================
-# 启动 / 重启
+# Start / restart
 # ============================================================
 if [ "$init" = "systemd" ]; then
   systemctl daemon-reload
@@ -587,42 +629,46 @@ if [ "$init" = "systemd" ]; then
     systemctl enable --now "${SERVICE_NAME}"
     log "daemon-reload + enable --now ${SERVICE_NAME}"
   else
-    # unit 没变，但 env 可能变了（重跑脚本带新 token/URL）。统一 restart 拉新配置。
-    # 首次安装没 unit 文件但 service 也未运行的情况，enable --now 兜底。
+    # unit unchanged, but env may have changed (rerun with new token/URL). Restart
+    # unconditionally to pick up the new config.
+    # First install with no unit file and service not running: enable --now covers it.
     if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
       systemctl restart "${SERVICE_NAME}"
-      log "服务在运行，restart 拉新 env"
+      log "service running, restart to pick up new env"
     else
       systemctl enable --now "${SERVICE_NAME}"
-      log "服务未运行，enable --now"
+      log "service not running, enable --now"
     fi
   fi
 else
-  # plist 内容变了（含 token / URL / 路径）必须 bootout + bootstrap 才会按新配置起；
-  # 内容没变只是要拉新 env 时 kickstart -k 重启就够。
+  # plist content changed (including token / URL / path): bootout + bootstrap is required
+  # to start with the new config; when content is unchanged and we only need to pick up
+  # the new env, kickstart -k is enough to restart.
   if [ "$service_changed" = "1" ]; then
     launchctl bootout system "${SERVICE_FILE}" 2>/dev/null \
       || launchctl bootout "system/${SERVICE_LABEL}" 2>/dev/null \
       || true
     launchctl bootstrap system "${SERVICE_FILE}" 2>/dev/null \
       || launchctl load -w "${SERVICE_FILE}"
-    log "bootout + bootstrap ${SERVICE_FILE}（开机自启）"
+    log "bootout + bootstrap ${SERVICE_FILE} (auto-start on boot)"
   elif launchctl print "system/${SERVICE_LABEL}" >/dev/null 2>&1; then
     launchctl kickstart -k "system/${SERVICE_LABEL}"
-    log "服务在运行，kickstart -k 拉新 env"
+    log "service running, kickstart -k to pick up new env"
   else
     launchctl bootstrap system "${SERVICE_FILE}" 2>/dev/null \
       || launchctl load -w "${SERVICE_FILE}"
-    log "服务未运行，bootstrap"
+    log "service not running, bootstrap"
   fi
 fi
 
 # ============================================================
-# 确认真的入网了：脚本跑通 ≠ 节点入网。
-# 服务没起来、令牌被撤 / 过期、旧身份与当前 monitor 对不上，都会让节点安静地
-# 留在控制台外面，而脚本这一路全是「成功」提示（2026-09-22 的教训）。
-# 入网成功的凭据是节点自己写下的 <state>/node.id；但沿用旧身份时这个文件本来
-# 就在，它证明不了「当前 monitor 认这台机器」——那种情况去看日志里的 401。
+# Confirm real onboarding: "script ran successfully" != "node is onboarded".
+# Service not started, token revoked / expired, or old identity not matching the current
+# monitor -- any of these can leave the node quietly out of the console while this script
+# prints "success" all the way (2026-09-22 lesson).
+# Proof of successful onboarding is the node itself writing <state>/node.id; but when the
+# old identity is kept, that file was already there, so it does not prove "the current
+# monitor recognizes this machine" -- in that case, check the logs for 401.
 # ============================================================
 i=0
 while [ "$i" -lt 10 ] && [ ! -s "${STATE_DIR}/node.id" ]; do
@@ -631,46 +677,46 @@ while [ "$i" -lt 10 ] && [ ! -s "${STATE_DIR}/node.id" ]; do
 done
 
 if [ "$ACTION" = "upgrade" ]; then
-  log "✓ 升级完成 ${prev_version:-?} -> ${pkg_version}（身份、env 与节点记录都保持不动）"
+  log "✓ upgrade complete ${prev_version:-?} -> ${pkg_version} (identity, env, and node records all kept)"
   if [ ! -s "${STATE_DIR}/node.id" ]; then
-    log "! 但这台机器没有节点身份（${STATE_DIR}/node.id 不存在）——升级不负责入网，"
-    log "  重发一次入网命令（或 --reinstall）它才会重新入网"
+    log "! but this machine has no node identity (${STATE_DIR}/node.id does not exist) -- upgrade does not handle onboarding,"
+    log "  send the onboarding command again (or --reinstall) to make it re-onboard"
   fi
 elif [ "$identity_state" = "kept" ]; then
-  log "✓ 安装完成，沿用本机已有身份 node_id=$(cat "${STATE_DIR}/node.id" 2>/dev/null)，未重新入网"
-  if recent_log | grep -q '节点签名校验失败'; then
-    log "! 但这个身份不被 ${ZHIWEI_MONITOR_URL} 认可（401 节点签名校验失败）——"
-    log "  控制台里看不到这台机器就是这个原因：加 --reinstall 重跑本脚本"
+  log "✓ install complete, kept this machine's existing identity node_id=$(cat "${STATE_DIR}/node.id" 2>/dev/null), did not re-onboard"
+  if recent_log | grep -q 'node signature verification failed'; then
+    log "! but this identity is not recognized by ${ZHIWEI_MONITOR_URL} (401 node signature verification failed) --"
+    log "  this is why the console cannot see this machine: add --reinstall and rerun this script"
   fi
 elif [ -s "${STATE_DIR}/node.id" ]; then
   if [ "$identity_state" = "fresh" ]; then
-    log "✓ 干净重装完成，节点已重新入网 node_id=$(cat "${STATE_DIR}/node.id")"
-    log "  这是新身份：控制台里旧的那条记录还在，确认新节点上报正常后手动删掉它"
+    log "✓ clean reinstall complete, node has re-onboarded node_id=$(cat "${STATE_DIR}/node.id")"
+    log "  this is a new identity: the old record in the console is still there; after confirming the new node reports normally, remove it manually"
   else
-    log "✓ 安装完成，节点已入网 node_id=$(cat "${STATE_DIR}/node.id")"
+    log "✓ install complete, node onboarded node_id=$(cat "${STATE_DIR}/node.id")"
   fi
 else
-  log "! 安装完成，但节点还没入网（${STATE_DIR}/node.id 未生成）——别当成装好了"
-  log "  常见原因: 服务没起来 / 入网令牌失效 / 旧身份与当前 monitor 对不上"
+  log "! install complete, but node has not onboarded yet (${STATE_DIR}/node.id not generated) -- do not consider it done"
+  log "  common causes: service did not start / onboarding token invalid / old identity does not match current monitor"
   if [ "$init" = "systemd" ]; then
-    log "  查日志:   journalctl -u ${SERVICE_NAME} -n 50 --no-pager"
+    log "  check logs: journalctl -u ${SERVICE_NAME} -n 50 --no-pager"
   else
-    log "  查日志:   tail -n 50 ${LOG_FILE}"
+    log "  check logs: tail -n 50 ${LOG_FILE}"
   fi
 fi
-log "  二进制  ${INSTALL_DIR}/${BIN_NAME} ${pkg_version}"
+log "  binary  ${INSTALL_DIR}/${BIN_NAME} ${pkg_version}"
 log "  env     ${ENV_FILE}"
 log "  unit    ${SERVICE_FILE}"
 log "  state   ${STATE_DIR}"
-log "  缓存    ${CACHE_DIR}"
+log "  cache   ${CACHE_DIR}"
 log ""
 if [ "$init" = "systemd" ]; then
-  log "  查状态:   systemctl status ${SERVICE_NAME}"
-  log "  看日志:   journalctl -u ${SERVICE_NAME} -f"
+  log "  check status: systemctl status ${SERVICE_NAME}"
+  log "  watch logs:   journalctl -u ${SERVICE_NAME} -f"
 else
-  log "  查状态:   sudo launchctl print system/${SERVICE_LABEL}"
-  log "  看日志:   tail -f ${LOG_FILE}"
+  log "  check status: sudo launchctl print system/${SERVICE_LABEL}"
+  log "  watch logs:   tail -f ${LOG_FILE}"
 fi
-log "  卸载:      curl -sSL <monitor>/install-node.sh | sudo bash -s -- --uninstall"
-log "  升级:      curl -sSL <monitor>/install-node.sh | sudo bash -s -- --upgrade"
-log "  干净重装:  同上，末尾换成 --reinstall（清掉身份 / 二进制 / env 后重新入网）"
+log "  uninstall:     curl -sSL <monitor>/install-node.sh | sudo bash -s -- --uninstall"
+log "  upgrade:       curl -sSL <monitor>/install-node.sh | sudo bash -s -- --upgrade"
+log "  clean reinstall: same as above, replace the tail with --reinstall (wipes identity / binary / env, then re-onboards)"

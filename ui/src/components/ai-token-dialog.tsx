@@ -10,12 +10,12 @@ import { useToast } from "@/components/ui/toast";
 import { cn, copyText, friendlyError } from "@/lib/utils";
 
 /**
- * 创建 AI token。
+ * Create AI token.
  *
- * 两段式：第一段让用户填 name（必填，最长 64）；第二段**只能看一次**——
- * 明文 token 在后端仅这一次返回，关闭后再开就只能新建。
+ * Two-stage: first stage lets the user fill in the name (required, max 64); second stage can **only be viewed once** —
+ * the plaintext token is returned by the backend only this one time; reopening only allows creating a new one.
  *
- * 警告用 AlertTriangle + 长条 `warn` 浅底块；复制按钮在第二段显眼位置。
+ * Warning uses AlertTriangle + a wide `warn` light-background block; the copy button is prominent in the second stage.
  */
 interface Created {
   id: string;

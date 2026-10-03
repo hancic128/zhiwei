@@ -91,7 +91,7 @@ function CaSection() {
           />
         ) : caQ.data ? (
           <div className="space-y-4">
-            {/* 边缘终结 TLS 时这个 CA 不参与任何事——别让人以为它是「集群身份根」 */}
+            {/* When TLS is terminated at the edge, this CA plays no role — don't make it look like the "cluster identity root" */}
             {!caQ.data.tls_terminated_locally && (
               <div className="flex items-start gap-2 rounded-lg bg-surface-2 dark:bg-ink-700/60 px-3 py-2">
                 <Info
@@ -153,7 +153,7 @@ function CaSection() {
   );
 }
 
-/** 飞书接收 ID 类型（与后端 FEISHU_RECEIVE_ID_TYPES 同步） */
+/** Feishu receive ID types (synced with backend FEISHU_RECEIVE_ID_TYPES) */
 const RECEIVE_ID_TYPES = [
   "chat_id",
   "open_id",
@@ -162,7 +162,7 @@ const RECEIVE_ID_TYPES = [
   "email",
 ] as const;
 
-/** 表单一行：标签 + 输入 + 可选说明（渠道表单按类型拼装，字段多但都不带别的行为） */
+/** Form row: label + input + optional hint (channel form assembles fields by type, many fields but no extra behavior) */
 function Field({
   label,
   hint,
@@ -189,9 +189,9 @@ function ChannelsSection() {
     name: "",
     kind: "feishu",
     url: "",
-    /** 通用 webhook 的 Token */
+    /** Generic webhook token */
     secret: "",
-    /** 飞书的 App Secret（与上面的 Token 分开存，免得切换类型时把凭据发错地方） */
+    /** Feishu App Secret (stored separately from the Token above so switching type doesn't send credentials to the wrong field) */
     app_secret: "",
     app_id: "",
     receive_id: "",
@@ -200,19 +200,19 @@ function ChannelsSection() {
   };
   const [dialogOpen, setDialogOpen] = React.useState(false);
   const [form, setForm] = React.useState(EMPTY);
-  /** 非空 = 正在编辑该渠道（保存走 PATCH 而不是 POST） */
+  /** Non-null = editing this channel (save uses PATCH instead of POST) */
   const [editing, setEditing] = React.useState<NotifyChannel | null>(null);
   const [confirmDelete, setConfirmDelete] = React.useState<NotifyChannel | null>(
     null,
   );
   const [testing, setTesting] = React.useState(false);
-  /** App Secret 明文展示 */
+  /** App Secret shown in plaintext */
   const [secretRevealed, setSecretRevealed] = React.useState(false);
 
   const invalidate = () => void qc.invalidateQueries({ queryKey: ["channels"] });
 
-  /** 编辑时把已有渠道回填进表单：凭据一并带出（列表接口本就返回明文），
-   *  保存时原样回写，不需要用户重新输入。 */
+  /** When editing, prefill form with existing channel values: credentials included (the list endpoint returns them in plaintext),
+   *  and saved back as-is, no need for the user to re-enter. */
   const formOf = (c: NotifyChannel) => ({
     name: c.name,
     kind: c.kind,
@@ -244,7 +244,7 @@ function ChannelsSection() {
   const isFeishu = form.kind === "feishu";
   const isSlack = form.kind === "slack";
   const isBluebird = form.kind === "bluebird";
-  /** 表单 → 接口字段。后端的 `secret` 一列按类型复用：飞书 = App Secret，青鸟/通用 webhook = Token */
+  /** Form → API fields. Backend's `secret` column is reused by type: feishu = App Secret, bluebird / generic webhook = Token */
   const payload = {
     name: form.name.trim(),
     kind: form.kind,
@@ -273,7 +273,7 @@ function ChannelsSection() {
     onError: (e) => toast.push("error", t(friendlyError(e))),
   });
 
-  /** 拿当前填的参数真发一条——保存之前就能知道地址对不对 */
+  /** Send with current params to actually test — know if the address is right before saving */
   const test = async () => {
     setTesting(true);
     try {
@@ -304,7 +304,8 @@ function ChannelsSection() {
   });
 
   const channels = chQ.data ?? [];
-  // 每种渠道要填的东西不同：飞书用应用凭据 + 接收 ID，青鸟要地址 + Token，Slack / 通用 webhook 只要有地址
+  // Each channel type needs different fields: feishu uses app credentials + receive ID,
+  // bluebird needs URL + Token, Slack / generic webhook just needs URL
   const canSubmit =
     !!form.name.trim() &&
     (isFeishu
@@ -313,16 +314,16 @@ function ChannelsSection() {
         ? !!form.url.trim() && !!form.secret.trim()
         : !!form.url.trim());
 
-  /** 列表「目标」列：飞书没有地址，显示它发往哪里 */
+  /** List "target" column: feishu has no URL, show where it sends to */
   const targetOf = (c: NotifyChannel) =>
     c.kind === "feishu"
       ? `${t(`settings.chRid_${c.receive_id_type}`)} · ${c.receive_id}`
       : c.url;
 
-  /** 凭据状态：Slack 的地址本身即凭据，没什么可标的 */
+  /** Credential status: Slack's URL is itself the credential, nothing to label */
   const secretHint = (c: NotifyChannel) =>
     c.kind === "feishu"
-      ? // 老的自定义机器人渠道只有 url + 加签 secret，别把那个 secret 说成 App Secret
+      ? // Legacy custom bot channels only have url + signing secret; don't call that secret "App Secret"
         t(
           c.app_id && c.secret
             ? "settings.chAppSecretSet"
@@ -526,7 +527,7 @@ function ChannelsSection() {
             onChange={(e) => setForm({ ...form, name: e.target.value })}
             placeholder="ops-feishu"
           />
-          {/* 飞书：应用凭据 + 接收对象（对照 bluebird 的分发渠道） */}
+          {/* Feishu: app credentials + receiver (mirrors bluebird's distribution channel) */}
           {isFeishu ? (
             <>
               <Field
@@ -691,14 +692,16 @@ function ChannelsSection() {
 }
 
 /**
- * 界面偏好。时区原先在右下角悬浮按钮组里，按本人要求从那组撤掉；
- * 功能不能跟着消失——时间显示到处都要用它，所以落到设置页。
+ * UI preferences. Timezone was previously in the floating button group at bottom-right,
+ * removed per requirement; the functionality can't go with it — time display everywhere needs it —
+ * so it lives here on the settings page.
  */
 /**
- * 新凭据强度评估：长度三档（8 / 12 / 16）+ 字符种类。
- * 只做展示——真正拦住的是后端的「至少 16 个字符」；这里给的是
- * 「长度够不够、够不够杂」的直观反馈。纯一种字符（如 16 个小写字母）
- * 会被降一档，避免长度堆出来一个「强」。
+ * New credential strength assessment: three length tiers (8 / 12 / 16) + character classes.
+ * Only for display — the backend's "at least 16 characters" is what actually enforces.
+ * Here we give intuitive feedback on "is it long enough, is it varied enough".
+ * A single character class (e.g. 16 lowercase letters) gets demoted one tier, to avoid
+ * length alone creating a "strong" rating.
  */
 function passwordStrength(
   pw: string,
@@ -735,10 +738,11 @@ function passwordStrength(
 }
 
 /**
- * 修改控制台凭据。
+ * Change console credentials.
  *
- * 控制台只有这一把钥匙（节点走签名、不认它），所以要求：带当前凭据 +
- * 新凭据输两遍。改完立即生效，并把本地存的那份一起换掉——否则下一次请求就 401。
+ * The console has only this one key (nodes use signatures, don't trust it), so requirement:
+ * provide current credential + new credential twice. Takes effect immediately, and also
+ * swaps the locally-stored one — otherwise the next request returns 401.
  */
 function CredentialSection() {
   const { t } = useTranslation();
@@ -849,7 +853,8 @@ function CredentialSection() {
 }
 
 /**
- * AI 接入 + AI 令牌（合并为同一段：「接入说明」给 agent 看，「令牌列表」给管理员管）。
+ * AI integration + AI tokens (combined into one section: "integration guide" for the agent to read,
+ * "token list" for the admin to manage).
  */
 function AiSection() {
   const { t } = useTranslation();
@@ -1125,10 +1130,10 @@ function AiSection() {
 }
 
 /**
- * 入网令牌（enroll-tokens）—— 给目标机器的一次性 `curl | bash` 命令。
+ * Enroll tokens — one-shot `curl | bash` commands for target machines.
  *
- * 列出当前还没过期的入网令牌元信息（**不**含明文 token 字符串）；
- * 长期有效的来自 `ZHIWEI_BOOTSTRAP_TOKEN` 环境变量，单独标 `permanent`。
+ * Lists metadata for currently non-expired enroll tokens (**not** including plaintext token strings);
+ * long-lived ones come from `ZHIWEI_BOOTSTRAP_TOKEN` env var and are labeled `permanent` separately.
  */
 function EnrollTokensSection() {
   const { t } = useTranslation();
@@ -1142,7 +1147,7 @@ function EnrollTokensSection() {
   const q = useQuery({
     queryKey: ["enroll-tokens"],
     queryFn: enrollTokens.list,
-    // 入网操作很罕见，挂着就行，不主动重试
+    // Enroll operation is rare, just keep polling, no aggressive retry
     staleTime: 30_000,
   });
 
@@ -1271,7 +1276,7 @@ function EnrollTokensSection() {
   );
 }
 
-/** 入网令牌的过期时间展示：「长期」或「N 小时 / N 天后过期」 */
+/** Enroll token expiry display: "long-term" or "expires in N hours / N days" */
 function EnrollTokenExpiry({ meta }: { meta: EnrollTokenMeta }) {
   const { t } = useTranslation();
   if (meta.permanent) {
@@ -1301,7 +1306,7 @@ function EnrollTokenExpiry({ meta }: { meta: EnrollTokenMeta }) {
   );
 }
 
-/** 纳秒时间戳统一转 ms 后用 formatTime 显示。 */
+/** Nanosecond timestamps are converted to ms before formatTime display. */
 function AiTokenTime({ tsUnixNano }: { tsUnixNano: number }) {
   const { timezone } = usePrefs();
   const ms = Math.floor(tsUnixNano / 1e6);

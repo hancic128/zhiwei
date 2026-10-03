@@ -1,5 +1,3 @@
-[English](./README.md) | [中文文档](./README.zh-CN.md)
-
 # ZhiWei
 
 > Know the subtle, await the right moment.
@@ -119,7 +117,7 @@ See [docs/DEPLOY.md](./docs/DEPLOY.md) for full deployment guide covering:
 
 - Self-hosted (binary, Docker, systemd)
 - Managed platforms (Render, Railway, Northflank)
-- China / isolated network deployment
+- Isolated / restricted networks (GitHub Releases not reachable)
 - Enrollment via console
 
 ## Configuration

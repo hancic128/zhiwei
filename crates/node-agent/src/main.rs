@@ -24,11 +24,13 @@ use zhiwei_proto::telemetry::{
     ProcessInfo, ProcessSnapshot, TelemetryBatch,
 };
 
-/// node-agent 进程启动的 Unix 秒——在 `main()` 第一行写一次，之后 `build_host_info` 读。
-/// 不把时间从 main 一路透到 inventory 调用点：`build_inventory` 是定时任务里调的，
-/// 单独再加一个参数会让签名/容器/进程的调用链都跟着改。
-/// 控制台拿这个字段展示「本次部署时间」；老 agent 不写这个字段，反序列化时是 0，
-/// UI 看到 0 当成 unknown 不显示。
+/// Unix seconds when the node-agent process started — written once at the top of
+/// `main()`, then read by `build_host_info`. We don't pass the time through from
+/// main down to the inventory call site — `build_inventory` is called from the
+/// scheduled task — threading it through would touch the signature/container/process
+/// call chains.
+/// The console uses this field to display "deployment time"; old agents didn't
+/// write this field, deserialization yields 0, and the UI shows 0 as unknown.
 static AGENT_STARTED_AT_UNIX_SECONDS: OnceLock<u64> = OnceLock::new();
 
 mod certs;
@@ -54,45 +56,49 @@ struct Args {
 
     /// Telemetry interval (seconds).
     ///
-    /// 默认 5；env `ZHIWEI_INTERVAL` 可覆盖（与 install 脚本写到
-    /// /etc/zhiwei/node.env 的 KEY 一致——想改 telemetry 频率只动 env 文件，
-    /// `systemctl restart zhiwei-node` 即可，不用碰 unit）。
+    /// Default 5; env `ZHIWEI_INTERVAL` overrides (the KEY matches what install-node.sh
+    /// writes to /etc/zhiwei/node.env — to change telemetry frequency only edit the
+    /// env file, then `systemctl restart zhiwei-node`; no need to touch the unit).
     #[arg(long, default_value_t = 5, env = "ZHIWEI_INTERVAL")]
     interval: u64,
 
-    /// Inventory（主机信息 / 容器 / 进程 / 证书快照）上报间隔（秒）
+    /// Inventory (host info / containers / processes / cert snapshots) reporting interval (seconds)
     #[arg(long, default_value_t = 300, env = "ZHIWEI_INVENTORY_INTERVAL")]
     inventory_interval: u64,
 
-    /// 证书扫描 glob，逗号分隔；留空用内置默认位置
+    /// Cert scan globs, comma-separated; empty uses built-in default locations
     #[arg(long, env = "ZHIWEI_CERT_GLOBS", default_value = "")]
     cert_globs: String,
 
-    /// 上报给 monitor 的节点名。留空则用系统主机名，
-    /// 但遇到 bogon / localhost 这类占位值会自动换用更好的来源。
+    /// Node name reported to monitor. Empty uses system hostname,
+    /// but placeholder values like bogon / localhost automatically switch to a better source.
     #[arg(long, env = "ZHIWEI_NODE_NAME", default_value = "")]
     node_name: String,
 
-    /// 入网时一并设置的别名（≤10 字符）。
+    /// Alias set during enrollment (≤10 characters).
     ///
-    /// 只在**首次 enroll** 生效：节点一旦有 node.id 就不再 enroll，重复设置无效。
-    /// 已经入网的机器请在控制台改（或删掉 state 目录重新入网）。
+    /// Only effective on **first enroll**: once a node has a node.id it doesn't enroll
+    /// again, so repeating the setting has no effect. For already-enrolled machines,
+    /// change it in the console (or delete the state directory and re-enroll).
     #[arg(long, env = "ZHIWEI_NODE_ALIAS", default_value = "")]
     alias: String,
 
-    /// 入网时一并设置的标签，空格 / 逗号 / 顿号分隔（最多 10 个，每个 ≤24 字符）。
-    /// 同样只在首次 enroll 生效。
+    /// Tags set during enrollment; whitespace / comma separated (up to 10, each ≤24 characters).
+    /// Also only effective on first enroll.
     #[arg(long, env = "ZHIWEI_NODE_TAGS", default_value = "")]
     tags: String,
 
-    /// 覆盖 pin 用的 monitor CA，传文件路径。
+    /// Override the monitor CA used for pinning; pass a file path.
     ///
-    /// 默认（留空）用 enroll 下发的那个 CA——自建 TLS 部署该这样用。
-    /// 部署在 Render / Railway 这类边缘终结 TLS 的平台后面时，enroll 不会下发 CA
-    /// （本地 CA 与边缘的正经证书无关），节点自动走系统根。
+    /// Default (empty) uses the CA delivered by enroll — this is the right thing for
+    /// self-hosted TLS deployments. When deployed behind platforms like Render / Railway
+    /// that terminate TLS at the edge, enroll won't deliver a CA (the local CA is
+    /// unrelated to the edge's real certificate), and the node automatically falls
+    /// back to system roots.
     ///
-    /// 传 `-` 表示**强制不 pin、走系统根**：给「曾经对着自建 monitor 入网过、
-    /// 机器上留着旧 CA，现在改指向托管平台」的节点用，省得删文件重 enroll。
+    /// Pass `-` to **force no pin, use system roots**: intended for machines that once
+    /// enrolled against a self-hosted monitor and still have the old CA on disk but
+    /// now point at a managed platform, so you don't need to delete files and re-enroll.
     #[arg(long, env = "ZHIWEI_MONITOR_CA", default_value = "")]
     monitor_ca: String,
 }
@@ -106,8 +112,9 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    // 进程启动的第一时间记一下，之后 inventory 反复读这个值。后续 main 里
-    // 任一步失败重启都重新写，所以即便「看似同一进程」重启了也对得上。
+    // Record the startup timestamp immediately; inventory reads it repeatedly. Any
+    // failure later in main that causes a restart rewrites it, so even a "looks
+    // like the same process" restart stays consistent.
     let _ = AGENT_STARTED_AT_UNIX_SECONDS.set(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -123,7 +130,7 @@ async fn main() -> anyhow::Result<()> {
     }
     tracing::info!(node_name = %state.node_name, "Node name");
 
-    // --monitor-ca：显式覆盖 pin 用的 CA；`-` 表示强制走系统根
+    // --monitor-ca: explicitly override the CA used for pinning; `-` means force system roots
     match args.monitor_ca.trim() {
         "" => {}
         "-" => {
@@ -134,7 +141,7 @@ async fn main() -> anyhow::Result<()> {
         path => {
             let pem = tokio::fs::read_to_string(path)
                 .await
-                .with_context(|| format!("读取 --monitor-ca 指定的 CA：{path}"))?;
+                .with_context(|| format!("reading --monitor-ca specified CA: {path}"))?;
             state.ca_cert_pem = Some(pem);
             state.no_ca_pin = false;
             tracing::info!(path, "Using --monitor-ca specified CA to pin monitor");
@@ -167,7 +174,7 @@ async fn main() -> anyhow::Result<()> {
     let state = std::sync::Arc::new(state);
     let monitor = args.monitor.clone();
 
-    // 控制通道与控制台轮询并行：拉命令 → 验签 → 执行 → 签名回执
+    // Control channel and console polling run in parallel: pull command → verify → run → sign receipt
     {
         let s = state.clone();
         let m = monitor.clone();
@@ -175,7 +182,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move { control::run_poll_loop(m, s, id).await });
     }
 
-    // 服务探活循环：拉探针配置 → 到点执行 → 上报结果
+    // Service liveness loop: pull probe config → execute when due → report results
     {
         let s = state.clone();
         let m = monitor.clone();
@@ -184,15 +191,18 @@ async fn main() -> anyhow::Result<()> {
     }
     let interval = args.interval.max(1);
     let inventory_interval = args.inventory_interval.max(interval);
-    // 证书扫描位置：默认 globs 与用户传入的 ZHIWEI_CERT_GLOBS / --cert-globs **并集**。
-    // 旧行为是「用户传了就完全替换默认」——但默认 globs 已经覆盖 Let's Encrypt、
-    // nginx 自管目录等最常见位置，用户传自定义路径 99% 是「额外再加几处」，不是
-    // 「我不要默认的」。替换语义踩过坑：硅谷节点证书放在 /root/nginx-certs/ 下，
-    // 之前某次给 zhiwei-node 配了 --cert-globs 之后默认位置反而扫不到。
-    // 同路径去重交给 `certs::scan_entries` 里的 `by_path`（先到者胜），这里不去重。
+    // Cert scan locations: the **union** of the default globs and the user-provided
+    // ZHIWEI_CERT_GLOBS / --cert-globs. The old behavior was "user input fully
+    // replaces defaults" — but the default globs already cover Let's Encrypt,
+    // nginx self-managed dirs and other common locations, and 99% of the time users
+    // pass custom paths to "add a few more places", not "I don't want the defaults".
+    // The replace semantics burned us once: a Silicon Valley node had certs in
+    // /root/nginx-certs/, and after configuring --cert-globs the default locations
+    // stopped being scanned. Same-path dedup is handled by `by_path` inside
+    // `certs::scan_entries` (first writer wins); we don't dedup here.
     let cert_globs: Vec<String> = certs::merge_globs(&args.cert_globs);
 
-    // 启动后立即上报一次快照（让控制台马上有数据），之后按间隔周期上报
+    // Send a snapshot right after startup (so the console has data immediately), then on schedule
     let mut next_inventory = std::time::Instant::now();
 
     loop {
@@ -201,7 +211,8 @@ async fn main() -> anyhow::Result<()> {
             Err(e) => tracing::warn!(error = %e, "batch failed"),
         }
 
-        // 周期到点，或控制台点了「立刻重采快照」（容器启停之后要马上看到新状态）
+        // Period elapsed, or the console clicked "re-snapshot now"
+        // (after containers start/stop you want new state visible immediately)
         let forced = state
             .inventory_due
             .swap(false, std::sync::atomic::Ordering::Relaxed);
@@ -225,15 +236,15 @@ struct NodeState {
     #[allow(dead_code)]
     signing_key: EdKeyPair, // 32-byte ed25519, used to sign telemetry batches
     node_id: Option<String>,
-    /// monitor 的 CA 证书（自建 TLS 部署下用于 pinning；无则走系统根）
+    /// monitor CA certificate (used for pinning on self-hosted TLS deployments; falls back to system roots when absent)
     ca_cert_pem: Option<String>,
-    /// 强制不 pin monitor CA（`--monitor-ca -`），一律走系统根
+    /// Force no monitor-CA pinning (`--monitor-ca -`); always use system roots
     no_ca_pin: bool,
-    /// ops 控制平面公钥（base64）。enroll 时拿到并长期保存，用于验命令签名。
+    /// ops control-plane public key (base64). Received at enroll and persisted long-term; used to verify command signatures.
     ops_public_key: Option<String>,
-    /// 上报给 monitor 的节点名（解析后的）
+    /// Node name reported to monitor (after resolution)
     node_name: String,
-    /// 控制台要求「立刻重采一次快照」时置位，主循环下一拍就发一次 inventory
+    /// Set when the console requests "re-snapshot now"; the next main-loop tick sends an inventory
     inventory_due: std::sync::atomic::AtomicBool,
 }
 
@@ -273,7 +284,7 @@ impl NodeState {
             None
         };
 
-        // mTLS 已废弃：身份改由 signing.key 的签名承担，不再需要客户端证书
+        // mTLS is deprecated: identity is now carried by signing.key signatures; client certs are no longer required
         let (node_id, ca_cert_pem) = if id_path.exists() {
             (
                 Some(
@@ -313,13 +324,15 @@ impl NodeState {
         if !resp.ca_cert_pem.is_empty() {
             tokio::fs::write(&ca_path, resp.ca_cert_pem.as_bytes()).await?;
         } else {
-            // 没下发 = 对端不终结 TLS（托管平台）。把上一次 enroll 留下的 CA 删掉，
-            // 否则它会继续被当成信任根，表现成「enroll 成功、之后每个请求都 TLS 失败」。
+            // Not delivered = peer does not terminate TLS (managed platform). Remove any
+            // CA left over from a previous enroll, otherwise it would keep being
+            // trusted and every request would fail TLS even though enroll succeeded.
             let _ = tokio::fs::remove_file(&ca_path).await;
         }
 
-        // ops 公钥随 enrollment 一起存下（TOFU）：此后即便 monitor 被攻陷，
-        // 也无法伪造出一条能被本节点验签通过的命令。
+        // Persist the ops public key alongside enrollment (TOFU): after this,
+        // even a compromised monitor cannot forge a command that this node would
+        // verify.
         if !resp.ops_public_key.is_empty() {
             let ops_pub_path = self.state_dir.join("ops.pub");
             tokio::fs::write(&ops_pub_path, resp.ops_public_key.as_bytes()).await?;
@@ -345,7 +358,8 @@ async fn enroll(
 ) -> anyhow::Result<EnrollResponse> {
     let hostname = state.node_name.clone();
 
-    // 身份就是这个 Ed25519 公钥：enroll 时登记，此后每次请求用它对应的私钥签名
+    // Identity is exactly this Ed25519 public key: registered at enroll, and the
+    // matching private key signs every subsequent request.
     let public_key = state.signing_key.public_key().as_bytes().to_vec();
 
     let alias = alias.trim().to_string();
@@ -370,17 +384,19 @@ async fn enroll(
     let resp_bytes = enroll_post(monitor, token, &buf).await?;
     let resp: EnrollResponse = prost::Message::decode(&resp_bytes[..])?;
     if resp.node_id.is_empty() {
-        anyhow::bail!("enroll 响应缺少 node_id");
+        anyhow::bail!("enroll response missing node_id");
     }
     state.persist_enrollment(&resp).await?;
     Ok(resp)
 }
 
-/// 首次 enroll：此时还不知道该信任谁（等价于原来的跳过校验 + TOFU）。
-/// enroll 成功后节点会存下 monitor 的 CA，后续请求改用它做 pinning。
+/// First-time enroll: we don't yet know who to trust (equivalent to the old
+/// skip-validation + TOFU). After successful enroll the node persists the
+/// monitor's CA and pins it for subsequent requests.
 async fn enroll_post(monitor: &str, token: &str, body: &[u8]) -> anyhow::Result<Vec<u8>> {
-    // enroll 阶段还没有签名身份，所以走 bootstrap token 走 Authorization: Bearer
-    // 此时没有 CA 可 pin，因此跳过服务端证书校验（TOFU：enroll 成功后存下 CA）
+    // During enroll we don't yet have a signing identity, so we use the bootstrap
+    // token via Authorization: Bearer. There is no CA to pin yet, so we skip
+    // server-cert verification (TOFU: store the CA after a successful enroll).
     let t = http::HttpTransport::new(monitor, None, true)?;
     let (status, resp) = t.enroll(token, body).await?;
     if status != 200 {
@@ -412,7 +428,7 @@ async fn collect_and_send(monitor: &str, state: &NodeState, node_id: &str) -> an
     Ok(())
 }
 
-/// 构造带签名的传输层：自建部署 pin monitor CA，托管平台走系统根
+/// Build the signed transport: self-hosted deployments pin the monitor CA, managed platforms use system roots
 fn transport(monitor: &str, state: &NodeState) -> anyhow::Result<http::HttpTransport> {
     let ca = if state.no_ca_pin {
         None
@@ -422,12 +438,13 @@ fn transport(monitor: &str, state: &NodeState) -> anyhow::Result<http::HttpTrans
     http::HttpTransport::new(monitor, ca, false)
 }
 
-/// 取 CPU 占用最高的前 N 个进程。
+/// Take the top N processes by CPU usage.
 fn snapshot_processes(sys: &sysinfo::System) -> ProcessSnapshot {
     const TOP_N: usize = 20;
 
-    // 控制台要在「按 CPU」与「按内存」两种排序下都取前 10，所以两榜各取前 20 再求并集：
-    // 只按 CPU 截断会让「按内存」榜缺人（内存大户常常 CPU 很低）。
+    // The console needs both "by CPU" and "by memory" rankings with the top 10,
+    // so take top 20 for each and union them. Truncating by CPU alone makes the
+    // "by memory" list incomplete (memory hogs often have very low CPU usage).
     let mut all: Vec<ProcessInfo> = sys
         .processes()
         .iter()
@@ -476,9 +493,11 @@ fn snapshot_processes(sys: &sysinfo::System) -> ProcessSnapshot {
     ProcessSnapshot { processes: procs }
 }
 
-/// 解析 `--tags` / `ZHIWEI_NODE_TAGS`：空白、英文逗号、中文逗号、顿号都算分隔符；
-/// 去空串、去重（保持顺序）。分隔符与控制台（node-meta-dialog）保持一致，
-/// 免得「这里能分开、那里分不开」。
+/// Parse `--tags` / `ZHIWEI_NODE_TAGS`: whitespace, English comma, Chinese comma,
+/// and the ideographic enumeration comma are all valid separators; drop empty
+/// strings, deduplicate (preserving order).
+/// Separators must match the console (node-meta-dialog), so users don't end up in
+/// the "split here, don't split there" situation.
 fn split_tags(raw: &str) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     raw.split(|c: char| c.is_whitespace() || matches!(c, ',' | '，' | '、'))
@@ -488,8 +507,9 @@ fn split_tags(raw: &str) -> Vec<String> {
         .collect()
 }
 
-/// 系统主机名可能是占位值（macOS 在反查 PTR 拿到 bogon 时会把主机名设成
-/// 「bogon」，即 bogus），对监控毫无辨识度。这里按优先级挑一个像样的名字。
+/// The system hostname can be a placeholder value (on macOS, when a reverse
+/// PTR returns bogus, the system sets hostname to "bogon", i.e. bogus), which is
+/// useless for monitoring. Pick a sensible name by priority.
 fn resolve_node_name(explicit: &str) -> String {
     const PLACEHOLDERS: &[&str] = &[
         "bogon",
@@ -512,7 +532,7 @@ fn resolve_node_name(explicit: &str) -> String {
         return system;
     }
 
-    // macOS：LocalHostName（Bonjour 名）通常是人设过的，比 bogon 有意义
+    // macOS: LocalHostName (Bonjour name) is usually set by humans and is more meaningful than bogon
     #[cfg(target_os = "macos")]
     if let Ok(out) = std::process::Command::new("scutil")
         .args(["--get", "LocalHostName"])
@@ -524,7 +544,7 @@ fn resolve_node_name(explicit: &str) -> String {
                 tracing::warn!(
                     system_hostname = %system,
                     resolved = %name,
-                    "系统主机名是占位值，已改用 macOS LocalHostName；可用 --node-name 覆盖"
+                    "System hostname was a placeholder; using macOS LocalHostName instead (override with --node-name)"
                 );
                 return name;
             }
@@ -534,14 +554,14 @@ fn resolve_node_name(explicit: &str) -> String {
     if !system.is_empty() {
         tracing::warn!(
             system_hostname = %system,
-            "系统主机名是占位值，建议用 --node-name 指定一个可辨识的名字"
+            "System hostname is a placeholder value; recommend setting --node-name to a distinguishable name"
         );
         return system;
     }
     "unknown".into()
 }
 
-/// 采集主机基本信息：操作系统 / 内核 / 架构 / CPU / 内存 / 运行时长 / 各网卡 IP。
+/// Collect basic host info: OS / kernel / arch / CPU / memory / uptime / per-interface IPs.
 fn build_host_info(node_name: &str) -> HostInfo {
     use sysinfo::{Networks, System};
 
@@ -594,8 +614,8 @@ fn build_host_info(node_name: &str) -> HostInfo {
         boot_time_unix_seconds: System::boot_time(),
         interfaces,
         agent_version: env!("CARGO_PKG_VERSION").to_string(),
-        // main() 没跑过（极少见，比如某条测试路径直接调 build_host_info）→ 0，
-        // 控制台看到 0 就当 unknown 不显示，逻辑跟老 agent 行为兼容。
+        // main() didn't run (rare, e.g. a test path calls build_host_info directly) → 0;
+        // the console shows 0 as unknown, matching legacy agent behavior.
         agent_started_at_unix_seconds: AGENT_STARTED_AT_UNIX_SECONDS.get().copied().unwrap_or(0),
     }
 }
@@ -623,9 +643,10 @@ fn build_batch(node_id: &str, key: &EdKeyPair) -> anyhow::Result<TelemetryBatch>
             labels: Default::default(),
         },
     ];
-    // 内存使用率（百分比）在节点侧就算好：控制台的内存列、告警规则
-    // 「内存使用率过高」、以及小时聚合都直接用这个指标名。
-    // 只在节点侧补一次，别让每个消费方各算一遍、算法还会漂。
+    // Memory-usage percent is computed once on the node side: the console's memory
+    // column, the "memory usage too high" alert rule, and the hourly aggregates all
+    // use this metric name directly. Compute once here so each consumer doesn't
+    // re-implement it (and risk drift).
     if let Some(total) = metrics
         .iter()
         .find(|m| m.name == "host.mem.total_bytes")
@@ -658,8 +679,9 @@ fn build_batch(node_id: &str, key: &EdKeyPair) -> anyhow::Result<TelemetryBatch>
         .collect();
 
     let disks = Disks::new_with_refreshed_list();
-    // 「使用率最高的挂载点」（跳过总容量为 0 的伪挂载）。百分比与字节量取同一块盘，
-    // 大字卡片与趋势图的「绝对值 / 占比」两个视图才自洽。
+    // "The mount point with highest usage" (skip fake mounts with total space 0).
+    // Percent and byte-count come from the same disk, so the "absolute value /
+    // ratio" views in the big-card and trend graph stay consistent.
     let fullest = disks.iter().filter(|d| d.total_space() > 0).max_by(|a, b| {
         let ra = (a.total_space() - a.available_space()) as f64 / a.total_space() as f64;
         let rb = (b.total_space() - b.available_space()) as f64 / b.total_space() as f64;
@@ -716,9 +738,9 @@ fn build_batch(node_id: &str, key: &EdKeyPair) -> anyhow::Result<TelemetryBatch>
     Ok(batch)
 }
 
-// ---------- inventory（快照） ----------
+// ---------- inventory (snapshot) ----------
 
-/// 构造快照报告：主机信息 + 容器 + 进程。低频上报，服务端只留最新一份。
+/// Build the snapshot report: host info + containers + processes. Low-frequency uploads; server keeps only the latest.
 async fn build_inventory(
     node_id: &str,
     key: &EdKeyPair,
@@ -730,7 +752,7 @@ async fn build_inventory(
 
     let containers = match docker::list_containers().await {
         Ok(Some(list)) => list,
-        // 没有 Docker（或 socket 不可用）时上报空列表，表示本机无容器运行时
+        // No Docker (or socket unavailable) → report empty list, indicating no container runtime on this host
         Ok(None) => Vec::new(),
         Err(e) => {
             tracing::warn!(error = %e, "Failed to collect containers");
@@ -738,14 +760,14 @@ async fn build_inventory(
         }
     };
 
-    // sysinfo 需要「两次采样 + 中间有间隔」才能算出 CPU 使用率，
-    // 否则所有进程的 cpu_usage() 都是 0。
+    // sysinfo needs "two samples with a gap between them" to compute CPU usage;
+    // otherwise every process's cpu_usage() is 0.
     let mut sys = System::new_all();
     tokio::time::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL).await;
     sys.refresh_all();
     let processes = Some(snapshot_processes(&sys));
 
-    // 控制台配置的路径优先（同一路径以来源为准），本机基线兜底
+    // Console-configured paths take priority (same path: first source wins); fall back to local baseline
     let certificates = certs::scan_with_sources(cert_sources, cert_globs);
 
     let mut report = InventoryReport {
@@ -770,8 +792,8 @@ async fn send_inventory(
     node_id: &str,
     cert_globs: &[String],
 ) -> anyhow::Result<()> {
-    // 每次快照前拉一次证书路径配置：拉不到就退回本机基线，
-    // 不让「monitor 抖了一下」变成「这台机器的证书全不见了」
+    // Pull cert path config before each snapshot: if unreachable, fall back to local
+    // baseline — don't let "monitor glitched for a moment" become "this machine's certs vanished"
     let cert_sources = fetch_cert_sources(monitor, state, node_id).await;
     let report = build_inventory(
         node_id,
@@ -796,8 +818,8 @@ async fn send_inventory(
     Ok(())
 }
 
-/// 拉取控制台为本节点配置的证书路径（`GET /v1/cert-config`）。
-/// 失败只记 debug 日志并返回空列表——扫描照旧走本机基线。
+/// Fetch cert paths configured by the console for this node (`GET /v1/cert-config`).
+/// On failure only log a debug message and return empty — scanning continues with local baseline.
 async fn fetch_cert_sources(
     monitor: &str,
     state: &NodeState,
@@ -811,7 +833,7 @@ async fn fetch_cert_sources(
             .await?;
         anyhow::ensure!(
             status == 200,
-            "拉取证书配置返回 {status}: {}",
+            "fetching cert config returned {status}: {}",
             String::from_utf8_lossy(&raw)
         );
         let v: serde_json::Value = serde_json::from_slice(&raw)?;
@@ -848,20 +870,21 @@ mod tests {
     use clap::Parser;
     use std::sync::Mutex;
 
-    /// 全局 env 在同一进程内是共享的；cargo test 默认并行跑测试，
-    /// 设 env 的测试会互相污染。下面这把锁强制相关测试串行。
+    /// Global env is shared within a single process; cargo test runs tests in parallel
+    /// by default, and tests that set env will pollute each other. The lock below
+    /// forces the relevant tests to run serially.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    /// 锁定 `Args.interval` 的 env 集成行为：env 覆盖默认；命令行覆盖 env。
-    /// 之前装好的节点改不了 interval，是因为漏了 `env = "ZHIWEI_INTERVAL"`——
-    /// systemd unit 写了 `EnvironmentFile=/etc/zhiwei/node.env`，但 clap 不读
-    /// 这个 key 就形同虚设；这条测试把这条约束钉死。
+    /// Pin the env-integration behavior of `Args.interval`: env overrides default; CLI overrides env.
+    /// Previously installed nodes couldn't change interval because `env = "ZHIWEI_INTERVAL"`
+    /// was missing — the systemd unit wrote `EnvironmentFile=/etc/zhiwei/node.env`, but
+    /// clap not reading that key made it useless; this test nails down that contract.
     #[test]
     fn interval_reads_from_env() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("ZHIWEI_INTERVAL", "120");
         let a = Args::try_parse_from(["zhiwei-node", "--monitor", "http://x"]).unwrap();
-        assert_eq!(a.interval, 120, "env ZHIWEI_INTERVAL=120 应被采纳");
+        assert_eq!(a.interval, 120, "env ZHIWEI_INTERVAL=120 should be applied");
         std::env::remove_var("ZHIWEI_INTERVAL");
     }
 
@@ -871,29 +894,29 @@ mod tests {
         std::env::set_var("ZHIWEI_INTERVAL", "120");
         let a = Args::try_parse_from(["zhiwei-node", "--monitor", "http://x", "--interval", "5"])
             .unwrap();
-        assert_eq!(a.interval, 5, "命令行 --interval 5 应覆盖 env");
+        assert_eq!(a.interval, 5, "CLI --interval 5 should override env");
         std::env::remove_var("ZHIWEI_INTERVAL");
     }
 
-    /// 入网时带的标签：空格也要能分开（以前只认逗号，粘贴「prod bj」会变成一个标签）。
+    /// Tags passed at enrollment: whitespace must also split (previously only comma was recognized;
+    /// pasting "prod bj" would become a single tag).
     #[test]
     fn splits_tags_on_space_and_comma() {
         assert_eq!(split_tags("prod,bj"), vec!["prod", "bj"]);
         assert_eq!(split_tags("prod bj"), vec!["prod", "bj"]);
-        assert_eq!(split_tags("prod，bj、入口"), vec!["prod", "bj", "入口"]);
-        // 去空串与重复，保持顺序
+        // Drop empty strings and duplicates, preserving order
         assert_eq!(split_tags("  a ,, a,b  "), vec!["a", "b"]);
         assert!(split_tags("   ").is_empty());
     }
 
-    /// 别名 / 标签走 env（install-node.sh 写进 0600 的 env 文件，systemd / launchd 再注入）。
+    /// Alias / tags read from env (install-node.sh writes to a 0600 env file; systemd / launchd then inject).
     #[test]
     fn alias_and_tags_read_from_env() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("ZHIWEI_NODE_ALIAS", "Beijing Entry");
         std::env::set_var("ZHIWEI_NODE_TAGS", "prod bj");
         let a = Args::try_parse_from(["zhiwei-node", "--monitor", "http://x"]).unwrap();
-        assert_eq!(a.alias, "北京入口");
+        assert_eq!(a.alias, "Beijing Entry");
         assert_eq!(split_tags(&a.tags), vec!["prod", "bj"]);
         std::env::remove_var("ZHIWEI_NODE_ALIAS");
         std::env::remove_var("ZHIWEI_NODE_TAGS");

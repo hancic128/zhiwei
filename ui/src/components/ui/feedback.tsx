@@ -4,7 +4,7 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { useTranslation } from "react-i18next";
 
-/** 规范 7.13：骨架块 bg-surface-2 animate-pulse rounded */
+/** Spec 7.13: skeleton block bg-surface-2 animate-pulse rounded */
 export function Skeleton({
   className,
   ...props
@@ -30,7 +30,7 @@ export function TableSkeleton({ rows = 5 }: { rows?: number }) {
   );
 }
 
-/** 规范 08：空状态 —— 图标 w-12 h-12 text-ink-400 + 标题 + 描述 + 操作，py-16 */
+/** Spec 08: empty state — icon w-12 h-12 text-ink-400 + title + description + action, py-16 */
 export function EmptyState({
   icon,
   title,
@@ -69,8 +69,8 @@ export function SearchEmptyState({ title, description }: { title: string; descri
 }
 
 /**
- * 规范 08 / 10：加载失败禁止裸显状态码或原始异常，
- * 统一友好文案 + 就地「重试」按钮，失败态常驻该区域。
+ * Spec 08 / 10: on load failure, forbidden to show raw status codes or raw exceptions;
+ * unified friendly text + inline "Retry" button, failure state stays resident in this area.
  */
 export function ErrorState({
   message,

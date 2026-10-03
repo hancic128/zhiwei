@@ -3,8 +3,9 @@ import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 /**
- * 规范 06 组件模式：项目里所有下拉都复用这一个外壳（与 Input 同一套令牌）。
- * 用原生 `<select>` 是为了键盘 / 无障碍零成本；外观全部走令牌，不用浏览器默认样式。
+ * Spec 06 component pattern: every dropdown in the project reuses this single shell
+ * (same token set as Input). Uses native `<select>` for zero keyboard / accessibility cost;
+ * styling entirely follows tokens, no browser-default look.
  */
 const base =
   "h-9 w-full rounded-md border border-surface-3 bg-surface-0 pl-3 pr-8 text-sm text-ink-900 " +

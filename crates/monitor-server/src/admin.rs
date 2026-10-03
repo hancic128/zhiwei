@@ -3,53 +3,62 @@
 //! Nodes authenticate with signed requests, but a browser cannot hold a node key
 //! certificate, so the console needs a second credential.
 //!
-//! 三个来源，优先级从高到低：
+//! Three sources, in priority order (high to low):
 //!
-//! 1. `ZHIWEI_ADMIN_TOKEN` 环境变量——托管平台免费层没有持久磁盘、也没有
-//!    Shell，「首次生成的 token 存在数据卷里」这条路走不通。把 token 放进
-//!    面板的环境变量里，重启后仍是同一个，也不用去翻日志。
-//! 2. `<data-dir>/admin.token` 文件——自建 / 有持久卷时的正常路径。
-//! 3. 都没有就随机生成，落盘，并在启动日志里打印一次。
+//! 1. `ZHIWEI_ADMIN_TOKEN` environment variable — managed platform free tiers
+//!    have no persistent disk and no Shell, so the "store first-generated token
+//!    on a data volume" approach doesn't work. Putting the token in the
+//!    dashboard's environment variable keeps it the same across restarts and
+//!    avoids digging through logs.
+//! 2. `<data-dir>/admin.token` file — the normal path for self-hosted /
+//!    persistent-volume deployments.
+//! 3. If neither is set, generate a random one, persist it, and print it
+//!    once in the startup log.
 
 use std::path::Path;
 
 use rand::RngCore;
 
-/// 凭据是从哪来的——决定启动时打印什么（生成的才需要打印出来给用户看）。
+/// Where the credential comes from — determines what to print at startup
+/// (only generated tokens need to be shown to the user).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenSource {
-    /// `ZHIWEI_ADMIN_TOKEN` 环境变量
+    /// `ZHIWEI_ADMIN_TOKEN` environment variable
     Env,
-    /// `<data-dir>/admin.token` 文件
+    /// `<data-dir>/admin.token` file
     File,
-    /// 本次随机生成并落盘
+    /// Randomly generated this time and persisted to disk
     Generated,
 }
 
 pub async fn load_or_init(data_dir: &Path) -> anyhow::Result<(String, TokenSource)> {
-    // 1. 环境变量优先：托管平台用它固定 token，无需 Shell 也能拿到。
+    // 1. Environment variable wins: managed platforms use it to pin the token,
+    //    no Shell needed to retrieve it.
     match std::env::var("ZHIWEI_ADMIN_TOKEN") {
         Ok(raw) => {
-            // 太短一律拒绝：这是长期有效的凭据，不能「警告一下就照用」。
-            // 拒绝后退回文件 / 随机生成，保证服务仍能起来，但绝不暴露弱凭据。
+            // Reject anything too short: this is a long-lived credential,
+            // never "warn and use it anyway". After rejecting, fall back to
+            // file / random generation so the service still starts, but never
+            // expose a weak credential.
             match validate_env_token("ZHIWEI_ADMIN_TOKEN", &raw) {
                 Ok(token) => return Ok((token, TokenSource::Env)),
                 Err(reason) => {
                     tracing::error!(
                         %reason,
-                        "ZHIWEI_ADMIN_TOKEN 不可用，已忽略；改用文件或随机生成"
+                        "ZHIWEI_ADMIN_TOKEN is unusable, ignored; falling back to file or random generation"
                     );
                 }
             }
         }
         Err(std::env::VarError::NotPresent) => {}
         Err(e) => {
-            // 非 Unicode 等异常值：不静默吞掉，否则用户会以为环境变量生效了
-            tracing::warn!(error = %e, "读取 ZHIWEI_ADMIN_TOKEN 失败，改走文件 / 随机生成");
+            // Non-Unicode and other abnormal values: don't silently swallow
+            // them, or the user will think the env var took effect.
+            tracing::warn!(error = %e, "Failed to read ZHIWEI_ADMIN_TOKEN, falling back to file / random generation");
         }
     }
 
-    // 2. 文件（自建 / 有持久卷）。
+    // 2. File (self-hosted / persistent volume).
     let path = data_dir.join("admin.token");
 
     if path.exists() {
@@ -57,7 +66,7 @@ pub async fn load_or_init(data_dir: &Path) -> anyhow::Result<(String, TokenSourc
         return Ok((token.trim().to_string(), TokenSource::File));
     }
 
-    // 3. 随机生成并落盘。
+    // 3. Randomly generate and persist.
     let mut buf = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut buf);
     let token: String = buf.iter().map(|b| format!("{b:02x}")).collect();
@@ -85,47 +94,50 @@ pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
         == 0
 }
 
-/// 凭据的最低长度。
+/// Minimum credential length.
 ///
-/// 控制台 admin token 与入网 bootstrap token 都是**长期有效的秘密**，
-/// 且都直接暴露在公网边缘之后：前者能读全部数据，后者能注册节点。
-/// 短了就是可暴力猜解的，所以低于这条线一律不采用。
+/// Both the console admin token and the enrollment bootstrap token are
+/// **long-lived secrets**, and both sit directly behind the public-facing edge:
+/// the former can read all data, the latter can enroll nodes.
 pub const MIN_TOKEN_LEN: usize = 16;
 
-/// 校验一个来自环境变量的凭据。
+/// Validate a credential from an environment variable.
 ///
-/// 返回 `Ok( trimmed )` 才可以用；`Err(原因)` 表示**必须拒绝**，
-/// 调用方应当退回更安全的来源（文件 / 随机生成），而不是降级照用。
+/// Returns `Ok(trimmed)` when usable; `Err(reason)` means it **must be rejected**,
+/// and the caller should fall back to a safer source (file / random generation)
+/// instead of degrading and using it anyway.
 pub fn validate_env_token(name: &str, raw: &str) -> Result<String, String> {
     let token = raw.trim();
     if token.is_empty() {
-        return Err(format!("{name} 是空的"));
+        return Err(format!("{name} is empty"));
     }
     if token.len() < MIN_TOKEN_LEN {
         return Err(format!(
-            "{name} 只有 {} 个字符，少于 {MIN_TOKEN_LEN} 个——它是长期有效的秘密，\
-             太短会被暴力猜解，已拒绝使用（请换成 ≥32 字符的随机串）",
+            "{name} has only {} characters, fewer than {MIN_TOKEN_LEN} — it is a long-lived secret \
+             and a short one is brute-forceable, so it has been rejected \
+             (please use a random string of ≥32 characters instead)",
             token.len()
         ));
     }
     Ok(token.to_string())
 }
 
-/// 新凭据的准入检查。
+/// Admission check for new credentials.
 ///
-/// 控制台的凭据是唯一一道门（节点走签名、不走这里），所以：够长、不含空白与
-/// 控制字符（避免存进去之后自己都复制不利索）。
+/// The console credential is the only gate (nodes use signatures, not this),
+/// so: long enough, no whitespace or control characters (so that once stored
+/// it's easy to copy correctly).
 pub fn validate_new_token(token: &str) -> Result<(), String> {
     if token.len() < MIN_TOKEN_LEN {
-        return Err(format!("凭据至少要 {MIN_TOKEN_LEN} 个字符"));
+        return Err(format!("credential must be at least {MIN_TOKEN_LEN} characters"));
     }
     if token.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return Err("凭据不能包含空白或控制字符".into());
+        return Err("credential must not contain whitespace or control characters".into());
     }
     Ok(())
 }
 
-/// 把新凭据写回 `<data-dir>/admin.token`（0600）。
+/// Write a new credential back to `<data-dir>/admin.token` (0600).
 pub async fn save(data_dir: &Path, token: &str) -> anyhow::Result<()> {
     let path = data_dir.join("admin.token");
     tokio::fs::write(&path, token.as_bytes()).await?;
@@ -145,14 +157,15 @@ mod tests {
 
     #[test]
     fn new_token_must_be_long_enough() {
-        assert!(validate_new_token("短").is_err());
+        assert!(validate_new_token("short").is_err());
         assert!(validate_new_token("0123456789abcde").is_err()); // 15
         assert!(validate_new_token("0123456789abcdef").is_ok()); // 16
     }
 
     #[test]
     fn new_token_must_not_contain_whitespace_or_control_chars() {
-        // 带空格 / 换行 / 制表符的凭据存进去之后，命令行与 curl 都容易用错
+        // Credentials with spaces / newlines / tabs are easy to misuse in
+        // command lines and curl once stored.
         assert!(validate_new_token("0123456789abc ef").is_err());
         assert!(validate_new_token("0123456789abc\nef").is_err());
         assert!(validate_new_token("0123456789abc\tef").is_err());
@@ -161,8 +174,10 @@ mod tests {
 
     #[test]
     fn env_token_shorter_than_minimum_is_rejected_not_warned() {
-        // 回归：用户把 ZHIWEI_BOOTSTRAP_TOKEN 设成 4 个字符，之前只 warn 就照用，
-        // 等于把一个可暴力猜解的长期入网令牌留在公网边缘后面。必须拒绝。
+        // Regression: users setting ZHIWEI_BOOTSTRAP_TOKEN to 4 characters
+        // used to only emit a warning and still use it, which meant leaving
+        // a brute-forceable long-lived enrollment token behind the public
+        // edge. Must be rejected.
         assert!(validate_env_token("T", "true").is_err()); // len=4
         assert!(validate_env_token("T", "short").is_err());
         assert!(validate_env_token("T", "0123456789abcde").is_err()); // 15
@@ -172,17 +187,20 @@ mod tests {
 
     #[test]
     fn env_token_is_trimmed_and_accepted_at_minimum() {
-        // 部署面板里粘贴很容易带上首尾空白，trim 后要能用
+        // Pasting in a deploy dashboard often picks up leading/trailing whitespace;
+        // after trimming it should still work.
         let ok = validate_env_token("T", "  0123456789abcdef  ").unwrap();
         assert_eq!(ok, "0123456789abcdef");
-        // 刚好到线就放行
+        // Right at the minimum: allow.
         assert!(validate_env_token("T", "0123456789abcdef").is_ok());
     }
 
-    /// 三个来源的优先级与副作用。
+    /// Priority and side effects of the three sources.
     ///
-    /// 刻意写成**一个**测试：这些断言会改进程级环境变量，而 cargo test 默认
-    /// 并行跑测试，拆成两个会互相踩。合在一起就天然串行。
+    /// Deliberately written as **one** test: these assertions mutate
+    /// process-level environment variables, and cargo test runs in parallel
+    /// by default — splitting them would stomp on each other. Combined,
+    /// they naturally run sequentially.
     #[tokio::test]
     async fn token_sources_are_env_then_file_then_generated() {
         let dir = std::env::temp_dir().join(format!("zhiwei-admin-test-{}", std::process::id()));
@@ -190,29 +208,30 @@ mod tests {
         let token_path = dir.join("admin.token");
         let _ = tokio::fs::remove_file(&token_path).await;
 
-        // --- 环境变量优先：去空白，且**不写盘** ---
-        // 不写盘是有意的：托管平台的环境变量才是真相来源，落盘反而会让下一轮
-        // 重启读到一个与部署面板不一致的旧值。
+        // --- Env var wins: whitespace stripped, **not written to disk** ---
+        // Not writing is intentional: the managed platform's env var is the
+        // source of truth; persisting it would make a restart read a stale
+        // value that disagrees with the deploy dashboard.
         std::env::set_var("ZHIWEI_ADMIN_TOKEN", "  env-token-0123456789abcdef  ");
         let (token, source) = load_or_init(&dir).await.unwrap();
         std::env::remove_var("ZHIWEI_ADMIN_TOKEN");
 
-        assert_eq!(token, "env-token-0123456789abcdef", "首尾空白应被去掉");
+        assert_eq!(token, "env-token-0123456789abcdef", "leading/trailing whitespace should be trimmed");
         assert_eq!(source, TokenSource::Env);
         assert!(
             !token_path.exists(),
-            "环境变量来源不应写盘——否则重启后会读到陈旧值"
+            "env-var source should not write to disk — otherwise a restart reads a stale value"
         );
 
-        // --- 没有环境变量：首次随机生成 ---
+        // --- No env var: first call generates randomly ---
         let (first, source) = load_or_init(&dir).await.unwrap();
         assert_eq!(source, TokenSource::Generated);
         assert!(!first.is_empty());
 
-        // --- 再次调用：同一个 token 从文件读回，不重新生成 ---
+        // --- Call again: same token read back from file, not regenerated ---
         let (second, source) = load_or_init(&dir).await.unwrap();
         assert_eq!(source, TokenSource::File);
-        assert_eq!(first, second, "重启后 token 必须保持不变");
+        assert_eq!(first, second, "token must stay stable across restarts");
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

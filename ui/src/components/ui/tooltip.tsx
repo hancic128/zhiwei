@@ -2,7 +2,7 @@ import * as React from "react";
 import * as TooltipPrimitive from "@radix-ui/react-tooltip";
 import { cn } from "@/lib/utils";
 
-/** 规范 7.15 + 禁止清单：Tooltip 使用固定深色，避免暗色模式下白字白底。 */
+/** Spec 7.15 + prohibited list: Tooltip uses fixed dark color, avoiding white text on white background in dark mode. */
 export const TooltipProvider = TooltipPrimitive.Provider;
 
 export function Tooltip({
@@ -14,7 +14,7 @@ export function Tooltip({
   content: React.ReactNode;
   children: React.ReactNode;
   side?: "top" | "right" | "bottom" | "left";
-  /** 宽版提示（长命令 / 长路径）：放宽宽度上限并允许换行 */
+  /** Wide tooltip (long commands / long paths): relax the width limit and allow line breaks */
   wide?: boolean;
 }) {
   return (
@@ -25,7 +25,7 @@ export function Tooltip({
           side={side}
           sideOffset={8}
           className={cn(
-            // 规范 7.15.1：rounded / px-2 py-1 / text-xs / shadow-md；宽版放宽 max-w
+            // Spec 7.15.1: rounded / px-2 py-1 / text-xs / shadow-md; wide version relaxes max-w
             "z-50 rounded px-2 py-1 text-xs font-medium shadow-md",
             wide ? "max-w-[480px] break-words" : "max-w-[200px]",
             "animate-panel-slide",

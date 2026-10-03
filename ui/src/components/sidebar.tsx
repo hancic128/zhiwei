@@ -40,10 +40,10 @@ const NAV: NavItem[] = [
 ];
 
 /**
- * 规范 7.6.1 / 7.17：
- *  - 宽度 w-60，折叠 4rem（w-16），仅图标
- *  - 导航区 flex-1 overflow-y-auto，折叠按钮 mt-auto 固定贴底
- *  - 折叠态持久化到 localStorage，首帧恢复
+ * Spec 7.6.1 / 7.17:
+ *  - Width w-60, collapsed 4rem (w-16), icons only
+ *  - Nav area flex-1 overflow-y-auto, collapse button mt-auto pinned to bottom
+ *  - Collapsed state persists to localStorage, restored on first frame
  */
 export function Sidebar({
   collapsed,
@@ -53,11 +53,11 @@ export function Sidebar({
   onToggle: () => void;
 }) {
   const { t } = useTranslation();
-  // 「现在要处理」的条数——为 0 时不显示徽标（0 是噪音，待办页会自己说「今天没事」）
+  // Count of "things to handle now" — don't show badge when 0 (0 is noise, the todo page says "nothing today" itself)
   const todoQ = useQuery({ queryKey: ["todo"], queryFn: todoApi.get });
   const todoCount = todoQ.data?.counts.now ?? 0;
 
-  /** 一组导航项——主列表与贴底的设置共用同一份渲染 */
+  /** A group of nav items — main list and bottom settings share the same rendering */
   const renderItems = (items: NavItem[]) =>
     items.map((item) => {
       const Icon = item.icon;
@@ -115,7 +115,7 @@ export function Sidebar({
         collapsed ? "w-16" : "w-60",
       )}
     >
-      {/* Logo 区 */}
+      {/* Logo area */}
       <div
         className={cn(
           "h-16 shrink-0 flex items-center border-b border-surface-3 dark:border-ink-700",
@@ -135,12 +135,12 @@ export function Sidebar({
         </Link>
       </div>
 
-      {/* 导航区 */}
+      {/* Nav area */}
       <nav className="flex-1 p-3 space-y-1 overflow-y-auto scrollbar-thin">
         {renderItems(NAV)}
       </nav>
 
-      {/* 折叠按钮：固定贴底，不随菜单滚动 */}
+      {/* Collapse button: pinned to bottom, doesn't scroll with the menu */}
       <div className="shrink-0 mt-auto p-3 border-t border-surface-3 dark:border-ink-700">
         <button
           type="button"
@@ -167,7 +167,7 @@ export function Sidebar({
   );
 }
 
-/** 侧边栏折叠状态的读写（首帧恢复，避免刷新闪烁） */
+/** Sidebar collapsed state read/write (restored on first frame to avoid refresh flicker) */
 export function useSidebarCollapsed() {
   const [collapsed, setCollapsed] = React.useState(() =>
     loadSidebarCollapsed(),

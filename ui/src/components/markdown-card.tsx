@@ -3,12 +3,12 @@ import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
 
 /**
- * 帮助页里渲染一段 markdown 用。卡片化是为了和其它设置 section 在视觉上对齐，
- * 避免长段 markdown 直接落在页面底色上读着累。
+ * Renders a markdown snippet for the help page. Card styling is used to align visually
+ * with other settings sections and avoid long markdown blobs sitting directly on the page background.
  *
- * 内置 markdown 排版样式（h1-h4 / p / ul / ol / code / pre / table / a / hr）。
- * 不依赖 @tailwindcss/typography（项目没有那个插件），全部用项目自己的
- * surface / ink / brand 令牌，保持主题一致。
+ * Built-in markdown styling (h1-h4 / p / ul / ol / code / pre / table / a / hr).
+ * Doesn't depend on @tailwindcss/typography (the project doesn't have that plugin);
+ * uses the project's own surface / ink / brand tokens for theme consistency.
  */
 export function MarkdownCard({
   children,

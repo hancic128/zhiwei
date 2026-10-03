@@ -69,7 +69,7 @@ import {
   nodeLabel,
 } from "@/lib/utils";
 
-/** 刷新频率档位（需求点名的 5 档） */
+/** Refresh rate tiers (5 tiers as required) */
 const REFRESH_OPTIONS = [
   { ms: 5_000, label: "5s" },
   { ms: 10_000, label: "10s" },
@@ -84,7 +84,7 @@ type PendingAction =
   | { kind: "restart" }
   | { kind: "shutdown" }
   | { kind: "deleteNode" }
-  /** 409 之后升级：先作废该节点未发出的命令（写审计）再删 */
+  /** Upgrade after 409: first void the node's pending commands (write audit) then delete */
   | { kind: "forceDeleteNode" };
 
 export function NodeDetail() {
@@ -96,8 +96,8 @@ export function NodeDetail() {
   const toast = useToast();
 
   const [range, setRange] = React.useState<TimeRange>(() => presetRange("3h"));
-  // 节点页默认 5s：详情页打开就是看实时曲线 / 进程 / 容器，
-  // 30s 会让人感觉「卡了」；其他页面继续各自原来的频率。
+  // Node detail page defaults to 5s: the detail page is for viewing real-time curves / processes / containers,
+  // 30s would feel "frozen"; other pages keep their original frequencies.
   const [refreshMs, setRefreshMs] = React.useState(5_000);
   const [showBasic, setShowBasic] = React.useState(false);
   const [memAbs, setMemAbs] = React.useState(false);
@@ -106,10 +106,10 @@ export function NodeDetail() {
   const [procSort, setProcSort] = React.useState<"cpu" | "mem">("cpu");
   const [pending, setPending] = React.useState<PendingAction | null>(null);
   const [busy, setBusy] = React.useState(false);
-  /** 编辑别名 / 标签 */
+  /** Editing alias / tags */
   const [metaOpen, setMetaOpen] = React.useState(false);
 
-  // 预设范围跟着刷新频率滚动（否则「最近 30 分钟」会一直停在首次选定的那一段）
+  // Preset range scrolls with the refresh rate (otherwise "last 30 minutes" stays stuck at the first selected window)
   const [tick, setTick] = React.useState(() => Date.now());
   React.useEffect(() => {
     const h = window.setInterval(() => setTick(Date.now()), refreshMs);
@@ -127,17 +127,18 @@ export function NodeDetail() {
     queryKey: ["nodes"],
     queryFn: api.nodes,
     refetchInterval: refreshMs,
-    // 刷新 / 切换范围时保留上一帧：整页内容不该因为一次后台请求而清空
+    // Keep previous frame on refresh / range switch: the entire page content shouldn't clear for a single background request
     placeholderData: keepPreviousData,
   });
   const node = nodesQ.data?.find((n) => n.id === id);
 
   /**
-   * 所有曲线都常驻拉取（含磁盘绝对值），切换「占比 / 绝对值」只是换个渲染，
-   * 不触发任何请求——切换图表不该刷别的图表。
+   * All curves are always polled (including absolute disk values); switching "ratio / absolute"
+   * only changes rendering, doesn't trigger any request — switching a chart shouldn't refresh others.
    *
-   * `placeholderData` 让窗口滚动（预设范围按刷新频率重算，queryKey 随之变化）
-   * 或手动刷新时继续用上一段数据渲染，而不是闪成骨架屏。
+   * `placeholderData` keeps the previous window's data rendering while the window scrolls
+   * (preset range recomputed by refresh rate, queryKey changes accordingly) or on manual refresh,
+   * instead of flashing to a skeleton.
    */
   const seriesQ = (metric: string, rate = false) =>
     useQuery({
@@ -178,13 +179,14 @@ export function NodeDetail() {
 
   const setCrumbs = useBreadcrumb();
 
-  // 节点 Agent 比控制台旧时给个可点的提示：容器用量 / 启停日志「没反应」多半是它。
+  // When node Agent is older than the console, show a clickable hint: container usage / start-stop logs
+  // "not responding" is usually this.
   const agentVersion = node?.host_info?.agent_version;
   const agentOutdated = isAgentOlder(agentVersion, APP_VERSION);
 
-  // 「Nodes / 家用电脑 · Online」放在 App 顶部 header 里，不再挤在内容区顶部。
-  // 部署 / 入网时间不进 header（2026-09-29 本人要求），详情对话框里有完整时间。
-  // 节点数据未回来时先只挂根级，避免叶子文字闪一下。
+  // "Nodes / home pc · Online" goes into the App header, not the content area top.
+  // Enroll / deploy time doesn't go in the header (required on 2026-09-29); the detail dialog has the full timestamps.
+  // Before node data loads, only set the root crumb to avoid leaf text flashing.
   React.useEffect(() => {
     setCrumbs([
       { to: "/nodes", label: t("nav.nodes") },
@@ -230,7 +232,7 @@ export function NodeDetail() {
     ]);
   }, [setCrumbs, node, id, t, live, agentOutdated, agentVersion]);
 
-  // 离开详情页时清掉，否则回到列表还会挂着上一个节点的面包屑
+  // Clear crumbs when leaving the detail page, otherwise the list page keeps the previous node's crumbs
   React.useEffect(() => () => setCrumbs([]), [setCrumbs]);
 
   const processes: ProcessInfo[] = React.useMemo(() => {
@@ -243,8 +245,8 @@ export function NodeDetail() {
     return list.slice(0, 10);
   }, [procsQ.data, procSort]);
 
-  // 曲线数据：useMemo 固定数组身份，避免无关的 state 变化（比如开对话框）
-  // 让 ECharts 重画一遍
+  // Curve data: useMemo stabilizes array identity, avoiding unrelated state changes (like opening dialog)
+  // causing ECharts to redraw
   const hostname = node?.hostname ?? "";
   const cpuSeries = React.useMemo<Series[]>(() => {
     const pts = cpuQ.data?.points ?? [];
@@ -297,7 +299,7 @@ export function NodeDetail() {
     [netTxQ.data, netRxQ.data, t],
   );
 
-  /** 下发命令并等回执：杀进程 / 重启 / 关机都走这一条路 */
+  /** Send command and wait for receipt: kill process / restart / shutdown all go through this */
   const runCommand = async (action: string, params: Record<string, unknown>) => {
     setBusy(true);
     try {
@@ -315,11 +317,13 @@ export function NodeDetail() {
     }
   };
 
-  /** 节点删除：成功后跳回列表 + 让 nodes 列表缓存失效。失败只弹 toast。
-   *  404 当作「被别人删了」，也按成功处理，跳回列表避免用户对着一具尸体困惑。
-   *  409 = 还有未发出的命令（pending）：换成「作废并删除」的确认，`force` 走 ?force=1。
-   *  后端默认 TTL 只有 60s，节点重装过 / 命令通道不通时这些命令永远没人来拉，
-   *  「等节点拉完」不可能发生——所以必须给一条能走通的路。 */
+  /** Node deletion: on success, navigate back to list + invalidate nodes cache. Failure only shows toast.
+   *  404 is treated as "deleted by someone else" and handled as success, redirect to list to avoid leaving
+   *  user confused staring at a corpse.
+   *  409 = pending commands: switch to "force delete" confirmation, `force` via ?force=1.
+   *  Backend's default TTL is only 60s; if the node is reinstalled / command channel is down,
+   *  those commands will never be pulled — "wait for the node to pull them" is impossible.
+   *  So we must provide a path that actually works. */
   const runDeleteNode = async (force = false) => {
     setBusy(true);
     try {
@@ -402,8 +406,9 @@ export function NodeDetail() {
     }
   })();
 
-  // 工具栏（时间范围 / 刷新频率 / 基本信息 / 重启 / 关机 / 删除）不再压在内容区顶部，
-  // 而是投递到 app header 的操作区（header 在 <Routes> 之外，只能反向投递）。
+  // Toolbar (time range / refresh rate / basic info / restart / shutdown / delete) no longer pinned at the
+  // content area top; instead delivered to the app header's actions area (the header is outside <Routes>,
+  // can only receive from below).
   const headerActions = useHeaderActions(
     <div className="flex flex-wrap items-center justify-end gap-2">
       <TimeRangePicker value={range} onChange={setRange} />
@@ -512,7 +517,7 @@ export function NodeDetail() {
         </Card>
       ) : (
         <>
-          {/* 大字卡片：CPU / 内存 / 磁盘 / 网络（上下行） */}
+          {/* Large cards: CPU / memory / disk / network (up + down) */}
           <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
             <MetricCard
               label={t("detail.kpiCpu")}
@@ -561,7 +566,7 @@ export function NodeDetail() {
             />
           </div>
 
-          {/* 趋势图：X 轴固定为所选时间范围，右上角可单独刷新这一张 */}
+          {/* Trend charts: X axis fixed at the selected time range, individual refresh button at top-right */}
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 md:gap-6">
             <TrendCard
               title={t("detail.cpuChart")}
@@ -698,7 +703,7 @@ export function NodeDetail() {
             </TrendCard>
           </div>
 
-          {/* 进程 top10：按 CPU / 内存 切换，优雅杀 / 强杀（纯图标 + Tooltip） */}
+          {/* Process top10: switch by CPU / memory, graceful kill / force kill (icon-only with Tooltip) */}
           <Card>
             <CardHeader
               title={t("processes.title")}
@@ -778,8 +783,8 @@ export function NodeDetail() {
                               {p.name}
                             </div>
                             {p.cmdline && (
-                              // hover 显示完整命令（宽版 tooltip，可换行）；
-                              // 点命令本身即复制整条（命令行可能被截断，tooltip 里看不全）
+                              // Hover shows the full command (wide tooltip, wraps);
+                              // Clicking the command itself copies the whole line (command line may be truncated, tooltip can't show all)
                               <Tooltip content={p.cmdline} wide>
                                 <button
                                   type="button"
@@ -845,18 +850,18 @@ export function NodeDetail() {
             </CardBody>
           </Card>
 
-          {/* 容器组：列表 + 搜索/过滤/排序/分页 + 启停重启与最新日志 */}
+          {/* Container group: list + search/filter/sort/pagination + start/stop/restart and latest logs */}
           <NodeContainers nodeId={id} refreshMs={refreshMs} />
 
-          {/* 证书：这台机器上发现的 TLS 证书，样式复用证书页 */}
+          {/* Certificates: TLS certificates discovered on this machine, reuses the certificates page styling */}
           <NodeCerts nodeId={id} refreshMs={refreshMs} hostLabel={nodeLabel(node)} />
 
-          {/* 服务探针的反向视图：这台机器在替谁探什么 */}
+          {/* Reverse view of service probes: what this machine is probing on whose behalf */}
           <NodeProbes nodeId={id} refreshMs={refreshMs} />
         </>
       )}
 
-      {/* 基本信息：对话框展示，不再占页面版面 */}
+      {/* Basic info: shown in a dialog, no longer takes page space */}
       <Dialog
         open={showBasic && !!node}
         onClose={() => setShowBasic(false)}
@@ -925,7 +930,7 @@ export function NodeDetail() {
               label={t("detail.agentVersion")}
               value={node.host_info.agent_version ? `v${node.host_info.agent_version}` : "—"}
             />
-            {/* 节点 ID：从标题区搬进来（header 只留「Nodes / 名称 · 状态」） */}
+            {/* Node ID: moved here from the title area (header only keeps "Nodes / name · status") */}
             <div className="min-w-0">
               <dt className="text-xs text-ink-400">{t("detail.nodeId")}</dt>
               <dd className="mt-1 flex items-center gap-1">
@@ -1013,7 +1018,7 @@ export function NodeDetail() {
   );
 }
 
-/** 大字卡片：单值（CPU/内存/磁盘）或两条值（网络上下行） */
+/** Large card: single value (CPU/memory/disk) or two values (network up/down) */
 function MetricCard({
   label,
   icon,
@@ -1089,7 +1094,7 @@ type QueryLike = {
   };
 };
 
-/** 趋势图卡片：统一的 loading / 失败重试 / 空状态分支 + 单卡刷新按钮 */
+/** Trend chart card: unified loading / failure-retry / empty-state branches + per-card refresh button */
 function TrendCard({
   title,
   subtitle,
@@ -1110,7 +1115,8 @@ function TrendCard({
   const { t } = useTranslation();
   const points = query.data?.points.length ?? 0;
   const refresh = onRefresh ?? (() => query.refetch());
-  // 窗口起点早于原始保留期时后端改走小时聚合——告诉用户这段不是原始 10 秒数据
+  // When the window start is earlier than the original retention period, the backend switches to hourly
+  // aggregation — tell the user this isn't raw 10s data
   const hourly = query.data?.resolution === "hourly";
   return (
     <Card>
@@ -1162,8 +1168,8 @@ function TrendCard({
             retrying={query.isFetching}
           />
         ) : !query.data ? (
-          // 首次加载（占位数据也没有）才出骨架屏——后续的窗口滚动 / 自动刷新
-          // 都靠 placeholderData: keepPreviousData 把旧曲线顶住，不该闪屏。
+          // Only show skeleton on initial load (no placeholder data) — subsequent window scrolls / auto-refresh
+          // rely on placeholderData: keepPreviousData to hold the old curve, shouldn't flash a skeleton.
           <Skeleton className="h-64 w-full" />
         ) : points > 1 ? (
           <div className="relative">
@@ -1186,7 +1192,7 @@ function TrendCard({
   );
 }
 
-/** 分段切换（绝对值 / 占比、按 CPU / 按内存）：项目里的统一控件外形 */
+/** Segmented switch (absolute / ratio, by CPU / by memory): the project's unified control appearance */
 function Segmented({
   value,
   onChange,
@@ -1217,7 +1223,7 @@ function Segmented({
   );
 }
 
-/** 详情页字段：标签在上、值在下 */
+/** Detail page field: label on top, value below */
 function Field({ label, value }: { label: string; value: string }) {
   return (
     <div className="min-w-0">

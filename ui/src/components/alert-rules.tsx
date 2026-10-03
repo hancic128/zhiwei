@@ -1,9 +1,9 @@
 /**
- * 告警规则管理——从原「告警」页搬来，现落在设置页里。
+ * Alert rule management — moved from the original "Alerts" page, now lives in the Settings page.
  *
- * 设计：docs/superpowers/specs/2026-09-19-product-structure-design.md §6
- * （「告警」是从数据源出发的命名；用户要的是「要处理的事」，所以告警降为待办的
- * 一个来源，规则配置属于「对象的属性」，进设置。）
+ * Design: docs/superpowers/specs/2026-09-19-product-structure-design.md §6
+ * ("Alerts" is named from the data source's perspective; users want "things to handle",
+ * so alerts become one source of the todo list, and rule configuration is a "property of the object", going into Settings).
  */
 import * as React from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
@@ -49,7 +49,7 @@ export function RulesTable({
   onToggle: (r: AlertRule) => void;
   onDelete: (r: AlertRule) => void;
   onEdit: (r: AlertRule) => void;
-  /** 有一条规则正在改启停：期间把所有开关置灰，避免连点打出一串请求 */
+  /** One rule is being toggled: disable all switches during this period to avoid rapid-clicking firing a string of requests */
   toggling?: boolean;
 }) {
   const { t } = useTranslation();

@@ -35,11 +35,13 @@ right channel.
 
 ## Languages
 
-- Issues and PRs in English or 中文 are both welcome. The maintainer
-  reads both natively
-- Code comments, commit messages, and most documentation are in English
-  so that the public codebase stays single-language; the UI itself is
-  bilingual (en-US / zh-CN)
+- Issues, PRs, and discussion posts should be in **English**. The maintainer
+  reads English natively
+- Code comments, commit messages, and most documentation are in English so
+  that the public codebase stays single-language. The console UI is bilingual
+  (en-US / zh-CN) and can be switched from the floating controls
+- Translations of README or docs are welcome as PRs; no separate `*.zh-CN.md`
+  is shipped with the project
 
 ---
 

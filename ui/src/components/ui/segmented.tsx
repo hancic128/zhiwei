@@ -1,6 +1,6 @@
 import { cn } from "@/lib/utils";
 
-/** 分段切换（绝对值 / 占比、CPU / 内存）：项目里的统一控件外形 */
+/** Segmented switch (absolute / percentage, CPU / memory): unified control shape used across the project */
 export function Segmented({
   value,
   onChange,

@@ -24,9 +24,9 @@ import { usePrefs } from "@/components/prefs-provider";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useToast } from "@/components/ui/toast";
 
-/** 规范 7.16.2 / 02：5 个主题色圆点的展示色 */
+/** Spec 7.16.2 / 02: display colors for the 5 theme color dots */
 const THEME_SWATCH: Record<Theme, string> = {
-  zhiwei: "#c73225", // 朱砂
+  zhiwei: "#c73225", // cinnabar
   indigo: "#4f46e5",
   emerald: "#059669",
   rose: "#e11d48",
@@ -35,11 +35,12 @@ const THEME_SWATCH: Record<Theme, string> = {
 };
 
 /**
- * 气泡菜单列出可用页面视图。
+ * Popover menu lists available page views.
  *
- * 不含「设置」：设置是常驻入口（侧边栏固定可见），在悬浮气泡里重复
- * 只会让「快捷控制」这组变浑浊——本人 2026-09-22 明确要求。
- * 其余页面项与侧边栏保持同一份清单。
+ * Doesn't include "Settings": settings is a persistent entry (always visible in sidebar),
+ * repeating it in the floating popover only muddies the "quick controls" group —
+ * required on 2026-09-22.
+ * Other page items share the same list as the sidebar.
  */
 const NAV_ITEMS = [
   { to: "/", key: "todo", icon: Inbox },
@@ -51,12 +52,12 @@ const NAV_ITEMS = [
 ] as const;
 
 /**
- * 规范 7.16 + 禁止清单：
- *  - 收敛为一个主按钮（Settings 图标，brand 实底），hover/focus 展开子按钮组
- *  - 主按钮展开时图标旋转 45°；移出约 180ms 后自动收起；Esc 立即收起
- *  - 子按钮独立、纯 SVG 图标、禁止文字、禁止二元切换
- *  - 主题色气泡在按钮左侧水平展开，避免遮挡同级按钮
- *  - 退出登录必须走 ConfirmDialog，用 rose 语义色区分
+ * Spec 7.16 + prohibited list:
+ *  - Converged to a single main button (Settings icon, brand solid), hover/focus expands sub-button group
+ *  - Main button icon rotates 45° when expanded; auto-collapses ~180ms after mouse leaves; Esc collapses immediately
+ *  - Sub-buttons are independent, SVG-only icons, no text, no binary toggles
+ *  - Theme color popover expands horizontally to the left of the button to avoid covering peer buttons
+ *  - Logout must go through ConfirmDialog, distinguished with rose semantic color
  */
 export function FloatingControls() {
   const { t } = useTranslation();
@@ -108,12 +109,13 @@ export function FloatingControls() {
 
   return (
     <>
-      {/* 悬停展开只认「按钮本体」：handler 挂在外层容器上时，收起状态那列
-          透明区域也算悬停区，鼠标扫过主按钮**上方**就会展开。 */}
+      {/* Hover-to-expand only recognizes the "button body": when the handler is on the outer container,
+          the transparent column in collapsed state also counts as hover area, so sweeping the mouse
+          above the main button triggers expand. */}
       <div className="fixed bottom-6 right-6 z-30 flex flex-col items-end gap-3">
-        {/* 子按钮组：展开后自上而下 导航 → 帮助 → 主题色 → 明暗 → 语言 → 退出。
-            折叠时 display:none（而非仅透明）：不收起的透明列会占满整段竖直区域，
-            叠在页面右下角的内容上方。 */}
+        {/* Sub-button group: when expanded, top-to-bottom: nav → help → theme color → light/dark → language → logout.
+            When folded, display:none (not just transparent): a non-collapsed transparent column would occupy
+            the entire vertical strip, overlapping content at the bottom-right. */}
         <div
           className={cn(
             "flex flex-col items-end gap-3 transition-opacity duration-200",
@@ -122,7 +124,7 @@ export function FloatingControls() {
           onMouseEnter={cancelClose}
           onMouseLeave={scheduleClose}
         >
-          {/* 页面导航 */}
+          {/* Page navigation */}
           <Popover.Root>
             <Popover.Trigger asChild>
               <button type="button" className={subButton} aria-label={t("nav.menu")}>
@@ -151,7 +153,7 @@ export function FloatingControls() {
             </Popover.Portal>
           </Popover.Root>
 
-          {/* 主题色：气泡在按钮左侧水平展开 */}
+          {/* Theme color: popover expands horizontally to the left of the button */}
           <Popover.Root>
             <Popover.Trigger asChild>
               <button
@@ -199,7 +201,7 @@ export function FloatingControls() {
             </Popover.Portal>
           </Popover.Root>
 
-          {/* 明暗：单按钮直接切换，图标跟随状态 */}
+          {/* Light/dark: single button toggles directly, icon follows state */}
           <button
             type="button"
             className={subButton}
@@ -217,7 +219,7 @@ export function FloatingControls() {
             )}
           </button>
 
-          {/* 语言：单按钮直接切换，右下角徽标显示当前语言 */}
+          {/* Language: single button toggles directly, badge at bottom-right shows current language */}
           <button
             type="button"
             className={cn(subButton, "relative")}
@@ -226,11 +228,11 @@ export function FloatingControls() {
           >
             <Globe className="w-5 h-5" aria-hidden="true" />
             <span className="absolute -bottom-1 -right-1 w-5 h-5 rounded-full bg-brand-600 text-white text-[10px] font-bold flex items-center justify-center">
-              {prefs.locale === "en-US" ? "EN" : "中"}
+              {prefs.locale === "en-US" ? "EN" : "ZH"}
             </span>
           </button>
 
-          {/* 退出登录：危险操作，rose 语义色 + 必须确认 */}
+          {/* Logout: dangerous action, rose semantic color + must confirm */}
           <button
             type="button"
             className={logoutButton}
@@ -241,10 +243,11 @@ export function FloatingControls() {
           </button>
         </div>
 
-        {/* 主按钮：brand 实底，展开时图标旋转 45°。
-            图标用齿轮（本人指定保留），但它**不是**「设置页入口」——
-            语义是「展开快捷控制」，相应地 aria-label 也不叫设置，
-            免得这组里出现第二个叫「设置」的按钮（设置是侧边栏的常驻项）。 */}
+        {/* Main button: brand solid, icon rotates 45° when expanded.
+            Icon uses gear (per request), but it's **not** the "settings page entry" —
+            its semantics is "expand quick controls", and accordingly the aria-label
+            doesn't say settings, to avoid having two buttons called "settings" in this group
+            (settings is the persistent sidebar entry). */}
         <button
           type="button"
           aria-label={t("action.quickControls")}
@@ -292,7 +295,7 @@ export function FloatingControls() {
   );
 }
 
-/** 供语言徽标复用：当前 locale 的短标 */
+/** For reuse by language badge: short label for current locale */
 export function localeBadge(_locale: Locale) {
   return "EN";
 }

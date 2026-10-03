@@ -1,21 +1,21 @@
 name: release
 
-# 打 tag（v0.0.1 这种）就出预编译二进制，供 scripts/install.sh 下载。
-# 也支持手动触发，用来验证矩阵是否还能编过。
+# Tag push (v0.0.1 etc.) produces prebuilt binaries for scripts/install.sh to download.
+# Also supports manual dispatch to verify the build matrix still works.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
 
 permissions:
-  contents: write # 上传 Release 资产需要
+  contents: write # required to upload Release assets
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # 六个目标平台。Linux 三个用 cross（Docker 里带好交叉工具链），
-  # macOS 两个用 GitHub 的原生 arm64 / x86_64 runner。
+  # Six target platforms. Three Linux variants use cross (Docker images with the cross toolchains).
+  # Two macOS variants use GitHub-hosted native arm64 / x86_64 runners.
   build:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
@@ -23,20 +23,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # 主流 VPS。musl 版本静态链接，不挑 glibc 版本，优先给用户装这个。
+          # Mainstream VPS. musl variants are statically linked and don't depend on a specific glibc version — preferred for users.
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
-          # gnu 版本留给需要动态链接、或 musl 出问题的场景。
+          # gnu variants are kept for cases that need dynamic linking, or where musl fails.
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-          # 本地开发 / 自建。
-          # 两个 darwin 都在 macos-latest（Apple Silicon）上编：Apple 工具链
-          # 原生就能交叉到 x86_64，不需要专门找 Intel runner——旧的 macos-13
-          # 标签随时可能被 GitHub 退役，那样整条流水线会红。
+          # Local development / self-hosted.
+          # Both darwin builds run on macos-latest (Apple Silicon): Apple's toolchain
+          # cross-compiles to x86_64 natively, so we don't need a dedicated Intel runner —
+          # the old macos-13 label can be retired by GitHub at any time, which would break
+          # the pipeline.
           - target: aarch64-apple-darwin
             os: macos-latest
           - target: x86_64-apple-darwin
@@ -44,14 +45,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 用 stable 而不是仓库的 rust-version：这只是产出二进制，
-      # 低版本兼容性由 Cargo.toml 的 1.75 声明保证，不必用老工具链编。
+      # Use stable rather than the repo's rust-version: this job only produces binaries.
+      # Low-version compatibility is guaranteed by Cargo.toml's 1.75 declaration, so we
+      # don't need to compile with an older toolchain.
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      # cross 把交叉链接器、musl 工具链都封在镜像里，省得逐个装
-      # gcc-aarch64-linux-gnu / musl-tools 还要跟 ring 的 C 代码较劲。
+      # cross ships the cross-linker and musl toolchain inside a Docker image, sparing us
+      # from installing gcc-aarch64-linux-gnu / musl-tools and wrestling with ring's C code.
       - name: Install cross
         if: runner.os == 'Linux'
         uses: taiki-e/install-action@cross
@@ -72,18 +74,20 @@ jobs:
           [ -n "$version" ] || version="manual-${GITHUB_SHA::7}"
           dir="target/${{ matrix.target }}/release"
 
-          # 资产名**不带版本号**：install.sh 要用
-          # releases/latest/download/<固定名字> 这条稳定路径。
+          # Asset name has **no version suffix**: install.sh uses the stable
+          # releases/latest/download/<fixed-name> path.
           asset="zhiwei-${{ matrix.target }}"
           staging="$(mktemp -d)"
           cp "$dir/zhiwei-node" "$staging/"
           cp "$dir/zhiwei-monitor" "$staging/"
-          # ops-server（控制平面）必须一起打包：命令通道（删容器 / 拉日志 /
-          # 重启主机）要它签名才能下发，只发 monitor 的部署会一直报
-          # 「ops-server 不可用：Connection refused」。
+          # ops-server (control plane) must be packaged together: the command channel
+          # (delete container / fetch logs / restart host) needs it to sign commands.
+          # A deployment shipping only monitor would keep reporting
+          # "ops-server unavailable: Connection refused".
           cp "$dir/zhiwei-ops" "$staging/"
-          # 分开 copy 并逐个判存在：`cp README.md LICENSE dest/` 在 LICENSE
-          # 缺失时会整条失败，可能连 README 都拷不进去（各平台 cp 行为不一致）。
+          # Copy files individually and check existence: `cp README.md LICENSE dest/`
+          # fails wholesale if LICENSE is missing, which can prevent README from being
+          # copied at all (cp behavior varies across platforms).
           for f in README.md LICENSE NOTICE; do
             if [ -f "$f" ]; then cp "$f" "$staging/"; fi
           done
@@ -93,10 +97,10 @@ jobs:
           sha256sum "$asset.tar.gz" > "$asset.tar.gz.sha256" 2>/dev/null \
             || shasum -a 256 "$asset.tar.gz" > "$asset.tar.gz.sha256"
 
-          echo "打包完成："
+          echo "Packaging complete:"
           ls -lh "$asset.tar.gz" "$asset.tar.gz.sha256"
 
-      # tag 推送才发布；手动触发只跑构建，确认矩阵没坏。
+      # Only publish on tag push; manual dispatch only runs the build to confirm the matrix isn't broken.
       - name: Upload to release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2

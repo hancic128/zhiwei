@@ -1,7 +1,8 @@
-//! 告警评估引擎。
+//! Alert evaluation engine.
 //!
-//! 在每次 telemetry 落库后运行：对每条启用规则、比对 batch 里的指标，
-//! 维护「持续 N 秒越界才告警」的状态机，状态翻转时开/关告警并推送通知。
+//! Runs after each telemetry batch lands: for each enabled rule, compares metrics in the batch,
+//! maintains the "alert only after sustained N seconds breaching" state machine, opens/closes
+//! alerts on state transitions and pushes notifications.
 
 use std::time::Duration;
 
@@ -16,7 +17,7 @@ use zhiwei_storage::alerts_repo::AlertRule;
 
 use crate::state::AppState;
 
-/// 越界判定
+/// Breach detection
 fn breaching(value: f64, op: &str, threshold: f64) -> bool {
     match op {
         "gt" => value > threshold,
@@ -47,8 +48,8 @@ fn severity_rank(s: &str) -> u8 {
     }
 }
 
-/// 指标名 →（人话名称，单位）。规则可以填任意指标名，认不出的原样展示——
-/// 好过把 `host.disk.usage` 这种内部键和没头没尾的 `92.3` 丢给用户。
+/// Metric name → (human label, unit). Rules can use any metric name; unknown ones are shown as-is —
+///// better to show the raw key like `host.disk.usage` plus `92.3` than a half-cooked abstraction.
 fn metric_label(metric: &str) -> (&str, &str) {
     match metric {
         "host.cpu.usage" => ("CPU Usage", "%"),
@@ -62,38 +63,41 @@ fn metric_label(metric: &str) -> (&str, &str) {
     }
 }
 
-/// 一条告警的「事实」——渠道渲染的唯一输入。
+/// The "facts" of an alert — the sole input for channel rendering.
 ///
-/// 四类告警源（指标 / 节点上下线 / 服务探针 / 证书到期）能拿出来的东西并不一样：
-/// 指标有当前值与阈值，探针有服务名，证书有剩余天数。所以这里不放各自的业务字段，
-/// 只放「渲染需要什么」：谁、是触发还是恢复、卡片分几栏、正文那句话。各调用点把
-/// 自己知道的填进来，渠道侧不必理解四套语义。
+/// Four alert sources (metrics / node online-offline / service probes / certificate expiry) each
+/// carry different data: metrics have current value and threshold, probes have service name, certs
+/// have days remaining. So we don't keep each source's domain fields here — only "what rendering
+/// needs": who, firing or resolved, how many card columns, the body sentence. Each call site fills
+/// in what it knows; the channel side doesn't need to understand four sets of semantics.
 pub struct AlertFacts {
-    /// 节点显示名（别名优先）
+    /// Node display name (alias preferred)
     pub node: String,
-    /// true = 告警中，false = 已恢复。标题文案与配色都由它决定
+    /// true = alert firing, false = resolved. Title text and color both depend on this
     pub firing: bool,
-    /// 卡片分栏，顺序即展示顺序（飞书每行两栏）
+    /// Card columns, order is display order (Feishu shows two per row)
     pub fields: Vec<(&'static str, String)>,
-    /// 正文那句话：说清「什么事、多严重」
+    /// The body sentence: explains "what happened, how severe"
     pub detail: String,
 }
 
-/// 「告警级别 → 展示样式」的唯一出处。
+/// The single source of truth for "alert level → display style".
 ///
-/// 同一条告警要在四个地方长成一样：飞书卡片的标题栏、Slack 的侧栏色、载荷里的
-/// 级别字段、纯文本标题的 emoji。以前这几处各写各的（卡片一套 template、文案一套
-/// emoji、webhook 只透传 `severity`），想加一档就得改三处 match。现在只认这张表，
-/// 渠道侧也不必再理解 severity 的取值。
+/// The same alert must look the same in four places: the Feishu card title bar, the Slack sidebar
+/// color, the severity field in the payload, the emoji in the plain-text title. Previously each
+/// place had its own copy (card template, emoji text, webhook just passed `severity` through) —
+/// adding a new tier meant editing three match blocks. Now everyone reads from this one table,
+/// and the channel side doesn't need to know severity values.
 ///
-/// 配色沿用青鸟（bluebird）调色板的命名：飞书要枚举名，Slack 要 hex，都从这里翻译。
+/// Colors follow the Bluebird palette naming convention: Feishu wants enum names, Slack wants hex,
+/// both are translated from here.
 struct LevelStyle {
-    /// 稳定 key：青鸟通用来源的 `event`、通用 webhook 的 `level`（也是配色查表的键）
+    /// Stable key: Bluebird generic source's `event`, generic webhook's `level` (also the key for color lookup)
     key: &'static str,
-    /// 中文档位名
+    /// English display label
     label: &'static str,
     emoji: &'static str,
-    /// 飞书消息卡片 `header.template` 的枚举名
+    /// Feishu message card `header.template` enum name
     feishu: &'static str,
     /// Slack `attachment.color`
     slack: &'static str,
@@ -128,10 +132,11 @@ fn level_style(rule: &AlertRule, firing: bool) -> LevelStyle {
     }
 }
 
-/// 通知标题行——**所有渠道共用同一份文案**。
+/// Notification title line — **all channels share the same text**.
 ///
-/// 推送只展示标题时（手机通知栏、IM 折叠态、Bark）也得能回答「哪台机器、多严重、
-/// 什么事」，所以节点与级别都压在这一行里，正文才可以说细节。
+/// When push shows only the title (phone notification bar, IM collapsed state, Bark), it must
+/// still answer "which machine, how severe, what happened" — so node and level are crammed into
+/// this one line, and the body can elaborate on details.
 fn title_line(rule: &AlertRule, facts: &AlertFacts) -> String {
     let lv = level_style(rule, facts.firing);
     format!(
@@ -140,7 +145,7 @@ fn title_line(rule: &AlertRule, facts: &AlertFacts) -> String {
     )
 }
 
-/// 卡片分栏的 JSON 形态（通用 webhook / 青鸟载荷用）。
+/// JSON form of card columns (used by generic webhook / Bluebird payload).
 fn fields_json(facts: &AlertFacts) -> Vec<serde_json::Value> {
     facts
         .fields
@@ -149,35 +154,39 @@ fn fields_json(facts: &AlertFacts) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// 动态值进 `lark_md` 前的中和。
+/// Neutralization of dynamic values before they go into `lark_md`.
 ///
-/// 只有 `<` 能开启 lark_md 标签，而节点别名是**没有字符校验**的用户输入
-/// （见 `routes::normalize_alias`，只 trim + 限长），别名填 `<at id=all></at>`
-/// 就会真的 @所有人。这里换成全角 `＜` 而不是删掉：既挡掉标签解析，又不会像删字符
-/// 那样把「阈值 `> 90%`」这类正常内容弄坏（`>` 在 lark_md 里不是标记，原样留着）。
+/// Only `<` can open a lark_md tag, and node aliases are **user input without character
+/// validation** (see `routes::normalize_alias`, which only trims + limits length). If an alias
+/// contains `<at id=all></at>` it will genuinely @everyone. We replace it with fullwidth `＜`
+/// rather than deleting it: that blocks tag parsing while not breaking legitimate content like
+/// "threshold `> 90%`" the way character removal would (`>` is not a lark_md marker and is left alone).
 fn md_escape(raw: &str) -> String {
     raw.replace('<', "＜").replace('\n', " ").replace('\r', " ")
 }
 
-/// 动态值进 Slack `mrkdwn` 前的中和：只挡 `<`，保留换行。
+/// Neutralization of dynamic values before Slack `mrkdwn`: only blocks `<`, preserves newlines.
 ///
-/// Slack 的 `<@U123>` / `<!channel>` 会真的 @ 人，和 lark_md 是同一类问题；
-/// 但 Slack 的正文（探针失败原因等）可能是多行，不能像 lark_md 分栏那样压成一行。
+/// Slack's `<@U123>` / `<!channel>` will genuinely @ people — same class of issue as lark_md;
+/// but Slack body text (probe failure reasons, etc.) can be multi-line, so we can't collapse it
+/// to one line the way lark_md card columns do.
 fn slack_escape(raw: &str) -> String {
     raw.replace('<', "＜").replace('\r', "")
 }
 
-/// 卡片底部来源行（正文与标题都给了信息，这里只标来源）
+/// Card footer source line (body and title already convey info; this just labels the source)
 const CARD_SOURCE: &str = "zhiwei monitor";
 
-/// 飞书消息卡片（`msg_type: interactive` 的 `content`）。
+/// Feishu message card (the `content` of a `msg_type: interactive` message).
 ///
-/// 用卡片 1.0 而不是 2.0：2.0 经消息接口下发时会落到旧客户端的兜底文案
-/// （「请升级至最新版本客户端，以查看内容」），实测踩过。1.0 的 `header.template`
-/// 一样能上色，「折叠态也能一眼看出是告警还是恢复」这个诉求用 1.0 就能满足。
+/// Using card 1.0 not 2.0: 2.0 messages sent via the message API fall back to fallback text on
+/// old clients ("Please upgrade to the latest client to view content") — hit this in practice.
+/// 1.0's `header.template` can still apply color, and "collapsed state should show at a glance
+/// whether it's an alert or recovery" is fully satisfied by 1.0.
 ///
-/// 这里只返回**裸卡片对象**：走 im/v1/messages 时它要被字符串化塞进 `content`，
-/// 外面那层 `{"msg_type":..,"card":..}` 是自定义机器人 webhook 的壳，加了会被拒。
+/// Returns only the **bare card object**: when sending via im/v1/messages it gets stringified
+/// into `content`; wrapping it in another `{"msg_type":..,"card":..}` (custom bot webhook
+/// envelope) will be rejected.
 fn feishu_card(rule: &AlertRule, facts: &AlertFacts) -> serde_json::Value {
     let lv = level_style(rule, facts.firing);
 
@@ -199,7 +208,7 @@ fn feishu_card(rule: &AlertRule, facts: &AlertFacts) -> serde_json::Value {
         elements.push(serde_json::json!({ "tag": "div", "fields": fields }));
         elements.push(serde_json::json!({ "tag": "hr" }));
     }
-    // 正文用 plain_text：探针失败原因这类内容不可控，不能被当成 lark_md 标签解析
+    // Body uses plain_text: probe failure reasons are uncontrolled content and must not be parsed as lark_md tags
     elements.push(serde_json::json!({
         "tag": "div",
         "text": { "tag": "plain_text", "content": facts.detail },
@@ -222,11 +231,12 @@ fn feishu_card(rule: &AlertRule, facts: &AlertFacts) -> serde_json::Value {
     })
 }
 
-/// Slack Block Kit 卡片：彩色侧栏 + header + 分栏 + 正文 + 来源。
+/// Slack Block Kit card: colored sidebar + header + columns + body + source.
 ///
-/// 侧栏色按级别走 [`level_style`] 的 hex——只发一行纯文本时，折叠态看不出是告警还是
-/// 恢复。顶层 `text` 仍然保留：它是不支持 blocks 的客户端的回退文案，也是老接收端
-/// 一直认的字段，去掉等于把既有集成弄坏。
+/// Sidebar color follows the level's hex from [`level_style`] — when only one line of plain
+/// text is sent, the collapsed state doesn't show whether it's an alert or recovery. Top-level
+/// `text` is still kept: it's the fallback for clients without block support, and the field that
+/// legacy receivers have always read — removing it would break existing integrations.
 fn slack_payload(rule: &AlertRule, facts: &AlertFacts) -> serde_json::Value {
     let lv = level_style(rule, facts.firing);
 
@@ -249,7 +259,7 @@ fn slack_payload(rule: &AlertRule, facts: &AlertFacts) -> serde_json::Value {
                 })
             })
             .collect();
-        // Slack 一节最多 10 格
+        // Slack max 10 fields per section
         fields.truncate(10);
         blocks.push(serde_json::json!({ "type": "section", "fields": fields }));
     }
@@ -263,14 +273,14 @@ fn slack_payload(rule: &AlertRule, facts: &AlertFacts) -> serde_json::Value {
     }));
 
     serde_json::json!({
-        // 顶层 `text` 在 Slack 里是按 mrkdwn 解析的，动态值同样要中和
+        // Top-level `text` is parsed as mrkdwn by Slack, dynamic values must also be neutralized
         "text": slack_escape(&plain_text(rule, facts)),
         "blocks": blocks,
         "attachments": [{ "color": lv.slack, "text": "" }],
     })
 }
 
-/// 对一批 telemetry 跑一遍全部启用规则。
+/// Run all enabled rules against a batch of telemetry.
 pub async fn evaluate(state: &AppState, node_id: &NodeId, hostname: &str, batch: &TelemetryBatch) {
     // Get user-defined rules
     let rules = match state.storage.alerts().enabled_rules().await {
@@ -301,9 +311,10 @@ pub async fn evaluate(state: &AppState, node_id: &NodeId, hostname: &str, batch:
     let repo = state.storage.alerts();
 
     for rule in all_rules {
-        // 用统一的抽取口径：派生指标（内存百分比、网络合计）也能被规则用上。
-        // 这条曾经只查 `metrics[]`——播种规则「内存使用率过高」用的 host.mem.usage
-        // 节点从不上报，于是那条规则永远不会触发。
+        // Use a unified extraction path: derived metrics (memory percentage, network totals)
+        // can also be used by rules. This used to only query `metrics[]` — the seeded rule
+        // "Memory usage high" uses host.mem.usage, which nodes never report, so that rule
+        // would never fire.
         let Some(value) = crate::routes::extract_metric(batch, &rule.metric) else {
             continue;
         };
@@ -318,14 +329,14 @@ pub async fn evaluate(state: &AppState, node_id: &NodeId, hostname: &str, batch:
         };
 
         if hit && !st.firing {
-            // 首次越界：记下起点；已持续足够久才开告警
+            // First breach: record the start; only open the alert after sustained long enough
             let since = st.breaching_since_unix_nano.unwrap_or(now);
             let held_ns = now.saturating_sub(since);
             let need_ns = rule.duration_seconds.saturating_mul(1_000_000_000);
 
             if held_ns >= need_ns {
-                // 文案要能一眼回答「哪台机器、什么指标、现在多少」——
-                // 节点名在通知标题行（见 plain_text），这里给出指标与量值。
+                // The text should answer at a glance "which machine, what metric, what value now" —
+                // node name is in the notification title line (see plain_text); here we give metric and value.
                 let (label, unit) = metric_label(&rule.metric);
                 let sym = op_symbol(&rule.op);
                 let threshold = rule.threshold;
@@ -380,7 +391,7 @@ pub async fn evaluate(state: &AppState, node_id: &NodeId, hostname: &str, batch:
                     .await;
             }
         } else if !hit {
-            // 恢复正常：若在告警中则关闭
+            // Recovered: if currently firing, close it
             if st.firing {
                 if let Some(alert_id) = st.open_alert_id {
                     if let Err(e) = repo.resolve_alert(alert_id, now).await {
@@ -394,7 +405,7 @@ pub async fn evaluate(state: &AppState, node_id: &NodeId, hostname: &str, batch:
                 .upsert_state(rule.id, node_id.as_str(), None, false, None, Some(value))
                 .await;
         } else {
-            // 持续越界中：只更新最新值
+            // Still breaching: only update the latest value
             let _ = repo
                 .upsert_state(
                     rule.id,
@@ -409,7 +420,7 @@ pub async fn evaluate(state: &AppState, node_id: &NodeId, hostname: &str, batch:
     }
 }
 
-/// 按严重度投递到启用的通知渠道。
+/// Deliver to enabled notification channels by severity.
 async fn notify(state: &AppState, rule: &AlertRule, facts: &AlertFacts, now: i64) {
     let channels = match state.storage.alerts().list_channels().await {
         Ok(c) => c,
@@ -423,7 +434,7 @@ async fn notify(state: &AppState, rule: &AlertRule, facts: &AlertFacts, now: i64
         .into_iter()
         .filter(|c| c.enabled && severity_rank(&c.min_severity) <= severity_rank(&rule.severity))
     {
-        // 配置不完整的渠道（老库里可能存着缺字段的行）只记一条日志，不反复刷投递失败
+        // Channels with incomplete config (old DB rows may lack fields) only log once, don't repeatedly spam delivery failures
         if let Err(msg) = validate_channel(
             &ch.kind,
             &ch.url,
@@ -441,23 +452,24 @@ async fn notify(state: &AppState, rule: &AlertRule, facts: &AlertFacts, now: i64
     }
 }
 
-/// 通知渠道支持的种类（字段设计对齐 bluebird 的分发渠道）。
+/// Supported notification channel kinds (field design aligns with Bluebird's delivery channels).
 ///
-/// 各自要填的东西不同：
-/// - `feishu`：走官方应用接口——App ID + App Secret 换 tenant_access_token，
-///   再按 receive_id（群 / 用户）发消息，不需要机器人地址；
-/// - `slack`：Incoming Webhook 地址，地址本身即凭据；
-/// - `bluebird`：青鸟（bluebird）通知网关的**通用来源**地址 `…/hooks/<来源 ID>`
-///   加一枚 Token——把告警交给它去并发分发到 Bark / 飞书 / 企业微信等，zhiwei 不再自己接；
-/// - `webhook`：自己的接收端，optional a Token 做鉴权。
+/// Each kind requires different fields:
+/// - `feishu`: uses the official app API — App ID + App Secret exchange for tenant_access_token,
+///   then sends via receive_id (group / user), no bot address needed;
+/// - `slack`: Incoming Webhook URL, the URL itself is the credential;
+/// - `bluebird`: Bluebird notification gateway's **generic source** URL `…/hooks/<source ID>`
+///   plus a Token — hands the alert to it for concurrent delivery to Bark / Feishu / WeCom, etc.;
+///   ZhiWei no longer integrates those directly;
+/// - `webhook`: our own receiver, optional Token for auth.
 pub const CHANNEL_KINDS: &[&str] = &["feishu", "slack", "bluebird", "webhook"];
 
-/// 飞书的 receive_id_type 白名单（与 open.feishu.cn 的 im/v1/messages 一致）。
-/// 填错时飞书回 99992402，不如在保存前就拦下来。
+/// Whitelist of Feishu receive_id_type values (consistent with im/v1/messages on open.feishu.cn).
+/// Feishu returns 99992402 if wrong — better to catch it before saving.
 pub const FEISHU_RECEIVE_ID_TYPES: &[&str] =
     &["chat_id", "open_id", "user_id", "union_id", "email"];
 
-/// 飞书开放平台的地址（可用环境变量指到 Lark 国际版 / 自建代理 / 测试桩）
+/// Feishu open platform base URL (can point to Lark international / self-hosted proxy / test stub via env var)
 fn feishu_base() -> String {
     match std::env::var("ZHIWEI_FEISHU_BASE") {
         Ok(v) if !v.trim().is_empty() => v.trim().trim_end_matches('/').to_string(),
@@ -465,10 +477,10 @@ fn feishu_base() -> String {
     }
 }
 
-/// 保存 / 测试之前的参数校验，返回可直接展示给用户的错误信息。
+/// Parameter validation before save / test, returns an error message directly displayable to the user.
 ///
-/// 三种渠道要填的字段不同，前端也会按类型显示表单；这里是最后一道闸——
-/// 老控制台、手写 curl、迁移过来的老数据都会从这条路上过。
+/// Three channel kinds need different fields, and the frontend shows different forms per type —
+/// this is the last gate. Old console, hand-written curl, migrated legacy data all pass through here.
 pub fn validate_channel(
     kind: &str,
     url: &str,
@@ -497,7 +509,7 @@ pub fn validate_channel(
             }
             if !FEISHU_RECEIVE_ID_TYPES.contains(&receive_id_type) {
                 return Err(format!(
-                    "unknown Feishu receive ID type {}（supported：{}）",
+                    "unknown Feishu receive ID type {} (supported: {})",
                     receive_id_type,
                     FEISHU_RECEIVE_ID_TYPES.join(" / ")
                 ));
@@ -506,7 +518,7 @@ pub fn validate_channel(
         }
         "slack" => {
             if url.trim().is_empty() {
-                return Err("Slack 需要填写 Webhook URL".into());
+                return Err("Slack: Webhook URL is required".into());
             }
             Ok(())
         }
@@ -530,8 +542,8 @@ pub fn validate_channel(
     }
 }
 
-/// 「测试」按钮用的临时渠道：只装控制台当前填的那几项，不入库。
-/// `receive_id_type` 缺省成 `chat_id`，与飞书自己的默认一致。
+/// Temporary channel for the "Test" button: only fills in what the console currently has, not saved to DB.
+/// `receive_id_type` defaults to `chat_id`, matching Feishu's own default.
 pub fn test_channel(
     kind: &str,
     url: &str,
@@ -543,7 +555,7 @@ pub fn test_channel(
     let rid_type = receive_id_type.trim();
     zhiwei_storage::alerts_repo::NotifyChannel {
         id: 0,
-        name: "测试".into(),
+        name: "Test".into(),
         kind: kind.trim().to_string(),
         url: url.trim().to_string(),
         secret: secret.trim().to_string(),
@@ -559,8 +571,8 @@ pub fn test_channel(
     }
 }
 
-/// 投递一条通知到指定渠道。真告警与控制台的「测试」按钮共用这一条路径——
-/// 否则「测试通过、真出事不发」这种偏差没人发现得了。
+/// Deliver one notification to the specified channel. Real alerts and the console's "Test" button
+/// share this path — otherwise no one would notice "test passed but real events don't send".
 pub async fn deliver(
     ch: &zhiwei_storage::alerts_repo::NotifyChannel,
     rule: &AlertRule,
@@ -575,30 +587,33 @@ pub async fn deliver(
             let payload = feishu_message_body(ch.receive_id.trim(), &body);
             post_json(&url, &token, &payload).await.map(|_| ())
         }
-        // Slack 的 Incoming Webhook 地址本身即凭据，不带认证头
+        // Slack's Incoming Webhook URL is the credential itself, no auth header needed
         "slack" => post_json(&ch.url, "", &body).await.map(|_| ()),
-        // 青鸟通用来源：地址 + Token（Authorization: Bearer），与通用 webhook 同一条路
+        // Bluebird generic source: URL + Token (Authorization: Bearer), same path as generic webhook
         "bluebird" => post_json(&ch.url, &ch.secret, &body).await.map(|_| ()),
-        // 通用 webhook：`secret` 非空则带 Authorization: Bearer，接收端据此鉴权
+        // Generic webhook: if `secret` is non-empty, include Authorization: Bearer; receiver uses it for auth
         _ => post_json(&ch.url, &ch.secret, &body).await.map(|_| ()),
     }
 }
 
-/// 组装通知体。飞书给消息卡片（原本就是 `content` 要的裸卡片对象），
-/// 其余按各自协议包一层。
+/// Assemble the notification body. Feishu gets a message card (which is already the bare card
+/// object that `content` expects); the rest are wrapped per their respective protocols.
 pub fn channel_body(kind: &str, rule: &AlertRule, facts: &AlertFacts, now: i64) -> String {
     match kind {
-        // 飞书走消息卡片：彩色标题栏 + 分栏。折叠态只剩标题栏时，颜色本身就是
-        // 「严重 / 警告 / 已恢复」的信号，这是纯文本做不到的。
+        // Feishu uses message cards: colored title bar + columns. When only the title bar shows in
+        // collapsed state, the color itself signals "critical / warning / resolved" — which plain text can't.
         "feishu" => feishu_card(rule, facts).to_string(),
-        // Slack 同样给彩色卡片（侧栏色），顶层 text 留作回退
+        // Slack also gets a colored card (sidebar color), top-level text is kept as fallback
         "slack" => slack_payload(rule, facts).to_string(),
-        // 青鸟（bluebird）通用来源：收 `{"title","body","event","repo"}` 或纯文本。
-        // - `event` 是青鸟调色板的键，zhiwei 直接送级别 key（critical/warning/resolved），
-        //   青鸟侧认识这三个键就按级别上色，不认识也只是回落成中性色，不影响投递；
-        // - `fields` / `severity` 青鸟当前忽略，留给支持分栏的接收端，不算协议的一部分。
-        // 顺带一提：青鸟通用来源的事件白名单只在显式配置时生效，而面板不给通用来源配白名单，
-        // 所以这里送自定义 event 不会被静默丢掉。
+        // Bluebird generic source: accepts `{"title","body","event","repo"}` or plain text.
+        // - `event` is Bluebird's palette key; ZhiWei sends the level key directly (critical/warning/resolved),
+        //   Bluebird knows these three keys and colors by level; if it doesn't know them it just falls
+        //   back to neutral color, which doesn't affect delivery;
+        // - `fields` / `severity` are currently ignored by Bluebird, kept for receivers that support columns;
+        //   they're not part of the protocol contract.
+        // Worth noting: Bluebird generic source event whitelist only takes effect when explicitly configured,
+        // and the console doesn't expose whitelist config for generic sources, so custom events sent here
+        // won't be silently dropped.
         "bluebird" => {
             let lv = level_style(rule, facts.firing);
             serde_json::json!({
@@ -613,18 +628,19 @@ pub fn channel_body(kind: &str, rule: &AlertRule, facts: &AlertFacts, now: i64) 
             })
             .to_string()
         }
-        // webhook（含未知 kind，按 webhook 处理）：结构化 JSON
+        // webhook (including unknown kind, treated as webhook): structured JSON
         //
-        // `title` + `body` 是青鸟 / 通用 webhook 接收端的约定：收到 payload 后用
-        // `title` 当通知标题、`body` 当正文（缺这两个字段的接收端会把消息丢掉）。
-        // 但既有的自建接收端认的是 `text`，两个都给，谁也不必改。
+        // `title` + `body` is the convention for Bluebird / generic webhook receivers: after receiving
+        // the payload they use `title` as notification title and `body` as content (receivers missing
+        // these fields will drop the message). But existing self-hosted receivers expect `text`, so
+        // we send both — no one has to change.
         _ => {
             let lv = level_style(rule, facts.firing);
             serde_json::json!({
                 "title": title_line(rule, facts),
                 "text": plain_text(rule, facts),
                 "body": plain_text(rule, facts),
-                // 级别样式：接收端拿 `level` 查自己的配色，或直接用 `color`（hex）
+                // Level style: receiver uses `level` to look up its own palette, or directly uses `color` (hex)
                 "level": lv.key,
                 "color": lv.slack,
                 "emoji": lv.emoji,
@@ -641,15 +657,15 @@ pub fn channel_body(kind: &str, rule: &AlertRule, facts: &AlertFacts, now: i64) 
     }
 }
 
-/// 飞书 im/v1/messages 的发消息地址。
+/// Feishu im/v1/messages send URL.
 pub fn feishu_messages_url(base: &str, receive_id_type: &str) -> String {
     format!("{base}/open-apis/im/v1/messages?receive_id_type={receive_id_type}")
 }
 
-/// 飞书 im/v1/messages 的请求体。
+/// Feishu im/v1/messages request body.
 ///
-/// `content` 要的是「卡片对象字符串化后的 JSON」；再包一层 `card` 会被飞书拒掉
-/// （错误码 9499，现场踩过），所以这里只做转义、不加外壳。
+/// `content` expects "the stringified JSON of the card object"; wrapping it again in `card` will be
+/// rejected by Feishu (error code 9499, hit in production), so here we only escape, no envelope added.
 pub fn feishu_message_body(receive_id: &str, card: &str) -> String {
     serde_json::json!({
         "receive_id": receive_id,
@@ -659,8 +675,9 @@ pub fn feishu_message_body(receive_id: &str, card: &str) -> String {
     .to_string()
 }
 
-/// tenant_access_token 缓存：有效期 2h，按 (app_id, app_secret) 存。
-/// 告警风暴里几十条通知只该换一次 token（换取的接口也有频率限制）。
+/// tenant_access_token cache: 2h validity, keyed by (app_id, app_secret).
+/// During an alert storm, dozens of notifications should only trigger one token exchange
+/// (the exchange API also has rate limits).
 static FEISHU_TOKENS: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<(String, String), (String, i64)>>,
 > = std::sync::OnceLock::new();
@@ -674,12 +691,12 @@ fn now_unix_secs() -> i64 {
     Timestamp::now().unix_nano() / 1_000_000_000
 }
 
-/// 换取（或复用）飞书应用的 tenant_access_token。
+/// Exchange (or reuse) the Feishu app's tenant_access_token.
 async fn feishu_token(app_id: &str, app_secret: &str) -> anyhow::Result<String> {
     {
         let cache = feishu_tokens().lock().unwrap_or_else(|e| e.into_inner());
         if let Some((token, expire_at)) = cache.get(&(app_id.to_string(), app_secret.to_string())) {
-            // 提前 60s 当作过期，别卡在边界上让第一条通知撞 401
+            // Treat as expired 60s early — don't let the first notification hit 401 on the boundary
             if expire_at - 60 > now_unix_secs() {
                 return Ok(token.clone());
             }
@@ -693,7 +710,7 @@ async fn feishu_token(app_id: &str, app_secret: &str) -> anyhow::Result<String> 
     let body = serde_json::json!({ "app_id": app_id, "app_secret": app_secret }).to_string();
     let raw = post_json(&url, "", &body).await?;
     let v: serde_json::Value =
-        serde_json::from_slice(&raw).map_err(|e| anyhow::anyhow!("飞书返回的不是 JSON：{e}"))?;
+        serde_json::from_slice(&raw).map_err(|e| anyhow::anyhow!("Feishu response is not JSON: {e}"))?;
     let token = v
         .get("tenant_access_token")
         .and_then(|t| t.as_str())
@@ -701,7 +718,7 @@ async fn feishu_token(app_id: &str, app_secret: &str) -> anyhow::Result<String> 
         .to_string();
     if token.is_empty() {
         let why = body_error(&raw).unwrap_or_else(|| body_detail(&raw));
-        anyhow::bail!("换取飞书 tenant_access_token 失败{why}");
+        anyhow::bail!("Failed to exchange Feishu tenant_access_token{why}");
     }
     let expire = v.get("expire").and_then(|e| e.as_i64()).unwrap_or(7200);
     feishu_tokens()
@@ -714,11 +731,11 @@ async fn feishu_token(app_id: &str, app_secret: &str) -> anyhow::Result<String> 
     Ok(token)
 }
 
-/// 「测试通知」用的一条假规则——只为把通知体组出来，不落库、不参与求值。
+/// A fake rule for "Test notification" — only used to assemble the notification body, not saved or evaluated.
 pub fn test_rule() -> AlertRule {
     AlertRule {
         id: 0,
-        name: "测试通知".into(),
+        name: "Test Notification".into(),
         metric: "host.cpu.usage".into(),
         op: "gt".into(),
         threshold: 90.0,
@@ -730,37 +747,39 @@ pub fn test_rule() -> AlertRule {
     }
 }
 
-/// 「测试通知」用的假事实。
+/// Fake facts for "Test notification".
 ///
-/// 控制台的「测试」按钮要能**预演真实告警的样子**（含分栏），否则用户没法在群里
-/// 判断样式、只能等真出事才看见。所以这里刻意填成一条指标告警。
+/// The console's "Test" button must be able to **preview what a real alert looks like** (with
+/// card columns), otherwise users can't judge the styling in the group — they only see it when
+/// something actually goes wrong. So this deliberately fills in a metric alert.
 pub fn test_facts() -> AlertFacts {
     AlertFacts {
         node: "zhiwei-test".into(),
         firing: true,
         fields: vec![
-            ("节点", "zhiwei-test".into()),
-            ("指标", "CPU 使用率".into()),
-            ("当前值", "92.3%".into()),
-            ("阈值", "> 90%".into()),
+            ("Node", "zhiwei-test".into()),
+            ("Metric", "CPU Usage".into()),
+            ("Current", "92.3%".into()),
+            ("Threshold", "> 90%".into()),
         ],
-        detail: "这是一条测试通知，收到说明该渠道可用。".into(),
+        detail: "This is a test notification — receiving it means this channel works.".into(),
     }
 }
 
-/// IM 文本通知：一眼能看出「哪台机器、多严重、什么事」。
+/// IM text notification: at a glance shows "which machine, how severe, what happened".
 ///
-/// 第一行就是所有渠道共用的 [`title_line`]（级别 + 规则名 + 节点）——手机 / 桌面
-/// 推送只展示标题行时，也必须能看出是哪台节点。恢复用「已恢复」而不是复用「警告」，
-/// 否则手机上看着像又告警了一次。第二行是这一条的具体细节（指标量值 / 探针原因）。
+/// The first line is the shared [`title_line`] (level + rule name + node) — phone/desktop push
+/// that only shows the title line must still identify which node it is. Recovery uses "Resolved"
+/// rather than reusing "Warning", otherwise on phone it looks like another alert fired.
+/// Second line is the specific detail for this alert (metric value / probe reason).
 fn plain_text(rule: &AlertRule, facts: &AlertFacts) -> String {
     format!("{}\n{}", title_line(rule, facts), facts.detail)
 }
 
-/// 服务探针状态翻转 → 开/关告警（`source = probe`），并按严重度投递通知。
+/// Service probe state transition → open/close alert (`source = probe`), deliver notifications by severity.
 ///
-/// 通知策略：只有进入 `down`（critical）与从非 ok 恢复到 `ok` 才投递；
-/// `degraded` 只反映在界面上，避免偶发抖动刷屏。
+/// Notification policy: only push when entering `down` (critical) or recovering from non-ok to `ok`;
+/// `degraded` only reflects in the UI to avoid spammy alerts from occasional blips.
 pub async fn on_probe_transition(
     state: &AppState,
     probe: &zhiwei_storage::probes_repo::Probe,
@@ -773,21 +792,23 @@ pub async fn on_probe_transition(
     if !transition.changed {
         return;
     }
-    // 停用探针不再产生任何告警 / 通知（停用时的关闭动作在 PATCH 处理器里做，
-    // 这里兜底：节点还没拿到停用配置时，最后一拍结果别把告警重新打开）
+    // Disabled probes no longer produce any alerts / notifications (the disable close action
+    // happens in the PATCH handler; this is a fallback: before the node receives the disable
+    // config, don't let the last result reopen the alert)
     if !probe.enabled {
         return;
     }
     let repo = state.storage.alerts();
     let now = Timestamp::now().unix_nano();
-    let rule_name = format!("服务 {} · {}", probe.service_name, probe.name);
+    let rule_name = format!("Service {} · {}", probe.service_name, probe.name);
 
     if transition.new_state == STATE_OK {
         match repo.resolve_open_probe_alerts(&probe.id, now).await {
             Ok(n) if n > 0 => {
                 info!(probe = %probe.name, "Service probe recovered, alert closed");
-                // 「恢复上线」的推送受内置开关 service_online 控制；关告警本身不受
-                // 影响——人都回来了，之前那条告警再挂着会误导。
+                // The "back online" push is controlled by the builtin toggle service_online; closing
+                // the alert itself is unaffected — the person came back, leaving the old alert up
+                // would be misleading.
                 let notify_on = match repo.builtin_rule_enabled("service_online").await {
                     Ok(v) => v,
                     Err(e) => {
@@ -800,16 +821,16 @@ pub async fn on_probe_transition(
                 }
                 let rule = probe_alert_rule(&rule_name, "warning");
                 let message = format!(
-                    "服务 {} 的探针 {} 已恢复（此前 {:?}）",
-                    probe.service_name, probe.name, transition.previous_state
+                    "Probe {} for service {} recovered (previously {:?})",
+                    probe.name, probe.service_name, transition.previous_state
                 );
                 let facts = AlertFacts {
                     node: hostname.to_string(),
                     firing: false,
                     fields: vec![
-                        ("节点", hostname.to_string()),
-                        ("服务", probe.service_name.clone()),
-                        ("探针", probe.name.clone()),
+                        ("Node", hostname.to_string()),
+                        ("Service", probe.service_name.clone()),
+                        ("Probe", probe.name.clone()),
                     ],
                     detail: message,
                 };
@@ -825,8 +846,9 @@ pub async fn on_probe_transition(
         return;
     }
 
-    // 服务离线：开告警与发通知都受内置开关 service_offline 控制。
-    // 停用 = 完全不碰（不要求服务又活过来才能消红）。
+    // Service offline: opening alerts and sending notifications are both controlled by the
+    // builtin toggle service_offline. Disabled = completely untouched (no requirement that the
+    // service comes back up to clear red).
     let enabled = match repo.builtin_rule_enabled("service_offline").await {
         Ok(v) => v,
         Err(e) => {
@@ -840,20 +862,21 @@ pub async fn on_probe_transition(
 
     let severity = "critical";
     let detail = if transition.last_error.is_empty() {
-        format!("连续 {} 次检查失败", transition.consecutive_failures)
+        format!("{} consecutive check failures", transition.consecutive_failures)
     } else {
         transition.last_error.clone()
     };
     let message = format!(
-        "服务 {} 的探针 {} 异常（down）：{detail}",
-        probe.service_name, probe.name
+        "Probe {} for service {} is down: {detail}",
+        probe.name, probe.service_name
     );
 
     match repo
         .open_probe_alert(
             &probe.id, &rule_name,
-            // 告警记在「上报这台结果」的节点上：探针可能绑了多台（或任意节点），
-            // 记上报节点才能一眼看出是哪台机器探到的
+            // Alert recorded on the node that "reported this result": the probe may be bound to
+            // multiple nodes (or any node), recording the reporting node shows at a glance which
+            // machine detected it
             node_id, hostname, severity, &message, now,
         )
         .await
@@ -865,12 +888,12 @@ pub async fn on_probe_transition(
                 node: hostname.to_string(),
                 firing: true,
                 fields: vec![
-                    ("节点", hostname.to_string()),
-                    ("服务", probe.service_name.clone()),
-                    ("探针", probe.name.clone()),
+                    ("Node", hostname.to_string()),
+                    ("Service", probe.service_name.clone()),
+                    ("Probe", probe.name.clone()),
                     (
-                        "连续失败",
-                        format!("{} 次", transition.consecutive_failures),
+                        "Consecutive failures",
+                        format!("{} times", transition.consecutive_failures),
                     ),
                 ],
                 detail: message,
@@ -881,8 +904,8 @@ pub async fn on_probe_transition(
     }
 }
 
-/// 探针告警没有指标规则行，这里造一个只用于「命名 + 严重度」的载体，
-/// 让既有 notify() 的严重度过滤逻辑可以原样复用。
+/// Probe alerts have no metric rule row; this creates a carrier for just "name + severity",
+/// so the existing notify() severity filter logic can be reused as-is.
 fn probe_alert_rule(name: &str, severity: &str) -> AlertRule {
     AlertRule {
         id: 0,
@@ -898,13 +921,13 @@ fn probe_alert_rule(name: &str, severity: &str) -> AlertRule {
     }
 }
 
-/// 节点离线告警的载体——和 `probe_alert_rule` 一样，纯用来喂 notify() 的
-/// 「严重度过滤 + 命名」。`metric = host.online` 是为了和探针/证书告警的
-/// 指标列做明显区分（前缀 `host.`），不会和真实指标冲突。
+/// Carrier for node offline alerts — like `probe_alert_rule`, purely for feeding notify()'s
+/// "severity filter + naming". `metric = host.online` is to clearly distinguish from probe/cert
+/// alert metric columns (prefix `host.`), won't conflict with real metrics.
 fn node_offline_alert_rule(severity: &str) -> AlertRule {
     AlertRule {
         id: 0,
-        name: "节点离线".to_string(),
+        name: "Node offline".to_string(),
         metric: "host.online".to_string(),
         op: "eq".to_string(),
         threshold: 0.0,
@@ -916,12 +939,12 @@ fn node_offline_alert_rule(severity: &str) -> AlertRule {
     }
 }
 
-/// 节点上线事件的载体——和 `node_offline_alert_rule` 对仗，文案/严重度不同。
-/// 命名空间同样用 `host.online`，与离线共享一行通知模板。
+/// Carrier for node online events — pairs with `node_offline_alert_rule`, different text/severity.
+/// Same namespace `host.online`, sharing one notification template with offline.
 fn node_online_alert_rule() -> AlertRule {
     AlertRule {
         id: 0,
-        name: "节点上线".to_string(),
+        name: "Node online".to_string(),
         metric: "host.online".to_string(),
         op: "eq".to_string(),
         threshold: 1.0,
@@ -933,35 +956,35 @@ fn node_online_alert_rule() -> AlertRule {
     }
 }
 
-/// 节点上下线事件——一次性把一组节点的状态变化喂进来。
+/// Node online/offline events — feed in a batch of node state changes at once.
 ///
-/// 设计上由后台任务每 ~30 秒扫一遍所有节点算出来（见 `spawn_node_liveness_watcher`）：
-/// 上次在线 / 现在仍在线 = 跳过；上次在线 / 现在离线 = 开告警 + 通知；
-/// 上次离线 / 现在在线 = 关旧离线告警 + 发「节点 X 已上线」通知；
-/// 其它（从未上报 / 刚入网观察期） = 跳过。
+/// Design: a background task scans all nodes every ~30s (see `spawn_node_liveness_watcher`):
+/// last_seen online / still online now = skip; last_seen online / offline now = open alert + notify;
+/// last_seen offline / online now = close old offline alert + send "Node X is online" notification;
+/// others (never reported / new observation window) = skip.
 ///
-/// 一个节点同时只允许一条未解决的离线告警（`open_node_offline_alert` 内部
-/// 检查 `open_node_offline_alert_id`），所以重复触发不会堆历史。
+/// One node is allowed at most one unresolved offline alert at a time (checked inside
+/// `open_node_offline_alert` via `open_node_offline_alert_id`), so repeated triggers won't pile up history.
 ///
-/// 两条通知都受 `builtin_alert_rules` 里的 enabled 控制：
-/// `node_offline` / `node_online`。停用某条就跳过对应的开告警 / 发通知。
+/// Both notifications are controlled by the enabled flag in `builtin_alert_rules`:
+/// `node_offline` / `node_online`. Disabling one skips the corresponding alert-open / notification-send.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Liveness {
     Online,
     Offline,
 }
 
-/// 评估一组节点的最新 liveness，把翻转写入 alerts 表并按渠道投递通知。
+/// Evaluate the latest liveness of a batch of nodes, write transitions to the alerts table and deliver notifications.
 ///
-/// 调用方要做的只是「拿 `last_seen` 算 online / offline」，别的事
-/// （去重、关旧告警、严重度、通知文案、builtin 启用开关）都收在这里。
+/// Callers only need to "compute online / offline from `last_seen`" — everything else
+/// (deduplication, closing old alerts, severity, notification text, builtin enable toggles) is contained here.
 pub async fn on_node_liveness_change(state: &AppState, transitions: &[(String, String, Liveness)]) {
     for (node_id, hostname, status) in transitions {
         let now = Timestamp::now().unix_nano();
         let repo = state.storage.alerts();
         match status {
             Liveness::Offline => {
-                // 内置规则关着就什么都不做——既不开告警也不发通知
+                // If the builtin rule is off, do nothing — neither open alert nor send notification
                 let enabled = match repo.builtin_rule_enabled("node_offline").await {
                     Ok(v) => v,
                     Err(e) => {
@@ -973,7 +996,7 @@ pub async fn on_node_liveness_change(state: &AppState, transitions: &[(String, S
                     continue;
                 }
 
-                // 已经在开着就只刷 message / started_at，不再通知（避免每 30 秒刷屏）
+                // Already open: only refresh message / started_at, don't re-notify (avoid spam every 30s)
                 let existing = match repo.open_node_offline_alert_id(node_id).await {
                     Ok(id) => id,
                     Err(e) => {
@@ -994,7 +1017,7 @@ pub async fn on_node_liveness_change(state: &AppState, transitions: &[(String, S
                     }
                 };
                 if existing.is_none() {
-                    // 只在「第一次开」时通知，避免 30s 周期里反复推
+                    // Only notify on "first open" — avoid repeated pushes in the 30s cycle
                     let rule = node_offline_alert_rule(severity);
                     let facts = AlertFacts {
                         node: hostname.clone(),
@@ -1007,8 +1030,8 @@ pub async fn on_node_liveness_change(state: &AppState, transitions: &[(String, S
                 }
             }
             Liveness::Online => {
-                // 关掉遗留的离线告警（这条不受 builtin 开关影响：人都上线了，
-                // 之前那条告警再挂着会误导运维）
+                // Close the leftover offline alert (this is not affected by the builtin toggle:
+                // the person came back online, leaving the old alert up would be misleading to ops)
                 let resolved = match repo.resolve_node_offline_alerts(node_id, now).await {
                     Ok(n) => n,
                     Err(e) => {
@@ -1017,8 +1040,9 @@ pub async fn on_node_liveness_change(state: &AppState, transitions: &[(String, S
                     }
                 };
 
-                // 「上线」是独立事件：只要从 Offline 翻转到 Online 就发通知，
-                // 不依赖 resolved > 0——resolve 是为了清旧告警，与发通知是两条路。
+                // "Online" is a separate event: as long as the transition goes from Offline to Online
+                // we send a notification, not dependent on resolved > 0 — resolve is for clearing old
+                // alerts, sending notification is a separate path.
                 let enabled = match repo.builtin_rule_enabled("node_online").await {
                     Ok(v) => v,
                     Err(e) => {
@@ -1031,7 +1055,7 @@ pub async fn on_node_liveness_change(state: &AppState, transitions: &[(String, S
                     let facts = AlertFacts {
                         node: hostname.clone(),
                         firing: true,
-                        fields: vec![("节点", hostname.clone()), ("状态", "已上线".to_string())],
+                        fields: vec![("Node", hostname.clone()), ("Status", "online".to_string())],
                         detail: format!("Node {hostname} is online"),
                     };
                     notify(state, &rule, &facts, now).await;
@@ -1045,16 +1069,17 @@ pub async fn on_node_liveness_change(state: &AppState, transitions: &[(String, S
     }
 }
 
-/// 证书到期评估：每次节点交回快照后跑一遍。
+/// Certificate expiry evaluation: runs once each time a node sends back a snapshot.
 ///
-/// 判定口径：
-///   * 只看**配了通知开关**的来源（`enabled && notify_enabled`）；
-///   * 剩余天数 ≤ `notify_days_before` 即告警：已过期 critical、临期 warning；
-///   * 一张证书一条告警，`source_ref = {source_id}:{证书路径}`；
-///   * 续签（剩余天数回到阈值内）/ 路径改了 / 来源删了 → 自动 resolved。
+/// Decision criteria:
+///   * Only look at sources with **notification enabled** (`enabled && notify_enabled`);
+///   * Days remaining ≤ `notify_days_before` triggers alert: expired = critical, nearing = warning;
+///   * One alert per certificate, `source_ref = {source_id}:{cert_path}`;
+///   * Renewal (days remaining goes back above threshold) / path changed / source deleted → auto resolved.
 ///
-/// 之所以跟着快照走而不是单独起定时任务：证书只在快照里出现，趁数据最新时
-/// 判定最省事，也不会出现「快照换了、告警还停在旧值」的错配。
+/// Following snapshots rather than a separate scheduled task: certificates only appear in snapshots,
+/// judging while the data is freshest is simplest and avoids the mismatch of "snapshot changed but
+/// alert stuck on old value".
 pub async fn evaluate_cert_expiry(
     state: &AppState,
     node_id: &str,
@@ -1125,22 +1150,22 @@ pub async fn evaluate_cert_expiry(
             let severity = if expired { "critical" } else { "warning" };
             let message = if expired {
                 format!(
-                    "证书 {name}（{path}）已于 {} 天前过期",
+                    "Certificate {name} ({path}) expired {} days ago",
                     (-days_left).floor().max(0.0) as i64
                 )
             } else {
                 format!(
-                    "证书 {name}（{path}）还有 {} 天到期（阈值 {} 天）",
+                    "Certificate {name} ({path}) expires in {} days (threshold {} days)",
                     days_left.floor().max(0.0) as i64,
                     source.notify_days_before
                 )
             };
             let source_ref = format!("{}:{}", source.id, path);
 
-            // 全局开关：证书告警按严重度拆两档（cert_expiring / cert_expired），
-            // 与每条来源自己的 `notify_enabled` 是「都开才报」的与关系。
-            // 停用那一档时，既不开新的，也把已经开的关掉——本地阈值之上
-            // 本来就不进这个循环，能走到这里说明「该不该报」已经成立。
+            // Global toggle: cert alerts are split by severity into two tiers (cert_expiring / cert_expired),
+            // forming an AND with each source's own `notify_enabled`. Disabling a tier both stops opening
+            // new alerts and closes already-open ones — being above the local threshold means we wouldn't
+            // enter this loop in the first place, so getting here means "should it report" is already true.
             let gate = if expired {
                 "cert_expired"
             } else {
@@ -1163,7 +1188,7 @@ pub async fn evaluate_cert_expiry(
             }
 
             match open_by_ref.remove(&source_ref) {
-                // 已经开过：只在严重度/文案变化时更新，避免每次快照都写库
+                // Already opened: only update on severity/text change, avoid writing DB on every snapshot
                 Some(id) => {
                     if let Some(existing) = open.iter().find(|a| a.id == id) {
                         if existing.severity != severity || existing.message != message {
@@ -1174,7 +1199,7 @@ pub async fn evaluate_cert_expiry(
                     }
                 }
                 None => {
-                    let rule_name = format!("证书到期 · {name}");
+                    let rule_name = format!("Certificate expiry · {name}");
                     match repo
                         .open_cert_alert(
                             &source_ref,
@@ -1193,18 +1218,18 @@ pub async fn evaluate_cert_expiry(
                             info!(cert = %name, %severity, id, "Certificate expiry alert firing");
                             let rule = cert_alert_rule(&rule_name, severity);
                             let days_field = if expired {
-                                format!("已过期 {} 天", (-days_left).floor().max(0.0) as i64)
+                                format!("Expired {} days ago", (-days_left).floor().max(0.0) as i64)
                             } else {
-                                format!("{} 天", days_left.floor().max(0.0) as i64)
+                                format!("{} days", days_left.floor().max(0.0) as i64)
                             };
                             let facts = AlertFacts {
                                 node: hostname.to_string(),
                                 firing: true,
                                 fields: vec![
-                                    ("节点", hostname.to_string()),
-                                    ("证书", name.clone()),
-                                    ("剩余", days_field),
-                                    ("提醒阈值", format!("{} 天", source.notify_days_before)),
+                                    ("Node", hostname.to_string()),
+                                    ("Certificate", name.clone()),
+                                    ("Remaining", days_field),
+                                    ("Notify threshold", format!("{} days", source.notify_days_before)),
                                 ],
                                 detail: message,
                             };
@@ -1217,7 +1242,7 @@ pub async fn evaluate_cert_expiry(
         }
     }
 
-    // 剩下的都是「不再成立」的：证书续签了、文件删了、来源停用/删除了
+    // Everything left is "no longer valid": certificate renewed, file deleted, source disabled/deleted
     for (source_ref, id) in open_by_ref {
         if let Err(e) = repo.resolve_alert(id, now).await {
             warn!(error = %e, %source_ref, "Failed to close cert alert");
@@ -1227,7 +1252,7 @@ pub async fn evaluate_cert_expiry(
     }
 }
 
-/// 证书来源是否"拥有"这份证书（与 certs_api 的判定保持一致）
+/// Whether a certificate source "owns" this certificate (consistent with certs_api's judgment)
 fn cert_belongs_to(
     source: &zhiwei_storage::cert_sources_repo::CertSource,
     cert: &serde_json::Value,
@@ -1256,8 +1281,8 @@ fn cert_alert_rule(name: &str, severity: &str) -> AlertRule {
     }
 }
 
-/// 容器启停事件的载体——纯用来喂 notify() 的严重度过滤 + 命名，
-/// 与 `probe_alert_rule` / `node_offline_alert_rule` 同一个套路。
+/// Carrier for container start/stop events — purely for feeding notify()'s severity filter + naming,
+/// same pattern as `probe_alert_rule` / `node_offline_alert_rule`.
 fn container_event_rule(name: &str, severity: &str) -> AlertRule {
     AlertRule {
         id: 0,
@@ -1273,7 +1298,7 @@ fn container_event_rule(name: &str, severity: &str) -> AlertRule {
     }
 }
 
-/// 一条容器事件。
+/// One container event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContainerEvent {
     Started { id: String, name: String },
@@ -1284,20 +1309,20 @@ fn container_running(state: &str) -> bool {
     state.eq_ignore_ascii_case("running")
 }
 
-/// 快照差异（纯函数，便于单测）：两次容器快照 JSON → 事件列表。
+/// Snapshot diff (pure function, easy to unit-test): two container snapshot JSON → event list.
 ///
-/// 主判据是 **state（running / 非 running）**，时间戳只用来补「周期内重启」：
-/// 老版本 node-agent 不上报 started_at / finished_at（proto3 缺省即 0），
-/// 拿时间戳当主判据会在 agent 升级后把所有存量容器误报一遍「已启动 / 已停止」。
+/// Main criterion is **state (running / non-running)**; timestamps only supplement "restart within cycle":
+/// old node-agent versions don't report started_at / finished_at (proto3 default is 0), using timestamps
+/// as the main criterion would cause all existing containers to be misreported as "started / stopped" after agent upgrade.
 ///
-/// - 出现在快照里且 running → `Started`（新容器、exited→running、周期内重启）；
-///   其中「周期内重启」要求上次的 started_at 已知且本次更新（> 0），
-///   避免把「刚学会读启动时间」当成「刚启动」；
-/// - running→非 running，或从快照里消失（被 rm / 清理）→ `Stopped`；
-/// - 其余（非 running→非 running、新增但已退出）不发事件——一次性容器
-///   （跑完即退、`--rm`）不该每次同拍都刷一遍。
+/// - Appearing in snapshot and running → `Started` (new container, exited→running, restart within cycle);
+///   "restart within cycle" requires the previous started_at to be known and updated (> 0),
+///   to avoid treating "just learned to read start time" as "just started";
+/// - running→non-running, or disappearing from snapshot (rm / cleanup) → `Stopped`;
+/// - Others (non-running→non-running, new but already exited) don't emit events — one-shot containers
+///   (exit immediately, `--rm`) shouldn't repeat the same state every snapshot.
 ///
-/// 返回顺序：停止在前、启动在后，稳定可测。
+/// Return order: stopped first, started last, stable and testable.
 fn diff_containers(previous_json: &str, current_json: &str) -> Vec<ContainerEvent> {
     let prev = parse_container_map(previous_json);
     let cur = parse_container_map(current_json);
@@ -1307,7 +1332,7 @@ fn diff_containers(previous_json: &str, current_json: &str) -> Vec<ContainerEven
     let mut stopped = Vec::new();
     let mut started = Vec::new();
 
-    // 1) 快照里消失 = 已停止（被清理 / rm）
+    // 1) Disappearing from snapshot = stopped (cleanup / rm)
     for (id, (name, _started, _running)) in &prev {
         if !cur.contains_key(id) {
             stopped.push(ContainerEvent::Stopped {
@@ -1317,10 +1342,10 @@ fn diff_containers(previous_json: &str, current_json: &str) -> Vec<ContainerEven
         }
     }
 
-    // 2) 仍在快照里的容器：按 state 判定启停
+    // 2) Containers still in snapshot: judge start/stop by state
     for (id, (name, cur_started, cur_running)) in &cur {
         match prev.get(id) {
-            // 新容器：只有真的在跑才算「启动」（跑完即退的一次性容器不报）
+            // New container: only count as "started" if actually running (one-shot containers that exit immediately don't report)
             None => {
                 if *cur_running {
                     started.push(ContainerEvent::Started {
@@ -1340,12 +1365,11 @@ fn diff_containers(previous_json: &str, current_json: &str) -> Vec<ContainerEven
                         id: id.clone(),
                         name: name.clone(),
                     });
-                } else if *prev_running
-                    && *cur_running
+                } else if *prev_running && *cur_running
                     && *prev_started > 0
                     && *cur_started > *prev_started
                 {
-                    // 周期内重启：状态一直是 running，只有启动时间变了
+                    // Restart within cycle: state stayed running, only start time changed
                     started.push(ContainerEvent::Started {
                         id: id.clone(),
                         name: name.clone(),
@@ -1359,16 +1383,18 @@ fn diff_containers(previous_json: &str, current_json: &str) -> Vec<ContainerEven
     stopped
 }
 
-/// 容器启停事件检测：对比同一节点上次与本次的容器快照，把差异转成事件。
+/// Container start/stop event detection: compare the previous and current container snapshots for the
+/// same node, convert the diff into events.
 ///
-/// 直接在 node_inventory 的最新一份快照上做差（每 5 分钟同拍一次），
-/// 基线存在数据库里，节点 / monitor 重启都不会丢。没有任何历史快照
-/// （`previous_json = None`）时只立基线、不发事件——避免升级 / 初装时
-/// 把存量容器刷成一屏「已启动」。差异口径见 [`diff_containers`]。
+/// Diff is computed directly on the latest snapshot from node_inventory (same time every 5 minutes);
+/// baseline is stored in the database, so node / monitor restarts don't lose it. When there's no
+/// historical snapshot (`previous_json = None`), only establish the baseline, don't emit events —
+/// avoids flashing a screen of "started" for existing containers after upgrade / fresh install.
+/// Diff criteria see [`diff_containers`].
 ///
-/// 两条通知都受 `builtin_alert_rules` 控制：`container_started` /
-/// `container_stopped`。「停止」开一条 `source = container` 的告警（待办里
-/// 能看到、可静默），「启动」只关告警 + 发通知。
+/// Both notifications are controlled by `builtin_alert_rules`: `container_started` /
+/// `container_stopped`. "Stop" opens a `source = container` alert (visible in todo, can be silenced),
+/// "start" only closes the alert + sends notification.
 pub async fn on_container_events(
     state: &AppState,
     node_id: &str,
@@ -1377,7 +1403,7 @@ pub async fn on_container_events(
     current_json: &str,
 ) {
     let Some(previous) = previous_json else {
-        return; // 还没有历史基线，这次先立起来
+        return; // No historical baseline yet, just establish it this round
     };
     let events = diff_containers(previous, current_json);
     if events.is_empty() {
@@ -1411,7 +1437,7 @@ pub async fn on_container_events(
                 match repo
                     .open_container_alert(
                         &id,
-                        "容器停止",
+                        "Container stopped",
                         node_id,
                         hostname,
                         "warning",
@@ -1422,13 +1448,13 @@ pub async fn on_container_events(
                 {
                     Ok(alert_id) => {
                         info!(container = %name, alert_id, %node_id, "Container stopped alert firing");
-                        let rule = container_event_rule("容器停止", "warning");
+                        let rule = container_event_rule("Container stopped", "warning");
                         let facts = AlertFacts {
                             node: hostname.to_string(),
                             firing: true,
                             fields: vec![
-                                ("节点", hostname.to_string()),
-                                ("容器", name.clone()),
+                                ("Node", hostname.to_string()),
+                                ("Container", name.clone()),
                                 ("ID", short.clone()),
                             ],
                             detail: message,
@@ -1455,13 +1481,13 @@ pub async fn on_container_events(
                     continue;
                 }
                 let message = format!("Container {name} ({short}) started");
-                let rule = container_event_rule("容器启动", "info");
+                let rule = container_event_rule("Container started", "info");
                 let facts = AlertFacts {
                     node: hostname.to_string(),
                     firing: true,
                     fields: vec![
-                        ("节点", hostname.to_string()),
-                        ("容器", name.clone()),
+                        ("Node", hostname.to_string()),
+                        ("Container", name.clone()),
                         ("ID", short.clone()),
                     ],
                     detail: message,
@@ -1473,8 +1499,8 @@ pub async fn on_container_events(
     }
 }
 
-/// 快照 JSON → { container_id: (name, started_at_unix_nano, running) }。
-/// 字段可能与 node-agent 版本不完全一致，取不到就按 0 / false 处理。
+/// Snapshot JSON → { container_id: (name, started_at_unix_nano, running) }.
+/// Field names may not exactly match node-agent versions, treat missing values as 0 / false.
 fn parse_container_map(json: &str) -> std::collections::HashMap<String, (String, i64, bool)> {
     let mut out = std::collections::HashMap::new();
     let Ok(list) = serde_json::from_str::<Vec<serde_json::Value>>(json) else {
@@ -1505,17 +1531,17 @@ fn parse_container_map(json: &str) -> std::collections::HashMap<String, (String,
     out
 }
 
-/// 投递一个 JSON 请求体，返回响应体。
+/// Deliver a JSON request body, return the response body.
 ///
-/// `token` 非空时带 `Authorization: Bearer <token>`——飞书应用接口用它带
-/// tenant_access_token，自建接收端可以用它做鉴权；Slack 的 Incoming Webhook
-/// 地址本身就是「地址即凭据」，留空即可。
+/// When `token` is non-empty, includes `Authorization: Bearer <token>` — Feishu app API uses it
+/// to carry tenant_access_token, self-hosted receivers can use it for auth; Slack's Incoming
+/// Webhook URL is itself the "URL is the credential", just leave it empty.
 pub async fn post_json(url: &str, token: &str, body: &str) -> anyhow::Result<Vec<u8>> {
     let url = url.to_string();
     let authority = url
         .strip_prefix("http://")
         .or_else(|| url.strip_prefix("https://"))
-        .ok_or_else(|| anyhow::anyhow!("仅支持 http(s) webhook"))?;
+        .ok_or_else(|| anyhow::anyhow!("only http(s) webhooks are supported"))?;
     let tls = url.starts_with("https://");
     let (host_port, path) = match authority.find('/') {
         Some(i) => (&authority[..i], &authority[i..]),
@@ -1532,27 +1558,27 @@ pub async fn post_json(url: &str, token: &str, body: &str) -> anyhow::Result<Vec
         tokio::net::TcpStream::connect((host, port)),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("连接超时"))??;
+    .map_err(|_| anyhow::anyhow!("connection timed out"))??;
 
-    // 飞书 / Slack 的地址都是 https；自建接收端多半是内网明文 http
+    // Feishu / Slack URLs are all https; self-hosted receivers are mostly internal plaintext http
     if tls {
         let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(tls_config()?));
         let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
-            .map_err(|e| anyhow::anyhow!("非法主机名 {host}: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("invalid hostname {host}: {e}"))?;
         let tls_stream = tokio::time::timeout(
             Duration::from_secs(5),
             connector.connect(server_name, stream),
         )
         .await
-        .map_err(|_| anyhow::anyhow!("TLS 握手超时"))?
-        .map_err(|e| anyhow::anyhow!("TLS 握手失败：{e}"))?;
+        .map_err(|_| anyhow::anyhow!("TLS handshake timed out"))?
+        .map_err(|e| anyhow::anyhow!("TLS handshake failed: {e}"))?;
         send_post(tls_stream, host, path, token, body).await
     } else {
         send_post(stream, host, path, token, body).await
     }
 }
 
-/// 系统根证书（webhook 目标都是正经证书：飞书 / Slack 或用户自己的域名）
+/// System root certificates (webhook targets all have proper certs: Feishu / Slack or user's own domain)
 fn tls_config() -> anyhow::Result<rustls::ClientConfig> {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -1561,7 +1587,7 @@ fn tls_config() -> anyhow::Result<rustls::ClientConfig> {
         .with_no_client_auth())
 }
 
-/// POST 一个 JSON body 并读回响应体。http 与 https 共用（TcpStream 与 TlsStream 都实现同一组 trait）。
+/// POST a JSON body and read back the response. Shared by http and https (TcpStream and TlsStream both implement the same set of traits).
 async fn send_post<S>(
     stream: S,
     host: &str,
@@ -1590,7 +1616,7 @@ where
 
     let res = tokio::time::timeout(Duration::from_secs(5), sender.send_request(req))
         .await
-        .map_err(|_| anyhow::anyhow!("请求超时"))??;
+        .map_err(|_| anyhow::anyhow!("request timed out"))??;
     let status = res.status();
     let body = res
         .into_body()
@@ -1599,22 +1625,22 @@ where
         .map(|b| b.to_bytes())
         .unwrap_or_default();
     if !status.is_success() {
-        anyhow::bail!("接口返回 {status}{}", body_detail(&body));
+        anyhow::bail!("API returned {status}{}", body_detail(&body));
     }
-    // 也有渠道失败仍返回 2xx：错误码在 body 里，不看就会把失败当成投递成功
+    // Some channels still return 2xx on failure: error code is in body, ignoring it would treat failure as successful delivery
     if let Some(e) = body_error(&body) {
-        anyhow::bail!("接口返回 {status}，{e}");
+        anyhow::bail!("API returned {status}, {e}");
     }
     Ok(body.to_vec())
 }
 
-/// 从响应体里挖出「为什么失败」。
+/// Dig out "why it failed" from the response body.
 ///
-/// 飞书把错误码放在 body（10003/10014 凭据不对、230001 接收 ID 与类型不匹配、
-/// 99991672 权限没开），HTTP 状态往往还是 200——只看状态就把失败当成功。
+/// Feishu puts the error code in body (10003/10014 credentials wrong, 230001 receive ID doesn't match type,
+/// 99991672 permission not enabled), HTTP status is often still 200 — checking only the status treats failure as success.
 fn body_error(body: &[u8]) -> Option<String> {
     let v: serde_json::Value = serde_json::from_slice(body).ok()?;
-    // 飞书 code/msg；Slack 成功时 body 是纯文本 "ok"，解析不出 JSON
+    // Feishu code/msg; Slack success body is plain text "ok", can't be parsed as JSON
     let code = v.get("code").or_else(|| v.get("errcode"))?.as_i64()?;
     if code == 0 {
         return None;
@@ -1624,17 +1650,17 @@ fn body_error(body: &[u8]) -> Option<String> {
         .or_else(|| v.get("errmsg"))
         .and_then(|m| m.as_str())
         .unwrap_or("");
-    Some(format!("错误码 {code}（{msg}）{}", channel_hint(code)))
+    Some(format!("error code {code} ({msg}){}", channel_hint(code)))
 }
 
-/// 失败时把响应体带上（截断到 200 字符），便于自建接收端排查
+/// Include the response body on failure (truncated to 200 chars), helps self-hosted receiver troubleshooting
 fn body_detail(body: &[u8]) -> String {
     let text = String::from_utf8_lossy(body);
     let text = text.trim();
     if text.is_empty() {
         String::new()
     } else {
-        format!("：{}", text.chars().take(200).collect::<String>())
+        format!(": {}", text.chars().take(200).collect::<String>())
     }
 }
 
@@ -1652,7 +1678,7 @@ fn channel_hint(code: i64) -> &'static str {
     }
 }
 
-/// 首次启动时写入几条默认规则，避免告警页空着。
+/// Insert a few default rules on first start to avoid an empty alerts page.
 pub async fn seed_default_rules(state: &AppState) -> anyhow::Result<()> {
     let repo = state.storage.alerts();
     if repo.count_rules().await? > 0 {
@@ -1661,7 +1687,7 @@ pub async fn seed_default_rules(state: &AppState) -> anyhow::Result<()> {
     let now = Timestamp::now().unix_nano();
     let defaults: [(&str, &str, &str, f64, i64, &str); 4] = [
         (
-            "CPU 持续高负载",
+            "CPU sustained high load",
             "host.cpu.usage",
             "gt",
             90.0,
@@ -1669,7 +1695,7 @@ pub async fn seed_default_rules(state: &AppState) -> anyhow::Result<()> {
             "warning",
         ),
         (
-            "CPU 长时间打满",
+            "CPU sustained maximum",
             "host.cpu.usage",
             "gt",
             98.0,
@@ -1677,7 +1703,7 @@ pub async fn seed_default_rules(state: &AppState) -> anyhow::Result<()> {
             "critical",
         ),
         (
-            "内存使用率过高",
+            "Memory usage high",
             "host.mem.usage",
             "gt",
             90.0,
@@ -1701,48 +1727,53 @@ pub async fn seed_default_rules(state: &AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 「多久没上报」算离线——和前端 `livenessOf()` 同口径（见 ui/src/lib/utils.ts）。
-/// 60s 是「刚刚还活着」；再往后由各告警规则各自的 duration 决定要不要告警。
+/// "How long without reporting" counts as offline — same criterion as the frontend's
+/// `livenessOf()` (see ui/src/lib/utils.ts). 60s means "just alive"; beyond that, each alert rule's
+/// own duration decides whether to alert.
 pub const NODE_OFFLINE_AFTER_MS: i64 = 60_000;
 
-/// 后台 liveness 巡检的周期。
+/// Background liveness scan interval.
 ///
-/// 30s 是平衡值：太短会疯狂查库；太长会让「离线 → 告警」这条链感觉拖沓
-/// （最坏情况要等一个完整周期才能进待办）。考虑到 telemetry 默认 10s 一次，
-/// 30s 周期能保证任何节点失联后 ≤ 90s 内（= 60s 阈值 + 30s 巡检周期）出告警。
+/// 30s is the balance: too short hammers the DB; too long makes the "offline → alert" chain feel
+/// sluggish (worst case needs a full cycle to enter todo). Given telemetry defaults to once per 10s,
+/// the 30s interval guarantees any node that's lost contact triggers an alert within ≤ 90s
+/// (= 60s threshold + 30s scan interval).
 const LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
-/// monitor 重启后的「误报压住」窗口。
+/// "False alarm suppression" window after monitor restart.
 ///
-/// 重启耗时段里所有节点都不会上报，它们的 `last_seen` 看起来 ≥ 60s 阈值。
-/// 直接跑第一轮就会按「离线」全部告警一次，节点重连之后又自动恢复——告警
-/// 页面会被刷一屏假的。120s 是经验值：超过这个时长的重启通常不是普通的
-/// rolling restart，而是真的整个集群挂了，那时再报警也来得及。
+/// During restart, no node reports — their `last_seen` looks ≥ 60s threshold. Running the first
+/// scan would alert on all of them as "offline", and they'd auto-recover when they reconnect —
+/// flooding the alerts page with fake alerts. 120s is empirical: restarts longer than this are
+/// usually not normal rolling restarts but the whole cluster being down, and alerting then is fine.
 ///
-/// 期间不读 last_seen_state、不发任何 transition：第一轮真正的「首轮」
-/// 在 warmup 之后做，逻辑保持不变（None→Offline 仍会真告警）。
+/// During this window, don't read last_seen_state, don't send any transitions: the first real
+/// "first round" happens after warmup, logic stays the same (None→Offline still really alerts).
 pub const LIVENESS_WARMUP_MS: i64 = 120_000;
 
-/// 起一个常驻任务，周期扫所有节点的 `last_seen_unix_nano`，把翻转写到 alerts 表。
+/// Spawn a long-running task that periodically scans all nodes' `last_seen_unix_nano`,
+/// writing transitions to the alerts table.
 ///
-/// 第一次跑不通知——冷启动那几十秒里每个节点都「没拉过命令 / 没上报」，并不是故障；
-/// 只在「曾经记过某个状态、这次变了」时才动 alerts / 通知。
+/// First scan doesn't notify — during cold start the tens of seconds where every node has "no
+/// pull command / no report" isn't a fault; we only act on alerts / notifications when
+/// "we once recorded a state, and this time it changed".
 ///
-/// 设计上不动 telemetry / 探针：节点持续在线时「最近一次」会一直更新，但本任务只看
-/// 是否过了 60s 阈值，对冷启动 / 单次抖动都友好。
+/// By design doesn't touch telemetry / probes: while a node stays online its "most recent" is always
+/// updated, but this task only cares about whether 60s threshold has passed, friendly to cold starts
+/// and single blips.
 pub fn spawn_node_liveness_watcher(state: AppState) {
     tokio::spawn(async move {
-        // 启动 5s 后再跑第一轮：给 telemetry 上报留时间，避免误报冷启动期。
+        // Wait 5s after startup before first scan: give telemetry reporting time, avoid false alarms during cold start.
         tokio::time::sleep(Duration::from_secs(5)).await;
-        // 用 HashMap 记「上一轮认为它处于什么状态」，没记过的就跳过——
-        // 「从未上报」的节点（刚入网 / 离线很久）不该一上来就报离线。
+        // Use HashMap to record "what state we considered each node in last round", skip unrecorded ones —
+        // "never reported" nodes (newly joined / offline a long time) shouldn't be reported offline immediately.
         let mut last_seen_state: std::collections::HashMap<String, Liveness> =
             std::collections::HashMap::new();
 
         loop {
-            // warmup 检查搬到 compute_transitions 里面了：函数自己拿到
-            // monitor_uptime_ms，整段决定要不要发 transition。
-            // 这样调用点只剩一个干净的「跑一轮 + 记状态 + 通知」。
+            // warmup check moved into compute_transitions: the function itself gets
+            // monitor_uptime_ms and the whole thing decides whether to send transitions.
+            // This way the call site is just a clean "run one round + record state + notify".
             let transitions =
                 match compute_transitions(&state, &last_seen_state, state.started_at_ms).await {
                     Ok(t) => t,
@@ -1752,7 +1783,7 @@ pub fn spawn_node_liveness_watcher(state: AppState) {
                         continue;
                     }
                 };
-            // 先把状态记下来再通知，避免 notify 期间又来一遍相同的转换
+            // Record state first then notify, to avoid same transitions arriving again during notify
             for (id, _, liveness) in &transitions {
                 last_seen_state.insert(id.clone(), *liveness);
             }
@@ -1764,14 +1795,14 @@ pub fn spawn_node_liveness_watcher(state: AppState) {
     });
 }
 
-/// 算一次「状态翻转」：每个节点拿最新 last_seen 算 Liveness，
-/// 再和上一轮的对照——只有「上一轮 + 这一轮都能确定」才报。
+/// Compute one round of "state transitions": for each node, get the latest last_seen and compute
+/// Liveness, then compare with the previous round — only report when "both previous and current rounds can confirm it".
 ///
-/// `monitor_started_at_unix_ms` 是 monitor 进程启动的 Unix 毫秒，用来
-/// 抑制重启后的冷启动误报：见 [`LIVENESS_WARMUP_MS`]。
-/// warmup 期内**任何 transition 都不发**——包括「首轮就把所有 offline
-/// 节点 push 一次」那条路径；否则重启耗时段里所有节点的 last_seen 都
-/// 看起来 ≥ 60s 阈值，照样会刷一屏假离线。
+/// `monitor_started_at_unix_ms` is the Unix milliseconds when the monitor process started, used to
+/// suppress cold-start false alarms after restart: see [`LIVENESS_WARMUP_MS`].
+/// During warmup **no transitions are sent** — including the "first round pushes all offline nodes
+/// once" path; otherwise during restart all nodes' last_seen would look ≥ 60s threshold and
+/// still flood a screen of fake offline alerts.
 async fn compute_transitions(
     state: &AppState,
     last_seen_state: &std::collections::HashMap<String, Liveness>,
@@ -1780,10 +1811,10 @@ async fn compute_transitions(
     let nodes = state.storage.nodes().list_all().await?;
     let now_ms = Timestamp::now().unix_nano() / 1_000_000;
     let mut out = Vec::new();
-    // monitor 重启后 cold-start 压住：所有 transition 都先不发，等节点
-    // 重连稳下来再说。`monitor_started_at_unix_ms` 来自 monitor 启动时刻的
-    // Unix ms；老的二进制/测试可能传 0，用 saturating_sub 让它直接当成「
-    // 启动非常久」跑正常逻辑，不会被 stuck 在 warmup 里。
+    // Suppress cold-start after monitor restart: all transitions are held first, wait for nodes
+    // to reconnect and stabilize. `monitor_started_at_unix_ms` comes from the monitor startup Unix ms;
+    // old binaries / tests may pass 0, saturating_sub treats it as "started a long time ago" and
+    // runs normal logic, won't get stuck in warmup.
     let monitor_uptime_ms = now_ms.saturating_sub(monitor_started_at_unix_ms);
     if monitor_uptime_ms < LIVENESS_WARMUP_MS {
         tracing::debug!(
@@ -1794,7 +1825,7 @@ async fn compute_transitions(
         return Ok(out);
     }
     for n in nodes {
-        // 还没上报过的节点（刚入网 / 离线很久）跳过本轮：再给一个周期的窗口。
+        // Nodes that haven't reported yet (newly joined / offline a long time) skip this round: give one more cycle window.
         let Some(last_seen) = n.last_seen_unix_nano else {
             continue;
         };
@@ -1804,7 +1835,7 @@ async fn compute_transitions(
         } else {
             Liveness::Offline
         };
-        // 仅在「上一轮记过、且与现在不同」时才报，避免冷启动噪声。
+        // Only report when "previous round recorded, and different from now", to avoid cold-start noise.
         match last_seen_state.get(&n.id) {
             Some(prev) if *prev != current => {
                 let hostname = if !n.alias.is_empty() {
@@ -1815,10 +1846,11 @@ async fn compute_transitions(
                 out.push((n.id, hostname, current));
             }
             None => {
-                // 第一轮：记一下当前状态但不通知——避免重启后报一屏「刚启动就恢复」。
-                // 但 offline 的节点**第一轮就报**：monitor 长时间重启之后就该接住。
-                // 注意：warmup 期我们已经在函数顶上提前 return 了；走到这里说明
-                // 已经过了 warmup，monitor 起码跑了 LIVENESS_WARMUP_MS，正常行为。
+                // First round: record current state but don't notify — avoid flashing "just started, recovered"
+                // after restart. But offline nodes **are reported in the first round**: after a long
+                // monitor restart we should pick them up. Note: warmup already returned early at the
+                // top of the function; reaching here means we've passed warmup, monitor has run for at
+                // least LIVENESS_WARMUP_MS, normal behavior.
                 if current == Liveness::Offline {
                     let hostname = if !n.alias.is_empty() {
                         n.alias.clone()
@@ -1897,8 +1929,8 @@ mod tests {
         assert_eq!(v["color"], "#2da44e");
     }
 
-    /// 青鸟（bluebird）通用来源的契约：`title` + `body`，级别走 `event`
-    /// （青鸟拿它查自己的调色板）。Token 走 Authorization: Bearer，与通用 webhook 同路。
+    /// Bluebird generic source contract: `title` + `body`, level via `event`
+    /// (Bluebird uses it to look up its palette). Token via Authorization: Bearer, same path as generic webhook.
     #[test]
     fn bluebird_channel_follows_generic_source_contract() {
         let v: serde_json::Value = serde_json::from_str(&channel_body(
@@ -1914,7 +1946,7 @@ mod tests {
         assert_eq!(v["fields"][2]["label"], "Value");
         assert_eq!(v["at_unix_nano"], 8);
 
-        // 正文里不该再重复一遍标题行：青鸟会把 title 当卡片头、body 当正文
+        // Body shouldn't repeat the title line: Bluebird uses title as card header, body as content
         let body = v["body"].as_str().unwrap();
         assert!(!body.contains("Critical"), "{body}");
         assert!(!body.contains("Disk usage high"), "{body}");
@@ -1959,11 +1991,11 @@ mod tests {
             serde_json::from_str(&feishu_message_body("oc_abc", &card)).unwrap();
         assert_eq!(body["receive_id"], "oc_abc");
         assert_eq!(body["msg_type"], "interactive");
-        // content 是字符串化的卡片对象（飞书要的就是这种双层转义）
+        // content is the stringified card object (Feishu requires this double-layer escaping)
         let content: serde_json::Value =
             serde_json::from_str(body["content"].as_str().unwrap()).unwrap();
         assert_eq!(content["header"]["template"], "orange");
-        assert!(content.get("card").is_none(), "不该再包一层 card");
+        assert!(content.get("card").is_none(), "should not wrap in another `card`");
 
         assert_eq!(
             feishu_messages_url("https://open.feishu.cn", "chat_id"),
@@ -1971,7 +2003,7 @@ mod tests {
         );
     }
 
-    /// 卡片把事实摊成分栏，而不是塞回一行文字
+    /// Card spreads facts into columns, rather than cramming back into one line of text
     #[test]
     fn feishu_card_lays_facts_into_fields() {
         let v: serde_json::Value =
@@ -2002,14 +2034,14 @@ mod tests {
             .unwrap();
         assert!(
             !content.contains('<'),
-            "别名里的标签起始符没被中和：{content}"
+            "alias tag opening not neutralized: {content}"
         );
-        // 原文本还得能认出来（是中和，不是删掉）
+        // Original text must still be recognizable (neutralization, not deletion)
         assert!(content.contains("＜at id=all"));
     }
 
-    /// Slack：从「一行纯文本」升级成按级别上色的 Block Kit 卡片。
-    /// 顶层 `text` 必须留着——不支持 blocks 的客户端和老的纯文本接收端都读它。
+    /// Slack: upgraded from "one line of plain text" to a Block Kit card colored by level.
+    /// Top-level `text` must be kept — clients without block support and legacy plain-text receivers both read it.
     #[test]
     fn slack_channel_sends_colored_card() {
         let slack: serde_json::Value =
@@ -2044,14 +2076,14 @@ mod tests {
         let slack: serde_json::Value =
             serde_json::from_str(&channel_body("slack", &rule("critical"), &f, 0)).unwrap();
 
-        // 回退文本（mrkdwn）与分栏（mrkdwn）都要中和
+        // Both fallback text (mrkdwn) and columns (mrkdwn) need neutralization
         let fallback = slack["text"].as_str().unwrap();
         assert!(!fallback.contains("<!channel>"), "{fallback}");
         let field = slack["blocks"][1]["fields"][0]["text"].as_str().unwrap();
         assert!(!field.contains("<!channel>"), "{field}");
         assert!(field.contains("＜!channel>"), "{field}");
 
-        // header 是 plain_text，Slack 不作标签解析
+        // header is plain_text, Slack doesn't parse it as tags
         assert_eq!(slack["blocks"][0]["text"]["type"], "plain_text");
     }
 
@@ -2117,7 +2149,7 @@ mod tests {
         }
     }
 
-    /// 测试按钮用的临时渠道：只填 url / kind 时也要能构出一条（receive_id_type 补默认值）
+    /// Temporary channel for the Test button: even with only url / kind filled, must be constructable (receive_id_type filled with default)
     #[test]
     fn test_channel_fills_defaults() {
         let ch = test_channel("feishu", "", " secret ", " cli_x ", " oc_1 ", "");
@@ -2137,7 +2169,7 @@ mod tests {
     }
 
     /// Delivery failure reasons are extracted from body: Feishu puts error code in body (HTTP may still be 200),
-    /// so只看状态就会把失败当成功
+    /// so checking only the status would treat failure as success
     #[test]
     fn delivery_errors_surface_channel_codes() {
         // Success states are not failures: Feishu code=0, Slack plain "ok"
@@ -2152,12 +2184,12 @@ mod tests {
         let bad_receive = body_error(br#"{"code":230001,"msg":"receive_id invalid"}"#).unwrap();
         assert!(bad_receive.contains("chat_id"), "{bad_receive}");
 
-        // 非 2xx 时把响应体带上，别让自建接收端摸黑
+        // Non-2xx: include the response body, don't leave self-hosted receivers in the dark
         assert!(body_detail(b"nope").contains("nope"));
         assert_eq!(body_detail(b"   "), "");
     }
 
-    /// 卡片的颜色与文案是纯函数，但「谁算严重」这条得跟 severity_rank 对齐
+    /// Card color and text are pure functions, but "who counts as severe" must align with severity_rank
     #[test]
     fn level_palette_follows_severity() {
         assert_eq!(level_style(&rule("critical"), true).feishu, "red");
@@ -2166,8 +2198,8 @@ mod tests {
         assert_eq!(level_style(&rule("critical"), false).feishu, "green");
     }
 
-    /// 「级别 → 样式」只有一份：飞书的枚举名、Slack 的 hex、载荷里的 key 与 emoji
-    /// 必须同源，否则换个渠道就会出现「飞书红、Slack 橙」这种自相矛盾
+    /// "Level → style" has only one source: Feishu's enum name, Slack's hex, the key and emoji in the payload
+    /// must come from the same source, otherwise switching channels shows contradictions like "Feishu red, Slack orange"
     #[test]
     fn channels_agree_on_level_style() {
         for (severity, firing, key, feishu, hex, emoji) in [
@@ -2199,12 +2231,12 @@ mod tests {
             }
             let bb: serde_json::Value =
                 serde_json::from_str(&channel_body("bluebird", &r, &f, 0)).unwrap();
-            assert_eq!(bb["severity"], severity, "原始 severity 一并保留");
+            assert_eq!(bb["severity"], severity, "raw severity preserved");
         }
     }
 
-    /// 标题行所有渠道共用一份文案：推送只显示标题时（手机通知栏 / Bark / IM 折叠态）
-    /// Must also be able to tell "which machine, how severe, what happened"
+    /// Title line is shared by all channels: when push shows only the title (phone notification bar / Bark / IM collapsed)
+    /// must also tell "which machine, how severe, what happened"
     #[test]
     fn title_line_is_shared_across_channels() {
         let r = rule("critical");
@@ -2226,7 +2258,7 @@ mod tests {
         assert_eq!(slack["blocks"][0]["text"]["text"], title);
     }
 
-    /// 告警文案里的人话指标名：认识的要带中文名与单位，不认识的保留原名不崩
+    /// Alert text uses human-readable metric names: known ones should show human label and unit, unknown keep raw name without panic
     #[test]
     fn metric_label_humanizes_known_metrics() {
         assert_eq!(metric_label("host.disk.usage"), ("Disk Usage", "%"));
@@ -2235,7 +2267,7 @@ mod tests {
         assert_eq!(metric_label("some.new.metric"), ("some.new.metric", ""));
     }
 
-    /// 构造一份容器快照 JSON：`(id, name, started_at, state)`
+    /// Build a container snapshot JSON: `(id, name, started_at, state)`
     fn snap(entries: &[(&str, &str, i64, &str)]) -> String {
         let list: Vec<serde_json::Value> = entries
             .iter()
@@ -2264,14 +2296,14 @@ mod tests {
         }
     }
 
-    /// 两次快照一样 → 没有事件（「不刷屏」的核心：每 5 分钟同拍只是同一份状态）
+    /// Same snapshot twice → no events (the core of "no spam": every-5-minute same shot is just the same state)
     #[test]
     fn identical_snapshots_yield_no_events() {
         let s = snap(&[("c1", "web", 1000, "running"), ("c2", "db", 500, "exited")]);
         assert!(diff_containers(&s, &s).is_empty());
     }
 
-    /// running 的新容器 = 已启动；从快照里消失 = 已停止
+    /// New running container = started; disappearing from snapshot = stopped
     #[test]
     fn new_running_container_starts_and_vanished_container_stops() {
         let prev = snap(&[("c1", "web", 1000, "running")]);
@@ -2285,7 +2317,7 @@ mod tests {
         assert_eq!(diff_containers(&cur, &after), vec![stopped("c1", "web")]);
     }
 
-    /// running → exited 算停止；exited → running 算启动
+    /// running → exited counts as stopped; exited → running counts as started
     #[test]
     fn running_state_transitions_are_events() {
         let up = snap(&[("c1", "web", 1000, "running")]);
@@ -2293,12 +2325,12 @@ mod tests {
         assert_eq!(diff_containers(&up, &down), vec![stopped("c1", "web")]);
         assert_eq!(diff_containers(&down, &up), vec![started("c1", "web")]);
 
-        // dead / restarting 都算非 running
+        // dead / restarting both count as non-running
         let dead = snap(&[("c1", "web", 1000, "dead")]);
         assert_eq!(diff_containers(&up, &dead), vec![stopped("c1", "web")]);
     }
 
-    /// 周期内重启：状态一直是 running，只有 started_at 变新 → 算启动
+    /// Restart within one cycle: state stays running, only started_at gets newer → counts as started
     #[test]
     fn restart_within_one_cycle_reports_start_only() {
         let prev = snap(&[("c1", "web", 1000, "running")]);
@@ -2306,8 +2338,8 @@ mod tests {
         assert_eq!(diff_containers(&prev, &cur), vec![started("c1", "web")]);
     }
 
-    /// 老版本 node-agent 不上报启动时间（0）：拿到真实时间不等于「刚启动」，
-    /// 不能把存量容器误报成一片「已启动」（agent 升级后的刷屏）
+    /// Old node-agent doesn't report start time (0): getting the real time doesn't mean "just started",
+    /// can't misreport existing containers as a screen of "started" (spam after agent upgrade)
     #[test]
     fn unknown_previous_start_time_does_not_report_a_burst() {
         let old = snap(&[("c1", "web", 0, "running"), ("c2", "db", 0, "running")]);
@@ -2317,7 +2349,7 @@ mod tests {
         ]);
         assert!(diff_containers(&old, &new).is_empty());
 
-        // 但「状态真的变了」照旧要报
+        // But actual state changes still report
         let down = snap(&[("c1", "web", 1700000000, "exited")]);
         assert_eq!(
             diff_containers(&snap(&[("c1", "web", 0, "running")]), &down),
@@ -2325,8 +2357,8 @@ mod tests {
         );
     }
 
-    /// 一次性容器（跑完即退）不该每次同拍都刷：新增但非 running 不报事件，
-    /// exited → exited 也不报
+    /// One-shot containers (exit immediately) shouldn't repeat every snapshot: new but non-running doesn't report,
+    /// exited → exited also doesn't report
     #[test]
     fn one_shot_containers_do_not_alert() {
         let empty = snap(&[]);
@@ -2335,15 +2367,15 @@ mod tests {
         assert!(diff_containers(&done, &done).is_empty());
     }
 
-    /// 脏 JSON / 缺字段不 panic、不误报
+    /// Dirty JSON / missing fields: don't panic, don't false-alert
     #[test]
     fn malformed_snapshots_are_ignored() {
         assert!(diff_containers("not json", "not json").is_empty());
         assert!(diff_containers("[]", "[]").is_empty());
-        // 缺 id 的条目被跳过
+        // Entries missing id are skipped
         let cur = r#"[{"name":"x","state":"running"}]"#;
         assert!(diff_containers("[]", cur).is_empty());
-        // 缺 state：按非 running 处理，不报「已启动」
+        // Missing state: treat as non-running, don't report "started"
         let old = r#"[{"id":"c1","name":"web"}]"#;
         assert!(diff_containers(old, old).is_empty());
     }

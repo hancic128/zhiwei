@@ -597,7 +597,10 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     }
 
-    // Migration 019b: Migrate Chinese rule names to English (for old databases)
+    // Migration 019b: Migrate Chinese rule names to English (for old databases).
+    // The LIKE patterns below match historical Chinese-builtin names that early
+    // installations may still carry in their SQLite database. The migration is a
+    // no-op for fresh installs.
     let has_019b: Option<i64> =
         sqlx::query_scalar("SELECT version FROM schema_version WHERE version = 19")
             .fetch_optional(pool)

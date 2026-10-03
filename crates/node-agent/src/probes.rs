@@ -1,12 +1,13 @@
-//! 服务探活：拉配置 → 到点执行 → 上报结果。
+//! Service probes — fetch config → execute on schedule → report results.
 //!
-//! 探针在节点侧执行（能探 localhost / 容器端口 / 内网），
-//! 配置由 monitor 通过签名接口下发，结果同样签名上报。
+//! Probes run on the node side (can hit localhost / container ports / the
+//! private network); config is delivered via monitor's signed API and results
+//! are reported the same way.
 //!
-//! 判定分层：
-//!   - 连不上 / 超时 / 状态码不符 / 握手失败 → `down`（硬失败）
-//!   - 能连上但内容或延迟不符 / 证书临近到期 → `degraded`（软失败）
-//!   - 其余 → `ok`
+//! Outcome layers:
+//!   - can't connect / timeout / wrong status code / handshake failed → `down` (hard fail)
+//!   - reachable but content / latency off, or cert expiring soon → `degraded` (soft fail)
+//!   - otherwise → `ok`
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,11 +20,12 @@ use tokio::io::AsyncReadExt;
 use crate::http::build_client_config;
 use crate::NodeState;
 
-/// 配置刷新间隔
+/// How often to refresh the probe config
 const CONFIG_REFRESH: Duration = Duration::from_secs(30);
-/// 调度轮询间隔
+/// Scheduling poll interval
 const TICK: Duration = Duration::from_secs(5);
-/// 响应体最多读取的字节数（避免大响应把内存吃满）
+/// Maximum number of bytes to read from a response body (so a giant response
+/// cannot blow up node memory)
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
@@ -78,7 +80,7 @@ impl Outcome {
     }
 }
 
-/// 探针主循环：常驻在节点进程里
+/// Probe main loop: lives inside the node process
 pub async fn run_loop(monitor: String, state: Arc<NodeState>, node_id: String) {
     let mut specs: Vec<ProbeSpec> = Vec::new();
     let mut next_due: HashMap<String, Instant> = HashMap::new();
@@ -138,7 +140,8 @@ pub async fn run_loop(monitor: String, state: Arc<NodeState>, node_id: String) {
         if !results.is_empty() {
             if let Err(e) = post_results(&monitor, &state, &node_id, &results).await {
                 tracing::warn!(error = %e, "Failed to report probe results, will retry next round");
-                // 上报失败不丢结果语义：立即重试（下一 tick 就会再跑一次）
+                // Failed reporting does not lose the result semantics — retry
+                // immediately (the next tick will rerun the probe).
                 for r in &results {
                     if let Some(id) = r.get("probe_id").and_then(|v| v.as_str()) {
                         next_due.insert(id.to_string(), Instant::now());
@@ -147,7 +150,8 @@ pub async fn run_loop(monitor: String, state: Arc<NodeState>, node_id: String) {
             }
         }
 
-        // 已被删除的探针不再保留调度记录
+        // Probes that have been deleted from the spec no longer keep their
+        // schedule entries.
         next_due.retain(|id, _| specs.iter().any(|s| &s.id == id));
 
         tokio::time::sleep(TICK).await;
@@ -255,7 +259,7 @@ fn str_field(v: &Value, key: &str) -> String {
         .to_string()
 }
 
-/// 软失败判定：延迟超过 `expect.max_latency_ms`
+/// Soft-fail verdict: latency above `expect.max_latency_ms`
 fn latency_verdict(spec: &ProbeSpec, latency_ms: f64, status_code: Option<i64>) -> Option<Outcome> {
     let max = spec
         .expect
@@ -299,7 +303,7 @@ async fn probe_http(spec: &ProbeSpec) -> Outcome {
     let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
     let status_code = Some(status as i64);
 
-    // 期望状态码：未配置时按 2xx/3xx 视为正常
+    // Expected status code: when unset, 2xx/3xx is treated as healthy.
     let expected: Vec<i64> = spec
         .expect
         .get("status")
@@ -336,7 +340,7 @@ async fn probe_http(spec: &ProbeSpec) -> Outcome {
         .unwrap_or_else(|| Outcome::ok(latency_ms, status_code))
 }
 
-/// 发一次 HTTP(S) 请求，返回 (状态码, 响应体文本)
+/// Issue a single HTTP(S) request, returning (status code, response body text)
 async fn fetch_http(
     url: &str,
     method: &str,
@@ -349,7 +353,7 @@ async fn fetch_http(
     } else if let Some(r) = url.strip_prefix("http://") {
         (false, r)
     } else {
-        anyhow::bail!("URL 必须以 http:// 或 https:// 开头");
+        anyhow::bail!("URL must start with http:// or https://");
     };
     let (authority, path) = match rest.find('/') {
         Some(i) => (&rest[..i], &rest[i..]),
@@ -423,7 +427,7 @@ async fn probe_tcp(spec: &ProbeSpec) -> Outcome {
         Err(e) => return Outcome::down(format!("connect {host}:{port} failed: {e}")),
     };
 
-    // 可选 banner 校验：读一小段（拿不到也不算失败）
+    // Optional banner check: read a short prefix (no banner also doesn't fail).
     if let Some(needle) = spec.expect.get("banner_contains").and_then(|v| v.as_str()) {
         let mut buf = vec![0u8; 512];
         let read = tokio::time::timeout(Duration::from_millis(500), stream.read(&mut buf))
@@ -485,7 +489,7 @@ async fn probe_tls(spec: &ProbeSpec) -> Outcome {
     };
     let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
 
-    // 从握手结果里取叶子证书，算剩余有效期
+    // Pull the leaf certificate from the handshake result and compute remaining validity.
     let days_left = tls_stream
         .get_ref()
         .1
@@ -545,7 +549,7 @@ mod tests {
 
     #[tokio::test]
     async fn tcp_probe_reports_down_for_closed_port() {
-        // 端口 1 在本机必然拒绝连接
+        // Port 1 is reliably connection-refused on loopback.
         let s = spec(
             "tcp",
             serde_json::json!({"host": "127.0.0.1", "port": 1}),
@@ -574,7 +578,7 @@ mod tests {
 
     #[tokio::test]
     async fn http_probe_checks_status_and_body() {
-        // 起一个只回固定内容的极简 HTTP 服务
+        // Spin up a minimal HTTP server that responds with fixed content.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {

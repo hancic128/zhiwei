@@ -1,10 +1,12 @@
 /**
- * 帮助页 markdown。
+ * Help page markdown.
  *
- * 内容来自 `GET /v1/help?locale=...`——后端从 `crates/monitor-server/assets/`
- * 编译期嵌入多语版本，按 UI 的 locale 返回对应翻译；翻译缺失 / 不识别时
- * 静默回落 zh-CN。MarkdownCard 把整段 markdown 渲染为文本块，TOC 由分隔
- * `## ` 切出的 section 在右栏浮窗显示。
+ * Content comes from `GET /v1/help?locale=...` — the backend embeds
+ * multi-language versions at compile time from `crates/monitor-server/assets/`
+ * and returns the appropriate translation based on the UI locale; on missing
+ * or unrecognized translations it silently falls back to zh-CN. MarkdownCard
+ * renders the entire markdown as a text block, and the TOC is displayed in
+ * the right-side floating panel, split by sections marked with `## `.
  */
 import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -19,8 +21,9 @@ import {
 import { cn } from "@/lib/utils";
 
 /**
- * 按 markdown 中的 `## X` 切分 section body，渲染用：section 标题进 TOC、
- * 给一个稳定 id 锚点；hero 部分（第一个 `##` 之前的内容）单独渲染在最上方。
+ * Split section bodies by `## X` markers in markdown, used for rendering:
+ * the section title goes into the TOC and gets a stable id anchor; the hero
+ * portion (content before the first `##`) is rendered separately at the top.
  */
 function splitSections(
   markdown: string,
@@ -53,8 +56,10 @@ function splitSections(
 }
 
 /**
- * section 标题生成稳定的 DOM id（TOC 锚点用）。中文 / emoji / 标点都允许，
- * 任意 RFC 字符以外的字符用 `-` 替换；空标题退到通用名避免重复 id。
+ * Generate a stable DOM id from the section title (for TOC anchors). Chinese
+ * / emoji / punctuation are all allowed; any non-RFC-letter character is
+ * replaced with `-`; an empty title falls back to a generic name to avoid
+ * duplicate ids.
  */
 function slugify(title: string): string {
   return (
@@ -77,7 +82,8 @@ export function HelpPage() {
   );
 
   const q = useQuery({
-    // locale 进 key：UI 切语言后立刻按目标 locale 重拉，不用清缓存。
+    // locale goes into the key: switching the UI language immediately re-fetches
+    // for the target locale without clearing the cache.
     queryKey: ["help", locale],
     queryFn: () => help.fetch(locale),
     staleTime: 60_000,
@@ -90,7 +96,8 @@ export function HelpPage() {
 
   const [active, setActive] = React.useState<string | null>(null);
 
-  // 滚动时高亮当前 section：观察各 section 距顶端的距离，挑最靠上的可见项。
+  // Highlight the current section while scrolling: observe each section's
+  // distance from the top, pick the topmost visible one.
   React.useEffect(() => {
     const ids = sections.rest.map((s) => slugify(s.title));
     const els = ids
@@ -162,7 +169,7 @@ export function HelpPage() {
         )}
       </article>
 
-      {/* 右侧浮窗：本页目录 */}
+      {/* Right-side floating panel: table of contents for this page */}
       {sections.rest.length > 0 && (
         <nav aria-label={t("help.toc")} className="hidden lg:block">
           <div className="sticky top-2">

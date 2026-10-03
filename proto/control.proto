@@ -2,75 +2,81 @@ syntax = "proto3";
 
 package zhiwei.control.v1;
 
-// 控制平面动作。节点按能力集（后续 P2-3 引入）决定是否执行。
+// Control-plane actions. Nodes decide whether to execute based on a
+// per-node capability set (introduced in P2-3).
 enum Action {
   ACTION_UNSPECIFIED = 0;
-  ACTION_NOOP = 1;          // 连通性自检
-  ACTION_FETCH_LOGS = 2;    // 按需拉取日志（容器或文件）
-  ACTION_KILL_PROCESS = 3;  // 杀进程（params: KillProcessParams）
-  ACTION_RESTART_HOST = 4;  // 重启主机（无参数）
-  ACTION_SHUTDOWN_HOST = 5; // 关机（无参数）
-  ACTION_CONTAINER_START = 6;   // 启动容器（params: ContainerActionParams）
-  ACTION_CONTAINER_STOP = 7;    // 停止容器（params: ContainerActionParams）
-  ACTION_CONTAINER_RESTART = 8; // 重启容器（params: ContainerActionParams）
-  ACTION_REFRESH_INVENTORY = 9; // 立刻重采一次快照（无参数）
-  ACTION_SCAN_CERTS = 10;       // 扫描指定路径下的证书（params: ScanCertsParams）
-  ACTION_CONTAINER_REMOVE = 11; // 删除容器（params: ContainerActionParams，force 默认 false）
+  ACTION_NOOP = 1;          // connectivity self-check
+  ACTION_FETCH_LOGS = 2;    // on-demand log pull (container or file)
+  ACTION_KILL_PROCESS = 3;  // kill a process (params: KillProcessParams)
+  ACTION_RESTART_HOST = 4;  // restart the host (no params)
+  ACTION_SHUTDOWN_HOST = 5; // shut down the host (no params)
+  ACTION_CONTAINER_START = 6;    // start a container (params: ContainerActionParams)
+  ACTION_CONTAINER_STOP = 7;     // stop a container (params: ContainerActionParams)
+  ACTION_CONTAINER_RESTART = 8;  // restart a container (params: ContainerActionParams)
+  ACTION_REFRESH_INVENTORY = 9;  // force an immediate inventory snapshot (no params)
+  ACTION_SCAN_CERTS = 10;        // scan certificates under a path (params: ScanCertsParams)
+  ACTION_CONTAINER_REMOVE = 11;  // remove a container (params: ContainerActionParams, force defaults to false)
 }
 
-// 命令由 ops-server 的私钥签名；节点用 enroll 时拿到的 ops 公钥验签。
-// 因此 monitor 被攻陷也无法伪造命令（设计稿 D7 拆双进程的理由）。
+// Commands are signed by ops-server's private key; nodes verify them with
+// the ops public key they obtained at enroll. Therefore a compromised monitor
+// cannot forge commands (the rationale for splitting ops and monitor per
+// design doc D7).
 message Command {
   string id = 1;                    // uuid
   string node_id = 2;
   Action action = 3;
-  string params_json = 4;           // 动作参数（如 FetchLogsParams 的 JSON）
-  bytes nonce = 5;                  // 16 字节，防重放
+  string params_json = 4;           // action params (e.g. FetchLogsParams as JSON)
+  bytes nonce = 5;                  // 16 bytes, anti-replay
   int64 issued_at_unix_nano = 6;
   int64 ttl_seconds = 7;
-  bytes signature = 8;              // ops 私钥对整个消息（signature 置空后）的签名
+  bytes signature = 8;              // ops private key signing the message with signature blanked
 }
 
-// 节点回执，由节点私钥签名，防止中途被篡改。
+// Receipt from the node, signed by the node's private key so it cannot be
+// tampered with in transit.
 message CommandResult {
   string command_id = 1;
   string node_id = 2;
   bool ok = 3;
   string error = 4;
-  bytes payload = 5;                // 动作产物（例如日志文本的 UTF-8 字节）
+  bytes payload = 5;                // action output (e.g. UTF-8 log bytes)
   int64 finished_at_unix_nano = 6;
   bytes signature = 7;
 }
 
-// ACTION_FETCH_LOGS 的参数
+// ACTION_FETCH_LOGS params.
 message FetchLogsParams {
   // container | file
   string source = 1;
-  string container = 2;             // 容器名或 ID（source=container）
-  string path = 3;                  // 文件路径（source=file）
-  uint32 tail = 4;                  // 取末尾多少行
-  bool timestamps = 5;              // 容器日志是否带时间戳
+  string container = 2;             // container name or ID (when source=container)
+  string path = 3;                  // file path (when source=file)
+  uint32 tail = 4;                  // number of trailing lines to fetch
+  bool timestamps = 5;              // include timestamps in container logs
 }
 
-// ACTION_KILL_PROCESS 的参数。
+// ACTION_KILL_PROCESS params.
 //
-// 只允许这两种信号：`term` = 优雅退出（SIGTERM，进程可自行清理），
-// `kill` = 强杀（SIGKILL，进程无法拦截）。不接受任意信号名，避免把
-// 这条通道变成通用的信号注入口。
+// Only two signals are allowed: `term` for graceful exit (SIGTERM, the process
+// can clean up), `kill` for forced exit (SIGKILL, the process cannot trap).
+// Arbitrary signal names are rejected so this channel cannot be turned into a
+// generic signal-injection entrypoint.
 message KillProcessParams {
   int32 pid = 1;
   string signal = 2;                // term | kill
 }
 
-// ACTION_CONTAINER_* 的参数
+// ACTION_CONTAINER_* params.
 message ContainerActionParams {
-  string container = 1;             // 容器名或 ID（Docker 两者都接受）
+  string container = 1;             // container name or ID (Docker accepts both)
 }
 
-// ACTION_SCAN_CERTS 的参数。
+// ACTION_SCAN_CERTS params.
 //
-// 只接受一个路径：目录（自动展开为常用证书后缀）、单个 PEM 文件或 glob。
-// 扫描结果以 JSON 形式放在回执 payload 里，供控制台的「测试」按钮直接展示。
+// Exactly one path: either a directory (auto-expanded to common certificate
+// extensions), a single PEM file, or a glob. Scan results are placed in the
+// receipt payload as JSON so the console "test" button can render them.
 message ScanCertsParams {
   string path = 1;
 }

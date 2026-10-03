@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 #
-# 知微本地试验环境（前后端一体）
+# ZhiWei local development environment (backend + frontend in one)
 #
-#   ./scripts/dev.sh start    构建并启动后端 + 前端开发服务器
+#   ./scripts/dev.sh start    Build and start the backend + frontend dev server
 #   ./scripts/dev.sh query    List enrolled nodes
 #   ./scripts/dev.sh watch    Poll latest telemetry for a node (default 2s interval)
 #   ./scripts/dev.sh index    GET / overview
 #   ./scripts/dev.sh token    Print new bootstrap token (10 minutes)
 #   ./scripts/dev.sh status   Process and log status
-#   ./scripts/dev.sh stop     停止后端和前端
-#   ./scripts/dev.sh reset    重置：停止、删除数据、重启
-#   ./scripts/dev.sh clean    停止并删除所有数据（包括 CA）
+#   ./scripts/dev.sh stop     Stop the backend and frontend
+#   ./scripts/dev.sh reset    Reset: stop, delete data, restart
+#   ./scripts/dev.sh clean    Stop and delete all data (including the CA)
 #
 # Default uses plain HTTP (TLS terminated by edge), same as managed platform deployment.
 # To try built-in TLS: ZHIWEI_DEV_TLS=1 ./scripts/dev.sh start
@@ -40,7 +40,8 @@ url() {
   if [ -n "$USE_TLS" ]; then echo "https://${LISTEN}"; else echo "http://${LISTEN}"; fi
 }
 
-# monitor 的只读接口认 admin token；节点那一侧走请求签名，与这里无关
+# monitor's read endpoints require the admin token; the node side uses request
+# signing, which is unrelated to this
 need_token() {
   [ -f "$TOKEN_FILE" ] || die "No admin token yet. Run ./scripts/dev.sh start first"
 }
@@ -59,12 +60,12 @@ build_ui() {
 }
 
 start_ui() {
-  # 不管是不是我们启的，先把所有 vite / esbuild 全杀掉，
-  # 否则旧的 5173 端口占用者会一直响应，新代码进不来
+  # Kill any vite / esbuild left over, regardless of who started them.
+  # Otherwise the stale 5173 listener keeps responding and the new code never lands.
   pkill -f 'node.*vite' 2>/dev/null || true
   pkill -f '@esbuild/darwin' 2>/dev/null || true
   sleep 1
-  # 5173 端口上若有遗留进程（其他方式启动的），按端口杀掉
+  # If anything else is holding port 5173, kill it by port.
   local port_pid
   port_pid="$(lsof -ti :5173 2>/dev/null || true)"
   if [ -n "$port_pid" ]; then

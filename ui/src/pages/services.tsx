@@ -60,14 +60,14 @@ import {
 } from "@/lib/utils";
 import { usePrefs } from "@/components/prefs-provider";
 
-/** 探针类型图标（规范：图标一律 Lucide SVG，禁止 emoji） */
+/** Probe type icon (spec: icons always Lucide SVG, no emoji) */
 const KIND_ICON: Record<string, React.ElementType> = {
   http: Globe,
   tcp: Network,
   tls: ShieldCheck,
 };
 
-/** 状态 → DotBadge tone */
+/** State → DotBadge tone */
 function stateTone(state: string): "success" | "warn" | "danger" | "neutral" {
   if (state === "ok") return "success";
   if (state === "degraded") return "warn";
@@ -75,12 +75,12 @@ function stateTone(state: string): "success" | "warn" | "danger" | "neutral" {
   return "neutral";
 }
 
-/** 状态 → i18n key（未知取值统一落到 unknown，避免露出原始字符串） */
+/** State → i18n key (unknown values fall back to "unknown" to avoid leaking raw strings) */
 function stateKey(state: string): string {
   return ["ok", "degraded", "down"].includes(state) ? state : "unknown";
 }
 
-/** 延迟展示：亚 10ms 保留一位小数，避免出现「0 ms」这种失真读数 */
+/** Latency display: under 10ms keep one decimal to avoid misleading "0 ms" readings */
 function formatLatency(ms: number | null | undefined): string {
   if (ms === null || ms === undefined || !Number.isFinite(ms)) return "—";
   return `${ms < 10 ? ms.toFixed(1) : ms.toFixed(0)} ms`;
@@ -115,7 +115,7 @@ function parseJson<T>(raw: string, fallback: T): T {
   }
 }
 
-/** 目标的紧凑展示（列表列） */
+/** Compact target display (table column) */
 function targetSummary(probe: ProbeView): string {
   const target = parseJson<TargetShape>(probe.target_json, {});
   if (probe.kind === "http") return target.url ?? "—";
@@ -124,8 +124,8 @@ function targetSummary(probe: ProbeView): string {
 }
 
 /**
- * 服务健康时间线：一条线一个探针，画的是每个时间桶里
- * 「有多少比例的探测是 ok 的」（0–100%）。
+ * Service health timeline: one line per probe, showing the percentage of
+ * checks that returned "ok" within each time bucket (0–100%).
  */
 function ServicesTimeline() {
   const { t } = useTranslation();
@@ -211,7 +211,7 @@ export function Services() {
   const services: ServiceView[] = servicesQ.data ?? [];
 
   const nodesQ = useQuery({ queryKey: ["nodes"], queryFn: api.nodes });
-  /** 节点下拉：按别名（没有则主机名）排序；节点列表变化时重算 */
+  /** Node dropdown: sort by alias (fallback to hostname); recompute when nodes change */
   const nodeOptions = React.useMemo(
     () =>
       [...(nodesQ.data ?? [])].sort((a, b) =>
@@ -246,9 +246,10 @@ export function Services() {
     },
   });
 
-  // 扁平化为单层探针表：每个探针带 service_id / service_name / enabled。
-  // service.enabled 不直接决定行是否可见——只要探针 enabled 就展示，
-  // service 整组停用只是「一组都灰色」含义，探针表里仍要能看到（运维可能要核对）。
+  // Flatten to a single-layer probe table: each probe carries service_id / service_name / enabled.
+  // service.enabled doesn't directly decide row visibility — as long as the probe is enabled it shows.
+  // A whole service being disabled just means "this group is greyed out"; probes should still be visible
+  // in the table (operators may need to inspect them).
   const rows = React.useMemo(
     () =>
       services.flatMap((svc) =>
@@ -262,8 +263,9 @@ export function Services() {
     [services],
   );
 
-  // 顶部大字卡片按**探针**维度统计，且只算「启用中」的：探针停用或整组服务
-  // 停用后，它的 down 不该再算进集群故障（列表里仍展示、置灰）。
+  // Top large cards count by **probe** dimension, only active ones: once a probe is disabled
+  // or its service group is disabled, its down state shouldn't count as cluster failure
+  // (it still shows in the list, greyed out).
   const active = rows.filter((r) => r.probe.enabled && r.service_enabled);
   const probesOk = active.filter((r) => r.probe.state.state === "ok").length;
   const degradedCount = active.filter((r) => r.probe.state.state === "degraded")
@@ -278,7 +280,7 @@ export function Services() {
       }
       if (nodeFilter !== "all") {
         if (nodeFilter === "__none__") {
-          // 「不绑定节点」筛选项：探针的 node_ids 为空
+          // "No node binding" filter: probe's node_ids is empty
           if (r.probe.node_ids.length > 0) return false;
         } else {
           if (!r.probe.node_ids.includes(nodeFilter)) return false;
@@ -292,19 +294,19 @@ export function Services() {
       );
     });
 
-    // 默认隐藏停用的服务和探针
+    // Default: hide disabled services and probes
     if (!showDisabled) {
       list = list.filter((r) => r.probe.enabled && r.service_enabled);
     }
 
-    // 停用的服务和探针置底
+    // Disabled services and probes sink to the bottom
     return list.sort((a, b) => {
       const aDisabled = !a.probe.enabled || !a.service_enabled;
       const bDisabled = !b.probe.enabled || !b.service_enabled;
       if (aDisabled !== bDisabled) {
         return aDisabled ? 1 : -1;
       }
-      // 其他保持原有顺序
+      // Otherwise preserve original order
       return 0;
     });
   }, [rows, needle, stateFilter, nodeFilter, showDisabled]);
@@ -349,7 +351,7 @@ export function Services() {
 
       <ServicesTimeline />
 
-      {/* 工具栏：左标题右操作（规范 7.3） */}
+      {/* Toolbar: title on left, actions on right (spec 7.3) */}
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <h2 className="text-lg font-semibold text-ink-900 dark:text-surface-0">
@@ -476,8 +478,8 @@ export function Services() {
                       <div className="text-sm font-medium text-ink-900 dark:text-surface-0 truncate max-w-[220px]">
                         {p.name}
                       </div>
-                      {/* 「服务」列已去掉：所属服务降到探针名下的一行小字，
-                          既不再占一整列，又能让搜索服务名有可见的依据。 */}
+                      {/* "Service" column removed: parent service is now shown as a small line
+                          under the probe name. This frees a column while keeping search-by-service-name visible. */}
                       <div className="text-xs text-ink-400 truncate max-w-[220px] flex items-center gap-1">
                         <span className="truncate">{r.service_name}</span>
                         <DotBadge tone="neutral">{t("services.enabled")}</DotBadge>
@@ -585,10 +587,11 @@ export function Services() {
         </Card>
       )}
 
-      {/* 服务整组的操作入口：表头放不下，放到列表上方一行——但目前扁平化之后
-          服务作为分组不再有可见层级，「服务」列也已撤掉，所以这层只剩「新建服务」
-          一个入口；改名 / 删服务暂时没有 UI 入口（ServiceDialog 与 removeEntity
-          都支持，缺的是触发点）。考虑到改动控制面，本轮暂不补；如需要再加。 */}
+      {/* Service-level actions entry: header had no room, so it was moved above the list —
+          but after flattening there's no visible service hierarchy, and the "service" column is gone,
+          so this level only has the "new service" entry left. Rename / delete service has no UI entry
+          yet (ServiceDialog and removeEntity both support it; the trigger is missing).
+          To keep this change focused, we're not adding them now; can be added later if needed. */}
 
       {serviceDialog.open && (
         <ServiceDialog
@@ -635,7 +638,7 @@ export function Services() {
   );
 }
 
-/** 扁平表里的单行：探针本体 + 服务上下文（id/name/enabled） */
+/** Flat table row: the probe itself + service context (id/name/enabled) */
 interface FlatRow {
   probe: ProbeView;
   service_id: string;
@@ -663,9 +666,10 @@ function Field({
   );
 }
 
-// ---------- 服务表单 ----------
-// tier 字段前端不再暴露：后端保留列与默认值（tier=2），新建时由后端兜底；
-// 老数据 tier=1 / 2 / 3 也不会丢，只是不再有 UI 入口去改。
+// ---------- Service form ----------
+// tier field is no longer exposed in the frontend: the backend keeps the column and default
+// (tier=2); on create the backend fills it in. Old data with tier=1/2/3 won't be lost,
+// just has no UI to change it.
 
 function ServiceDialog({
   service,
@@ -737,7 +741,7 @@ function ServiceDialog({
   );
 }
 
-// ---------- 探针表单 ----------
+// ---------- Probe form ----------
 
 function ProbeDialog({
   serviceId,
@@ -794,11 +798,11 @@ function ProbeDialog({
     String(probe?.failure_threshold ?? 3),
   );
   const [nodeIds, setNodeIds] = React.useState<string[]>(probe?.node_ids ?? []);
-  /** 一次性测试结果；改任何会影响目标的字段就作废（避免显示过期结论） */
+  /** One-shot test result; invalidate when any target-affecting field changes (to avoid showing stale results) */
   const [testResult, setTestResult] = React.useState<ProbeTestResult | null>(null);
 
   const nodesQ = useQuery({ queryKey: ["nodes"], queryFn: api.nodes });
-  /** 按别名（没有则主机名）排序：勾选列表的顺序也要和「别名优先」一致 */
+  /** Sort by alias (fallback to hostname): checkbox list order must follow "alias first" */
   const nodeOptions = React.useMemo(
     () =>
       [...(nodesQ.data ?? [])].sort((a, b) =>
@@ -889,8 +893,8 @@ function ProbeDialog({
   });
 
   /**
-   * 一次性测试：只发当前表单里的目标 / 期望，不落库。由 monitor 侧执行一次，
-   * 用来在保存前确认「地址写对没、期望配置能不能通过」。
+   * One-shot test: sends only the current form's target / expect, not persisted. Executed once
+   * by the monitor side to confirm "is the address correct / does the expected config pass" before saving.
    */
   const testProbe = useMutation({
     mutationFn: () => {
@@ -909,7 +913,7 @@ function ProbeDialog({
     },
   });
 
-  // 目标 / 期望项一改，上一次的测试结论就不算数了
+  // When target / expect fields change, the previous test result is no longer valid
   React.useEffect(() => {
     setTestResult(null);
   }, [
@@ -939,7 +943,7 @@ function ProbeDialog({
       onClose={onClose}
       footer={
         <>
-          {/* 测试放左边：它是「先验证再保存」的辅助动作，不该和主按钮争视觉位置 */}
+          {/* Test button on the left: it's a "verify before save" helper action, shouldn't compete with the primary button for visual position */}
           <Button
             variant="secondary"
             className="mr-auto"
@@ -1109,12 +1113,13 @@ function ProbeDialog({
       </Field>
 
       {/*
-        执行节点：可多选、也可一个都不选。
-        不选 = 不绑定节点（每台在线节点上都会跑）——这是探针的默认形态；
-        选了就只在这些节点上跑，用来做多机对比或只在内网某台机器上探。
+        Execution nodes: multi-select, can also select none.
+        None selected = no node binding (runs on every online node) — this is the default mode;
+        Selecting nodes means "run only on these nodes", for multi-host comparison or probing
+        from a specific internal machine.
 
-        不用 Field 包裹：它渲染成 <label>，把复选框列表套进去后「点标题文字」会
-        误选第一个节点（内层 label 也会被重复朗读）。
+        Not wrapped in Field: it renders as <label>, wrapping the checkbox list inside causes
+        "clicking the label text" to select the first node (the inner label is also read twice).
       */}
       <div className="block">
         <span className="text-sm font-medium text-ink-700 dark:text-surface-4">
@@ -1163,7 +1168,7 @@ function ProbeDialog({
         </p>
       </div>
 
-      {/* 不用 Field 包裹：避免外层 label 与内层 checkbox 的 label 重复朗读 */}
+      {/* Not wrapped in Field: avoids outer label and inner checkbox label being read twice */}
       <div className="block">
         <span className="text-sm font-medium text-ink-700 dark:text-surface-4">
           {t("services.formTlsVerify")}
@@ -1179,7 +1184,7 @@ function ProbeDialog({
         </label>
       </div>
 
-      {/* 测试结论：reason 由后端给，文案在这里选，保证中英都通 */}
+      {/* Test result: reason comes from the backend, wording is picked here to work in both Chinese and English */}
       {testResult && (
         <div
           className={cn(
@@ -1230,7 +1235,7 @@ function ProbeDialog({
   );
 }
 
-/** 把后端的 reason/args 翻成人话；未知原因码原样带出来，便于排查 */
+/** Convert backend reason/args into human text; unknown reason codes are passed through for diagnosis */
 function testReasonText(r: ProbeTestResult, t: TFunction): string {
   const arg = (k: string) => (r.args?.[k] == null ? "" : String(r.args[k]));
   const expected = Array.isArray(r.args?.expected)

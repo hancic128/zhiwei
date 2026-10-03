@@ -5,8 +5,8 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
 /**
- * 规范 7.10：所有危险/不可逆操作必须复用此模板。
- * 必须带 backdrop-blur 遮罩；确认按钮文案描述动作，禁止「确定」。
+ * Spec 7.10: all dangerous / irreversible operations must reuse this template.
+ * Must have backdrop-blur mask; the confirm button text describes the action, "Confirm" is forbidden.
  */
 export function ConfirmDialog({
   open,
@@ -36,7 +36,7 @@ export function ConfirmDialog({
         <DialogPrimitive.Overlay
           className="fixed inset-0 z-[70] bg-ink-900/50 backdrop-blur-sm animate-panel-slide"
         />
-        {/* 定位与动画分两层：动画的 transform 会覆盖 -translate-*，同层会跑到视口外 */}
+        {/* Positioning and animation split across two layers: animation's transform overrides -translate-*, putting them on the same layer pushes it off-screen */}
         <DialogPrimitive.Content className="fixed left-1/2 top-1/2 z-[70] w-full max-w-md -translate-x-1/2 -translate-y-1/2 outline-none">
           <div
             className={cn(
@@ -44,7 +44,7 @@ export function ConfirmDialog({
               "animate-panel-slide",
             )}
           >
-            {/* 规范 7.10.2/7.10.3：头部 = 图标 + 标题 + 右上角关闭（X / ESC / 遮罩三种关闭方式并存） */}
+            {/* Spec 7.10.2/7.10.3: header = icon + title + top-right close (X / ESC / mask three ways of closing coexist) */}
             <div className="px-6 py-4 border-b border-surface-3 dark:border-ink-700 flex items-start justify-between gap-3">
               <div className="flex items-start gap-2 min-w-0">
                 {danger && (

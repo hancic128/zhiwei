@@ -17,11 +17,12 @@ import { useToast } from "@/components/ui/toast";
 import { friendlyError } from "@/lib/utils";
 
 /**
- * 容器操作组：启动 / 关闭 / 重启 / 查看最新日志。
+ * Container action group: start / stop / restart / view latest logs.
  *
- * 节点详情页的容器组与容器页共用这一份——两处各写一遍会让「关闭要二次确认」
- * 「动作完成后让节点立刻重采快照」这类规则走偏。动作完成后由 `onDone` 通知
- * 调用方刷新自己的查询键。
+ * The node detail page's container group and the containers page share this —
+ * writing it twice would let rules like "stop requires secondary confirmation"
+ * and "node re-snapshots immediately after action" drift apart. After completion,
+ * `onDone` notifies the caller to refresh its own query keys.
  */
 export function ContainerActions({
   nodeId,
@@ -31,7 +32,7 @@ export function ContainerActions({
 }: {
   nodeId: string;
   container: ContainerInfo;
-  /** 动作成功（或看日志结束）后调用，用来刷新列表 */
+  /** Called after the action succeeds (or after viewing logs ends), used to refresh the list */
   onDone?: () => void;
   onError?: (message: string) => void;
 }) {
@@ -42,11 +43,11 @@ export function ContainerActions({
     "stop" | "restart" | "remove" | null
   >(null);
   /**
-   * 正在执行的动作。
+   * The action currently being executed.
    *
-   * 之前只用一个布尔量，按钮在等回执的这段时间里既不转圈也不禁用——用户点完
-   * 看到界面「没反应」，就会连点好几次（每次都真的下发一条命令）。现在按动作
-   * 记名：命中的那个按钮转圈，其余的禁用。
+   * Previously this was a single boolean: while waiting for the receipt the button neither spun nor disabled —
+   * users clicked and saw "no response", so they clicked several more times (each one really did dispatch a command).
+   * Now we track by action: the targeted button spins, the others disable.
    */
   const [busy, setBusy] = React.useState<
     "start" | "stop" | "restart" | "remove" | "logs" | null
@@ -56,16 +57,17 @@ export function ContainerActions({
     text: string;
     loading: boolean;
   } | null>(null);
-  // 实时跟随：每轮日志拉完再等 5s 发下一轮（不做固定间隔并发——命令通道要等节点
-  // 轮询 10s，堆命令只会更慢）。关闭对话框即停。
+  // Realtime follow: wait 5s after each log pull before sending the next (no fixed-interval concurrency —
+  // the command channel waits for the node to poll every 10s, stacking commands only slows things down).
+  // Stop when the dialog is closed.
   const [follow, setFollow] = React.useState(false);
   const [lastAt, setLastAt] = React.useState<number | null>(null);
-  // 让「N 秒前更新」自己走字
+  // Let "Updated N seconds ago" tick by itself
   const [, setTick] = React.useState(0);
 
   const running = container.state === "running";
 
-  /** 动作完成后节点会重采快照（5 分钟周期太久），这里在 ~20s 内反复拉几次 */
+  /** After the action completes the node re-snapshots (5-min cycle is too long), here we re-pull a few times within ~20s */
   const scheduleRefresh = React.useCallback(() => {
     for (let i = 1; i <= 8; i++) {
       window.setTimeout(() => {
@@ -79,8 +81,8 @@ export function ContainerActions({
     key: "start" | "stop" | "restart" | "remove",
   ) => {
     setBusy(key);
-    // 节点是否真的回话了：一旦回话就说明「控制台这份状态」可能已经过期，
-    // 无论成功失败都重采一次快照，让这一行显示真实状态
+    // Whether the node actually answered: once it answers, "the console's status" may be stale,
+    // so re-snapshot regardless of success/failure to make this row show the true state
     let answered = false;
     try {
       const { command_id } = await commandsApi.exec(nodeId, action, {
@@ -136,7 +138,7 @@ export function ContainerActions({
     },
   };
 
-  /** 拉一次日志。silent = 实时跟随的那一轮：保留已有输出、失败也不弹 toast。 */
+  /** Pull logs once. silent = a realtime-follow round: keep existing output, no toast on failure. */
   const fetchLogs = React.useCallback(
     async (name: string, silent: boolean) => {
       const { command_id } = await commandsApi.exec(nodeId, "fetch_logs", {
@@ -184,7 +186,7 @@ export function ContainerActions({
     }
   };
 
-  // 实时跟随循环：上一轮完成后才排下一轮（见 state 里的注释）
+  // Realtime follow loop: schedule the next round only after the previous completes (see comments in state)
   const followRef = React.useRef(false);
   followRef.current = follow;
   const fetchRef = React.useRef(fetchLogs);
@@ -198,7 +200,7 @@ export function ContainerActions({
       try {
         await fetchRef.current(logsName, true);
       } catch {
-        // 跟随轮静默失败：网络抖动别刷屏，下一轮自己会重试
+        // Follow-round silently fails: don't spam toasts on network jitter, the next round will retry
       }
       if (!cancelled && followRef.current) {
         timer = window.setTimeout(() => void tick(), 5000);
@@ -211,12 +213,12 @@ export function ContainerActions({
     };
   }, [follow, logsName]);
 
-  // 关闭对话框时停止跟随（别在后台一直发命令）
+  // Stop following when dialog closes (don't keep firing commands in the background)
   React.useEffect(() => {
     if (!logs) setFollow(false);
   }, [logs]);
 
-  // 「N 秒前更新」走字
+  // "Updated N seconds ago" tick
   React.useEffect(() => {
     if (!follow) return;
     const id = window.setInterval(() => setTick((n) => n + 1), 1000);
@@ -268,8 +270,8 @@ export function ContainerActions({
             </Tooltip>
           </>
         )}
-        {/* 删除只在「已经不跑」时出现：运行中的容器请先停掉——
-            不在界面上提供「顺手强删一个正在跑的服务」这条路 */}
+        {/* Delete only appears when "already not running": please stop running containers first —
+            the UI doesn't offer a "casually force-remove a running service" path */}
         {!running && (
           <Tooltip content={t("containers.actRemove")}>
             <Button
@@ -323,7 +325,7 @@ export function ContainerActions({
         {logs?.loading ? (
           <div className="space-y-3">
             <Skeleton className="h-40 w-full" />
-            {/* 等回执可能十几秒，只给骨架屏会被当成「卡住了」 */}
+            {/* Waiting for receipt can take over a dozen seconds; just a skeleton would be read as "stuck" */}
             <p className="text-xs text-ink-400">{t("containers.logsWaiting")}</p>
           </div>
         ) : logs ? (

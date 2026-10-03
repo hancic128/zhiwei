@@ -16,12 +16,13 @@ import { usePrefs } from "@/components/prefs-provider";
 import { formatTime, friendlyError } from "@/lib/utils";
 
 /**
- * 节点详情页的「证书」：这台机器上发现的 TLS 证书。
- * 证书页是按全部节点组织的正向视图，这里是按节点组织的反向视图——
- * 排一台机器的证书问题时，不用跳到全局页面再过滤。
+ * Node detail page's "Certificates": TLS certificates discovered on this machine.
+ * The certificates page is a forward view organized by all nodes; here is the reverse view
+ * organized by node — when troubleshooting certificates on one machine, no need to jump to the
+ * global page and filter.
  *
- * 数据复用 /v1/certificates（一次拉全量、按 node_id 过滤，快照 5 分钟才变，
- * 重取成本低），列布局 / 徽章 / 详情对话框全部沿用证书页同一套样式。
+ * Data is reused from /v1/certificates (fetched once for all, filtered by node_id, snapshots change every 5 min,
+ * low refetch cost), column layout / badges / detail dialog all reuse the same styles as the certificates page.
  */
 export function NodeCerts({
   nodeId,
@@ -30,7 +31,7 @@ export function NodeCerts({
 }: {
   nodeId: string;
   refreshMs: number;
-  /** 本节点展示名（别名优先），证书详情对话框的「节点」行用它 */
+  /** This node's display name (alias preferred), used by the certificate detail dialog's "Node" row */
   hostLabel: string;
 }) {
   const { t } = useTranslation();
@@ -45,7 +46,7 @@ export function NodeCerts({
 
   const certs: CertInfo[] = React.useMemo(() => {
     const group = (q.data ?? []).find((g) => g.node_id === nodeId);
-    // 最紧急的在前（与证书页默认排序一致）
+    // Most urgent first (consistent with the certificates page's default sort)
     return [...(group?.certificates ?? [])].sort(
       (a, b) => daysLeft(a.not_after_unix_nano) - daysLeft(b.not_after_unix_nano),
     );
@@ -108,7 +109,7 @@ export function NodeCerts({
               <tbody className="divide-y divide-surface-2 dark:divide-ink-700">
                 {certs.map((c) => {
                   const days = daysLeft(c.not_after_unix_nano);
-                  // 主显示 = 第一个 SAN 域名，解析失败时退回路径（与证书页一致）
+                  // Primary display = first SAN domain; fall back to path on parse failure (consistent with certificates page)
                   const primary = c.parse_error
                     ? c.path
                     : c.domains[0] || c.subject.replace(/^CN=/, "").split(",")[0];

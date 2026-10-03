@@ -20,22 +20,22 @@ echarts.use([
 ]);
 
 /**
- * 规范 7.9.2 / 02 / 10：图表配色只能取自令牌——brand 色阶 + emerald/amber/rose
- * 三个语义色 + ink 中性色，不得引入 violet / sky / fuchsia / lime 这类非令牌色名。
+ * Spec 7.9.2 / 02 / 10: chart colors must come from tokens only — brand scale + emerald/amber/rose
+ * three semantic colors + ink neutral, must not introduce non-token color names like violet / sky / fuchsia / lime.
  *
- * 「一条线一个节点」的多系列对比需要多于 5 种可区分的颜色，这里用「brand 主色 +
- * 3 语义色 + 1 中性色 + brand 的三个次级色阶」凑满 8 个，颜色全部来自令牌。
- * 超过 8 个系列时颜色开始循环，靠图例与 tooltip 区分——规范只允许令牌色，
- * 不为多系列放宽。
+ * "One line per node" multi-series comparison needs more than 5 distinguishable colors; here we use
+ * "brand primary + 3 semantic + 1 neutral + brand's three secondary shades" to make 8, all from tokens.
+ * Beyond 8 series colors start to cycle, distinguishable via legend and tooltip — spec only allows token colors,
+ * no relaxation for multi-series.
  */
 const SEMANTIC_LIGHT = ["#059669", "#d97706", "#e11d48"]; // emerald-600 / amber-600 / rose-600
 const SEMANTIC_DARK = ["#34d399", "#fbbf24", "#fb7185"]; // emerald-400 / amber-400 / rose-400
 const NEUTRAL_LIGHT = "#71717a"; // ink-500
 const NEUTRAL_DARK = "#a1a1aa"; // ink-400
-/** 次级色阶（主色已经在调色板第 1 位，这里只取剩下的品牌色阶） */
+/** Secondary shades (primary is already at palette index 1, here we only take the remaining brand shades) */
 const BRAND_SHADE_VARS = ["--brand-500", "--brand-700", "--brand-900"];
 
-/** 规范 7.9.1：仅允许 h-48 / h-64 / h-80 */
+/** Spec 7.9.1: only h-48 / h-64 / h-80 allowed */
 export type ChartHeight = "sm" | "md" | "lg";
 const HEIGHT_CLASS: Record<ChartHeight, string> = {
   sm: "h-48",
@@ -68,11 +68,11 @@ export function LineChart({
   yMax?: number;
   threshold?: number;
   yAxisName?: string;
-  /** Y 轴刻度格式化（如字节量显示 KiB / MiB / GiB） */
+  /** Y-axis tick formatting (e.g. byte amounts shown as KiB / MiB / GiB) */
   yFormatter?: (v: number) => string;
-  /** tooltip 取值格式化，默认 `保留 decimals 位 + unit` */
+  /** Tooltip value formatting, default `keep decimals digits + unit` */
   valueFormatter?: (v: number) => string;
-  /** X 轴固定范围（与所选时间范围一致，避免只画有数据的那一段） */
+  /** X-axis fixed range (matches selected time range, avoids only drawing the segment with data) */
   xMin?: number;
   xMax?: number;
 }) {
@@ -82,13 +82,13 @@ export function LineChart({
   const dark = colorScheme === "dark";
 
   /**
-   * 图例选中状态；null = 用户还没点过（默认全部显示）。
-   * 放在组件 state 里而不是依赖 ECharts 内部状态：数据自动刷新 / 窗口滚动
-   * 重画（`notMerge` 整段替换）不会把它清掉。
-   * 双击某个图例 = 反选：其余全部熄灭、只留这一条，快速聚焦单个系列。
+   * Legend selection state; null = user hasn't clicked yet (default all shown).
+   * Stored in component state rather than ECharts's internal state: auto-refresh / window scroll
+   * redraw (`notMerge` replaces entirely) won't clear it.
+   * Double-clicking a legend item = invert: turn everything else off, keep only that one — fast focus on a single series.
    */
   const [legendSelected, setLegendSelected] = useState<Record<string, boolean> | null>(null);
-  /** 上一条「图例点击」记录，用于在 350ms 内识别同项双击 */
+  /** Record of the last "legend click", used to detect double-clicks on the same item within 350ms */
   const lastLegendClick = useRef<{ name: string; at: number } | null>(null);
 
   useEffect(() => {
@@ -104,9 +104,9 @@ export function LineChart({
     };
   }, []);
 
-  // 图例交互：单击沿用 ECharts 原生切换；双击同项（350ms 内两次）反选。
-  // 监听「选中状态变化后」事件——params.selected 是变化完成后的完整状态。
-  // 挂载时注册一次即可：事件绑定在 chart 实例上，不受 setOption 重建影响。
+  // Legend interaction: single click uses ECharts's native toggle; double-click on the same item (twice within 350ms) inverts.
+  // Listen to the "after selection state changes" event — params.selected is the complete state after the change.
+  // Register once on mount: the event is bound to the chart instance and isn't affected by setOption rebuilds.
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
@@ -116,7 +116,7 @@ export function LineChart({
       const now = Date.now();
       const prev = lastLegendClick.current;
       if (prev && prev.name === ev.name && now - prev.at <= 350) {
-        // 双击：反选——只有被双击的这一项亮着
+        // Double-click: invert — only the double-clicked item stays lit
         lastLegendClick.current = null;
         const names = Object.keys(ev.selected ?? {});
         setLegendSelected(
@@ -152,17 +152,17 @@ export function LineChart({
     const gridColor = dark ? "#27272a" : "#f4f4f5";
     const labelColor = "#71717a";
 
-    // 多系列才有图例；图例占一行，所以网格顶部要给它留出空间，
-    // 否则图例与曲线互相遮盖。`type: "scroll"` 让节点多时图例横向滚动，
-    // 而不是折行堆叠糊成一片。图例行高约 20px、网格顶距留 44px 保底，
-    // 超出时 ECharts 的翻页箭头也不会顶到曲线。
+    // Multi-series gets a legend; legend takes a row, so the grid top must leave room for it,
+    // otherwise legend and curves overlap. `type: "scroll"` lets the legend scroll horizontally
+    // when there are many nodes instead of wrapping into a stacked mess. Legend row height ~20px,
+    // grid top margin 44px baseline — when exceeded, ECharts's pagination arrows won't touch the curves.
     const hasLegend = series.length > 1;
 
     chart.setOption(
       {
         animationDuration: 200,
         color: palette,
-        // 规范 7.9.3：左 8 右 16 上下 8
+        // Spec 7.9.3: left 8, right 16, top/bottom 8
         grid: {
           left: 8,
           right: 16,
@@ -187,8 +187,8 @@ export function LineChart({
         },
         legend: hasLegend
           ? {
-              // scroll：图例排成一行、超出宽度就左右翻页——节点多时不会
-              // 折行叠在曲线上，也不会互相遮盖。
+              // scroll: legend in one row, scrolls left/right past the width — with many nodes it won't
+              // wrap onto the curves or overlap them.
               type: "scroll",
               top: 0,
               left: 0,
@@ -198,9 +198,9 @@ export function LineChart({
               itemHeight: 12,
               itemGap: 16,
               textStyle: { color: labelColor, fontSize: 12 },
-              // 用户点过图例后按组件 state 持久化选中；null（未操作）不传，
-              // 走 ECharts 默认全选。缺省不设的话，`notMerge` 每次重画都会
-              // 把图例选中重置成全选，自动刷新时用户的选择就丢了。
+              // After the user clicks the legend, persist the selection in component state; null (not yet interacted) is not passed,
+              // falling back to ECharts's default of all-selected. Without this, `notMerge` would
+              // reset legend selection to all-selected on every redraw, and the user's picks would be lost during auto-refresh.
               selected: legendSelected ?? undefined,
             }
           : undefined,
@@ -227,7 +227,7 @@ export function LineChart({
             formatter: (v: number) =>
               yFormatter ? yFormatter(v) : v.toFixed(decimals >= 1 ? 0 : 1),
           },
-          // 规范 7.9.3：水平网格线虚线 stroke-dasharray 4 4
+          // Spec 7.9.3: horizontal grid lines dashed stroke-dasharray 4 4
           splitLine: { lineStyle: { color: gridColor, type: [4, 4] } },
         },
         series: series.map((s, i) => ({
@@ -279,7 +279,7 @@ export function LineChart({
   return <div ref={ref} className={`w-full ${HEIGHT_CLASS[height]}`} />;
 }
 
-/** 迷你走势图（表格内联用，无坐标轴） */
+/** Mini trend chart (inline in tables, no axes) */
 export function Sparkline({ data }: { data: Array<[number, number]> }) {
   const ref = useRef<HTMLDivElement>(null);
   const chartRef = useRef<echarts.ECharts | null>(null);

@@ -20,7 +20,7 @@ import { useToast } from "@/components/ui/toast";
 import { formatTime, friendlyError, nodeLabel } from "@/lib/utils";
 import { usePrefs } from "@/components/prefs-provider";
 
-/** 跑一次节点侧扫描（走 scan_certs 命令 + 回执），返回解析后的结果或错误文案 */
+/** Run one node-side scan (via the scan_certs command + receipt), returns parsed result or error text */
 async function runCertScan(
   nodeId: string,
   path: string,
@@ -36,7 +36,7 @@ async function runCertScan(
   }
 }
 
-/** 扫描结果面板：命中证书列表 / 失败原因（表单内与行内「测试」共用） */
+/** Scan result panel: matched certificates list / failure reason (shared by in-form and inline "Test") */
 export function CertScanPanel({
   state,
   onRetry,
@@ -132,7 +132,7 @@ const emptyScan = { loading: false } as {
   error?: string;
 };
 
-/** 新增 / 编辑证书路径的表单对话框（含「测试」） */
+/** Add / edit certificate path form dialog (includes "Test") */
 export function CertSourceDialog({
   open,
   onClose,
@@ -143,16 +143,16 @@ export function CertSourceDialog({
   open: boolean;
   onClose: () => void;
   nodes: NodeView[];
-  /** 有值 = 编辑；无值 = 新增 */
+  /** Has value = editing; no value = adding */
   initial?: CertSourceView | null;
   onSaved: () => void;
 }) {
   const { t } = useTranslation();
   const toast = useToast();
   const [nodeId, setNodeId] = React.useState("");
-  // 「所有节点」来源要测一次时，得挑一台真实的机器去跑
+  // For an "all nodes" source, when testing we need to pick one real machine to run on
   const [testNodeId, setTestNodeId] = React.useState("");
-  /** 用户是否手动选过节点（区分「还没选」与「显式选了所有节点」） */
+  /** Whether the user has manually picked a node (distinguishes "not yet picked" from "explicitly chose all nodes") */
   const [nodeTouched, setNodeTouched] = React.useState(false);
   const [path, setPath] = React.useState("");
   const [enabled, setEnabled] = React.useState(true);
@@ -161,14 +161,15 @@ export function CertSourceDialog({
   const [scan, setScan] = React.useState(emptyScan);
   const [saving, setSaving] = React.useState(false);
 
-  // 只在「打开 / 换目标」时重置表单。
-  // 不要把 nodes 放进依赖：它是查询结果，重新拉取会换数组身份，
-  // 那样用户正打字时表单会被清空（实测踩到过）——默认节点的补位放在下面那个 effect。
+  // Only reset the form on "open / change target".
+  // Don't include nodes in the deps: it's a query result, refetching changes the array identity,
+  // which would clear the form while the user is typing (this has bitten us in practice) —
+  // default node fallback is handled in the effect below.
   const nodesRef = React.useRef(nodes);
   nodesRef.current = nodes;
   React.useEffect(() => {
     if (!open) return;
-    // 新建时默认落到一台具体节点（通配是显式选项，不做默认）
+    // New: default to a specific node (wildcard is an explicit option, not the default)
     setNodeId(initial ? initial.node_id : (nodesRef.current[0]?.id ?? ""));
     setTestNodeId("");
     setNodeTouched(false);
@@ -179,7 +180,7 @@ export function CertSourceDialog({
     setScan(emptyScan);
   }, [open, initial]);
 
-  // 节点列表晚到（打开时还没加载完）→ 补默认节点，但只在用户没手动选过时
+  // Node list arrives late (not yet loaded when dialog opened) → fill in the default node, but only if user hasn't manually picked one
   React.useEffect(() => {
     if (open && !initial && !nodeTouched && !nodeId && nodes.length > 0) {
       setNodeId(nodes[0].id);
@@ -263,7 +264,7 @@ export function CertSourceDialog({
     >
       <div className="space-y-4">
         <div className="flex flex-wrap gap-3">
-          {/* 固定宽度：节点名（别名优先）要能整段显示，但不随内容把弹窗撑宽 */}
+          {/* Fixed width: node name (alias preferred) must display in full, but doesn't widen the dialog with content */}
           <label className="block w-64 shrink-0">
             <span className="block text-xs text-ink-500 mb-1">
               {t("certs.sources.node")}
@@ -359,7 +360,7 @@ export function CertSourceDialog({
   );
 }
 
-/** 行内「测试」：打开即跑一次该条来源的扫描 */
+/** Inline "Test": opens and immediately runs one scan of this source */
 export function CertScanDialog({
   source,
   nodes,
@@ -373,7 +374,7 @@ export function CertScanDialog({
   const [scan, setScan] = React.useState<{ loading: boolean; result?: CertScanResult; error?: string }>(
     { loading: true },
   );
-  // 通配来源没有单一目标节点：默认第一台，允许换一台再测
+  // Wildcard source has no single target node: default to the first one, allow switching to test against another
   const [nodeId, setNodeId] = React.useState(
     source.all_nodes ? (nodes[0]?.id ?? "") : source.node_id,
   );

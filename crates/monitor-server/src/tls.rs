@@ -79,9 +79,11 @@ pub fn ensure_server_cert(ca: &Ca, data_dir: &Path, cn: &str) -> anyhow::Result<
 
 /// Build a rustls ServerConfig.
 ///
-/// 不要求客户端证书：节点身份由 Ed25519 请求签名承担（`routes::verify_node`），
-/// 这样部署到「边缘终止 TLS」的托管平台时也不会失效。自建部署仍由这里终结 TLS，
-/// 只是不再用传输层证书认节点。
+/// Does not require client certificates: node identity is carried by Ed25519
+/// request signatures (`routes::verify_node`), so this still works when
+/// deployed behind a "TLS-terminated at the edge" managed platform. Self-hosted
+/// deployments still have TLS terminated here, but transport-layer certs are
+/// no longer used to authenticate nodes.
 pub fn build_server_config(
     cert_pem: &str,
     key_pem: &str,
@@ -96,8 +98,9 @@ pub fn build_server_config(
         .context("parsing server private key")?;
     let key = PrivateKeyDer::Pkcs8(key);
 
-    // 不再要求客户端证书：节点身份改由 Ed25519 请求签名承担，
-    // 这样部署到边缘终止 TLS 的托管平台时也不会失效。
+    // No longer requires client certificates: node identity is now carried
+    // by Ed25519 request signatures, so this still works when deployed behind
+    // edge-terminating TLS managed platforms.
     let mut cfg = ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
         .with_no_client_auth()
         .with_single_cert(certs, key)

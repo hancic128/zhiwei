@@ -85,7 +85,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=min
 
-  # 合并状态：所有 job 必须通过
+  # Aggregate status: every job must pass
   success:
     name: All checks passed
     needs: [rust, ui, docker]

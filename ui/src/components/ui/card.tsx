@@ -1,7 +1,7 @@
 import * as React from "react";
 import { cn } from "@/lib/utils";
 
-/** 规范 7.2：所有卡片复用同一外壳，禁止为不同卡片写不同样式。 */
+/** Spec 7.2: all cards share the same shell, no writing different styles per card. */
 export function Card({
   className,
   ...props
@@ -77,7 +77,7 @@ export function CardFooter({
   );
 }
 
-/** 规范 7.2.3：数据卡片（仅主体，无头部） */
+/** Spec 7.2.3: data card (body only, no header) */
 export function StatCard({
   label,
   value,

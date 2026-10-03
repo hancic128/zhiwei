@@ -1,8 +1,11 @@
 //! Node identity: Ed25519 request signing (replaces mTLS mutual certificates).
 //!
-//! Why not mTLS:托管平台在边缘终止 TLS，不会把客户端证书转发进容器，所以「用客户端证书认节点」这条路在 PaaS 上走不通。改成
-//! 「用签名认节点」后，任何能跑 HTTP 的地方都能部署——这也正是
-//! DESIGN.md 原则 #3「签名而非凭据」的字面含义。
+//! Why not mTLS: managed platforms terminate TLS at the edge and do not
+//! forward client certificates into containers, so the "authenticate nodes via
+//! client certificates" approach won't work on PaaS. After switching to
+//! "authenticate nodes via signatures", it can be deployed anywhere that can
+//! run HTTP — which is also the literal meaning of
+//! DESIGN.md principle #3 "signatures instead of credentials".
 //!
 //! Signature covers: method + path (with query) + timestamp + nonce + raw request body.
 //! Server verifies signature, time window, and nonce non-replay -- all three required.
