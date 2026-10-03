@@ -111,15 +111,14 @@ impl HelpContent {
     /// to the default; an entirely empty map yields empty body so the UI
     /// can render its "not loaded" placeholder.
     pub fn snapshot_for(&self, locale: Option<&str>) -> HelpSnapshot {
-        let g = self.0.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let g = self
+            .0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let resolved = locale
             .and_then(|l| g.by_locale.get_key_value(l))
             .map_or_else(|| g.default_locale.clone(), |(l, _)| l.clone());
-        let body = g
-            .by_locale
-            .get(&resolved)
-            .cloned()
-            .unwrap_or_default();
+        let body = g.by_locale.get(&resolved).cloned().unwrap_or_default();
         drop(g);
         HelpSnapshot {
             locale: resolved,

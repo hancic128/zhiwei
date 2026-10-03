@@ -38,7 +38,7 @@ pub fn router(state: AppState) -> Router {
         .merge(admin_routes())
         .merge(commands_routes())
         // Node enrollment script. **Intentionally unauthenticated**: the target machine has no
-// credentials yet; the real secret is the ZHIWEI_BOOTSTRAP_TOKEN passed in the enroll command.
+        // credentials yet; the real secret is the ZHIWEI_BOOTSTRAP_TOKEN passed in the enroll command.
         // The script itself contains no secrets; exposing it is equivalent to exposing the install
         // method (same approach as Tailscale et al.).
         .route("/install-node.sh", get(install_node_script_handler))
@@ -228,7 +228,12 @@ pub async fn verify_node(
             .map(std::string::ToString::to_string)
     };
 
-    let unauthorized = || (StatusCode::UNAUTHORIZED, "Node signature verification failed".to_string());
+    let unauthorized = || {
+        (
+            StatusCode::UNAUTHORIZED,
+            "Node signature verification failed".to_string(),
+        )
+    };
 
     let node_id_str = get(zhiwei_common::auth::HEADER_NODE).ok_or_else(unauthorized)?;
     let ts: i64 = get(zhiwei_common::auth::HEADER_TIMESTAMP)
@@ -326,7 +331,10 @@ pub async fn read_auth_ok_v2(state: &AppState, headers: &HeaderMap) -> ReadAuthK
     // Take the String out and drop the guard; otherwise RwLockReadGuard is not Send,
     // and the entire handler future stops being Send, which axum rejects.
     let admin_ok = {
-        let current = state.admin_token.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current = state
+            .admin_token
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::admin::ct_eq(token.as_bytes(), current.as_bytes())
     };
     if admin_ok {
@@ -742,7 +750,9 @@ async fn telemetry_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let pq = uri.path_and_query().map_or("/", hyper::http::uri::PathAndQuery::as_str);
+    let pq = uri
+        .path_and_query()
+        .map_or("/", hyper::http::uri::PathAndQuery::as_str);
     let (node_id, _node_pub) = match verify_node(&state, &headers, method.as_str(), pq, &body).await
     {
         Ok(id) => id,
@@ -773,7 +783,10 @@ async fn telemetry_handler(
     // node_id matches the signature subject, preventing A's signature being used to submit B's data
     let node_id_str = batch.node_id.clone();
     if node_id_str.is_empty() || node_id_str != node_id.as_str() {
-        return err(StatusCode::BAD_REQUEST, "node_id does not match signature subject");
+        return err(
+            StatusCode::BAD_REQUEST,
+            "node_id does not match signature subject",
+        );
     }
 
     let ts = batch.ts_unix_nano;
@@ -1052,7 +1065,9 @@ fn normalize_tags(raw: &[String]) -> Result<Vec<String>, String> {
             continue;
         }
         if tag.chars().count() > MAX_TAG_CHARS {
-            return Err(format!("a single tag can be at most {MAX_TAG_CHARS} characters"));
+            return Err(format!(
+                "a single tag can be at most {MAX_TAG_CHARS} characters"
+            ));
         }
         if seen.insert(tag.to_string()) {
             cleaned.push(tag.to_string());
@@ -1096,7 +1111,10 @@ async fn patch_node_handler(
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
     };
     if patch.alias.is_none() && patch.tags.is_none() {
-        return err(StatusCode::BAD_REQUEST, "alias and tags: at least one must be provided");
+        return err(
+            StatusCode::BAD_REQUEST,
+            "alias and tags: at least one must be provided",
+        );
     }
 
     let node = zhiwei_common::NodeId::from_string(node_id.clone());
@@ -1456,7 +1474,7 @@ async fn node_series_handler(
     let rate = matches!(q.get("rate").map(String::as_str), Some("1" | "true"));
 
     // Window start earlier than raw retention → hourly aggregation; otherwise raw data.
-// Raw retention days: see retention::RAW_RETENTION_DAYS.
+    // Raw retention days: see retention::RAW_RETENTION_DAYS.
     let raw_floor_ms = now_ms - crate::retention::RAW_RETENTION_DAYS * 24 * 60 * 60 * 1000;
     if from_ms < raw_floor_ms {
         return hourly_series(
@@ -1571,9 +1589,18 @@ async fn all_nodes_series_handler(
     let telemetry = state.storage.telemetry();
     let mut out: Vec<serde_json::Value> = Vec::with_capacity(nodes.len());
     for n in &nodes {
-        let raw_points =
-            node_series_points(&telemetry, &n.id, &n.hostname, &metric, from_ms, to_ms, limit, rate, hourly)
-                .await;
+        let raw_points = node_series_points(
+            &telemetry,
+            &n.id,
+            &n.hostname,
+            &metric,
+            from_ms,
+            to_ms,
+            limit,
+            rate,
+            hourly,
+        )
+        .await;
         let points: Vec<SeriesPoint> = if rate {
             to_rate(&raw_points)
         } else {
@@ -1623,7 +1650,13 @@ async fn node_series_points(
 ) -> Vec<(i64, f64)> {
     if hourly {
         return match telemetry
-            .hourly_range(node_id, metric, from_ms * 1_000_000, to_ms * 1_000_000, limit)
+            .hourly_range(
+                node_id,
+                metric,
+                from_ms * 1_000_000,
+                to_ms * 1_000_000,
+                limit,
+            )
             .await
         {
             Ok(rows) => rows
@@ -1788,7 +1821,7 @@ struct HostInfoView {
     interfaces: Vec<IfaceView>,
     agent_version: String,
     /// Unix seconds at which the current node-agent process started. 0 = old agent /
-/// unknown, console shows it as unknown.
+    /// unknown, console shows it as unknown.
     agent_started_at_unix_seconds: u64,
 }
 
@@ -1841,7 +1874,9 @@ async fn inventory_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let pq = uri.path_and_query().map_or("/", hyper::http::uri::PathAndQuery::as_str);
+    let pq = uri
+        .path_and_query()
+        .map_or("/", hyper::http::uri::PathAndQuery::as_str);
     let (node_id, _node_pub) = match verify_node(&state, &headers, method.as_str(), pq, &body).await
     {
         Ok(id) => id,
@@ -1869,13 +1904,17 @@ async fn inventory_handler(
     };
 
     if report.node_id != node_id.as_str() {
-        return err(StatusCode::BAD_REQUEST, "node_id does not match signature subject");
+        return err(
+            StatusCode::BAD_REQUEST,
+            "node_id does not match signature subject",
+        );
     }
 
     // Certificate alerts need the hostname; save it first (host_info is Option, may be missing)
     let hostname = report
         .host_info
-        .as_ref().map_or_else(|| node_id.as_str().to_string(), |i| i.hostname.clone());
+        .as_ref()
+        .map_or_else(|| node_id.as_str().to_string(), |i| i.hostname.clone());
 
     apply_host_info(&state, &node_id, &report).await;
 
@@ -1940,7 +1979,11 @@ async fn inventory_handler(
 
 /// Write the node's self-reported host info back to `nodes` (serialized `host_info_json`
 /// plus the possibly-updated hostname).
-async fn apply_host_info(state: &AppState, node_id: &zhiwei_common::NodeId, report: &InventoryReport) {
+async fn apply_host_info(
+    state: &AppState,
+    node_id: &zhiwei_common::NodeId,
+    report: &InventoryReport,
+) {
     let Some(info) = report.host_info.as_ref() else {
         return;
     };
@@ -2052,7 +2095,10 @@ async fn evaluate_snapshot_alerts(
         .await
         .ok()
         .flatten()
-        .map_or_else(|| hostname.to_string(), |n| node_display_name(&n.alias, hostname));
+        .map_or_else(
+            || hostname.to_string(),
+            |n| node_display_name(&n.alias, hostname),
+        );
     crate::alerts::evaluate_cert_expiry(state, node_id, &display, certificates_json).await;
     crate::alerts::on_container_events(
         state,
@@ -2375,7 +2421,10 @@ async fn resolve_alert_handler(
     }
     let now = zhiwei_common::Timestamp::now().unix_nano();
     if let Err(e) = state.storage.alerts().resolve_alert(id, now).await {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, format!("resolve alert: {e}"));
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("resolve alert: {e}"),
+        );
     }
     info!(alert_id = id, "alert manually closed");
     (StatusCode::NO_CONTENT).into_response()
@@ -2514,7 +2563,10 @@ async fn patch_rule_handler(
     };
     match state.storage.alerts().update_rule(id, &updated).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("update rule: {e}")),
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("update rule: {e}"),
+        ),
     }
 }
 
@@ -2601,7 +2653,10 @@ async fn patch_builtin_alert_handler(
         Ok(rules) => {
             let rule = rules.iter().find(|r| r.id == id);
             let Some(current) = rule else {
-                return err(StatusCode::NOT_FOUND, format!("unknown builtin alert: {id}"));
+                return err(
+                    StatusCode::NOT_FOUND,
+                    format!("unknown builtin alert: {id}"),
+                );
             };
 
             let threshold = b.threshold.unwrap_or(current.threshold);
@@ -2660,8 +2715,8 @@ struct CaView {
     fingerprint_sha256: String,
     nodes_enrolled: i64,
     /// Whether this process terminates TLS itself.
-///
-/// When false (managed platform, edge-terminated TLS), this CA is **not involved**:
+    ///
+    /// When false (managed platform, edge-terminated TLS), this CA is **not involved**:
     /// it's neither the node's trust root (nodes use system roots), nor is the monitor's
     /// certificate signed by it (the edge signs it). The front end accordingly renders
     /// this section as "not used by current deployment" rather than implying it's the
@@ -2683,7 +2738,10 @@ async fn ca_handler(State(state): State<AppState>, headers: HeaderMap) -> Respon
         .ok()
         .and_then(std::result::Result::ok);
     let Some((subject, nb, na, serial, fp)) = info else {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, "failed to parse CA certificate");
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to parse CA certificate",
+        );
     };
 
     let nodes_enrolled = state
@@ -2924,7 +2982,10 @@ async fn change_admin_token_handler(
     };
 
     {
-        let current = state.admin_token.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current = state
+            .admin_token
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !crate::admin::ct_eq(b.current.trim().as_bytes(), current.as_bytes()) {
             return err(StatusCode::UNAUTHORIZED, "current credential is incorrect");
         }
@@ -2941,7 +3002,10 @@ async fn change_admin_token_handler(
     }
     // Write to disk before changing memory: reversing the order would let a disk-write failure leave memory and file inconsistent
     {
-        let mut current = state.admin_token.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut current = state
+            .admin_token
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *current = b.new.trim().to_string();
     }
     // The headers parameter is here only to match the shape of other handlers; we don't pre-check auth here —
@@ -3172,7 +3236,9 @@ async fn node_commands_handler(
     headers: HeaderMap,
     axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
 ) -> Response {
-    let pq = uri.path_and_query().map_or("/", hyper::http::uri::PathAndQuery::as_str);
+    let pq = uri
+        .path_and_query()
+        .map_or("/", hyper::http::uri::PathAndQuery::as_str);
     let (node_id, _node_pub) = match verify_node(&state, &headers, method.as_str(), pq, &[]).await {
         Ok(v) => v,
         Err((code, msg)) => return err(code, msg),
@@ -3181,7 +3247,10 @@ async fn node_commands_handler(
         return err(StatusCode::BAD_REQUEST, "node_id required");
     };
     if query_node_id != node_id.as_str() {
-        return err(StatusCode::BAD_REQUEST, "node_id does not match signature subject");
+        return err(
+            StatusCode::BAD_REQUEST,
+            "node_id does not match signature subject",
+        );
     }
     // A legitimate pull = this node's control loop is still alive. Only recorded after
     // signature verification passes — otherwise forged requests could mark someone
@@ -3232,7 +3301,9 @@ async fn command_result_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let pq = uri.path_and_query().map_or("/", hyper::http::uri::PathAndQuery::as_str);
+    let pq = uri
+        .path_and_query()
+        .map_or("/", hyper::http::uri::PathAndQuery::as_str);
     let (node_id, node_pub) = match verify_node(&state, &headers, method.as_str(), pq, &body).await
     {
         Ok(v) => v,
@@ -3252,7 +3323,10 @@ async fn command_result_handler(
         return err(StatusCode::BAD_REQUEST, "command_id does not match path");
     }
     if result.node_id != node_id.as_str() {
-        return err(StatusCode::BAD_REQUEST, "receipt node_id does not match signature subject");
+        return err(
+            StatusCode::BAD_REQUEST,
+            "receipt node_id does not match signature subject",
+        );
     }
 
     // Receipt is signed by the node's private key: even if the transport layer is compromised,
@@ -3268,7 +3342,10 @@ async fn command_result_handler(
             );
         }
         if zhiwei_common::KeyPair::verify(&node_pub, &preimage, &sig).is_err() {
-            return err(StatusCode::UNAUTHORIZED, "Receipt signature verification failed");
+            return err(
+                StatusCode::UNAUTHORIZED,
+                "Receipt signature verification failed",
+            );
         }
     }
 
@@ -3285,7 +3362,12 @@ async fn command_result_handler(
     };
     match owner {
         Some(owner) if owner == node_id.as_str() => {}
-        Some(_) => return err(StatusCode::FORBIDDEN, "receipt subject does not match command ownership"),
+        Some(_) => {
+            return err(
+                StatusCode::FORBIDDEN,
+                "receipt subject does not match command ownership",
+            )
+        }
         None => return err(StatusCode::NOT_FOUND, "command does not exist"),
     }
 
@@ -3536,10 +3618,7 @@ pub async fn sign_command(
     Ok(id)
 }
 
-pub async fn ops_sign(
-    endpoint: &str,
-    payload: &serde_json::Value,
-) -> Result<String, OpsSignError> {
+pub async fn ops_sign(endpoint: &str, payload: &serde_json::Value) -> Result<String, OpsSignError> {
     use http_body_util::BodyExt;
     let authority = endpoint.strip_prefix("http://").ok_or_else(|| {
         OpsSignError::Unavailable("ops endpoint only supports http:// (loopback)".into())
@@ -3757,7 +3836,7 @@ mod enroll_ca_tests {
     #[test]
     fn edge_terminated_tls_hands_nothing_so_the_node_uses_system_roots() {
         // Render / Railway: edge uses proper certificates, local CA is irrelevant.
-// Issuing it would become "enroll succeeds, every subsequent request fails TLS validation".
+        // Issuing it would become "enroll succeeds, every subsequent request fails TLS validation".
         assert_eq!(enroll_ca_pem(LOCAL_CA, false), "");
     }
 }
@@ -3845,23 +3924,26 @@ struct HelpQuery {
     locale: Option<String>,
 }
 
-/// Pick the first, parseable locale segment from the `Accept-Language` header (e.g.
-/// `"zh-CN,zh;q=0.9,en;q=0.8"` → the first recognizable one). Empty / unparseable
-/// values return None and let the caller fall back.
+/// Pick the first recognizable locale from an `Accept-Language` header (e.g.
+/// `"zh-CN,zh;q=0.9,en;q=0.8"` → `"zh-CN"`). Empty / unparseable values
+/// return None and let the caller fall back.
+///
+/// Tags arrive in arbitrary casing (`zh-CN`, `zh-cn`, `en`, `en-GB`) but the
+/// help-content lookups are exact-match against canonical keys, so case-fold
+/// before matching instead of returning the raw tag. Unknown locales pass
+/// through lower-cased; the caller's lookup misses and falls back.
 fn parse_accept_language(value: &str) -> Option<String> {
     for part in value.split(',') {
         let tag = part.split(';').next().unwrap_or("").trim();
         if tag.is_empty() {
             continue;
         }
-        // Normalize `en` to `en-US`. Unknown locales fall through to the caller,
-        // which falls back to en-US.
         let lowered = tag.to_ascii_lowercase();
-        let normalized: &str = match lowered.as_str() {
-            "en" | "en-us" | "en-uk" | "en-gb" => "en-US",
-            other => other,
-        };
-        return Some(normalized.to_string());
+        return Some(match lowered.as_str() {
+            "en" | "en-us" | "en-uk" | "en-gb" => "en-US".to_string(),
+            "zh" | "zh-cn" | "zh-hans" | "zh-sg" => "zh-CN".to_string(),
+            _ => lowered,
+        });
     }
     None
 }
@@ -3876,7 +3958,7 @@ mod help_locale_tests {
 
     #[test]
     fn parse_accept_language_picks_first_known() {
-        // First tag is zh-CN, should be picked verbatim.
+        // First tag is zh-CN, should be picked and kept canonical.
         assert_eq!(
             parse_accept_language("zh-CN,zh;q=0.9,en;q=0.8"),
             Some("zh-CN".to_string()),
@@ -3888,10 +3970,17 @@ mod help_locale_tests {
     }
 
     #[test]
-    fn parse_accept_language_normalizes_short_tags() {
-        // Short forms zh / en are also expanded to zh-CN / en-US.
-// Unknown locales pass through (lower-cased), let the caller fall back — snapshot_for uses the
-// default locale when not found in the map, so case won't cause errors.
+    fn parse_accept_language_canonicalizes_case_and_short_tags() {
+        // Browsers send `zh-cn` / `zh` / `en`; all must map to the canonical
+        // keys the help lookup uses, or the lookup misses and falls back.
+        assert_eq!(
+            parse_accept_language("zh-cn,zh;q=0.9"),
+            Some("zh-CN".to_string())
+        );
+        assert_eq!(parse_accept_language("zh"), Some("zh-CN".to_string()));
+        assert_eq!(parse_accept_language("en"), Some("en-US".to_string()));
+        assert_eq!(parse_accept_language("EN-GB"), Some("en-US".to_string()));
+        // Unknown locales pass through lower-cased; the caller falls back.
         assert_eq!(
             parse_accept_language("fr-FR,en;q=0.5"),
             Some("fr-fr".to_string()),
@@ -3966,10 +4055,11 @@ async fn create_ai_token_handler(
     }
 
     // Generate a 32-byte entropy plaintext token → base64url encoded.
-// Prefix `ait_` distinguishes from the bootstrap token's `zhi-bt-`, easier to grep.
+    // Prefix `ait_` distinguishes from the bootstrap token's `zhi-bt-`, easier to grep.
     let mut buf = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut buf);
-    let token = format!(        "ait_{}",
+    let token = format!(
+        "ait_{}",
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
     );
     let id = format!("ait-{}", &hex_encode(&rand_bytes_3())[..6]);
@@ -4012,7 +4102,10 @@ async fn delete_ai_token_handler(
     let now_unix_nano = zhiwei_common::Timestamp::now().unix_nano();
     match state.storage.ai_tokens().revoke(&id, now_unix_nano).await {
         Ok(true) => Json(serde_json::json!({ "ok": true, "id": id })).into_response(),
-        Ok(false) => err(StatusCode::NOT_FOUND, "id does not exist or has been revoked"),
+        Ok(false) => err(
+            StatusCode::NOT_FOUND,
+            "id does not exist or has been revoked",
+        ),
         Err(e) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("revoke ai token: {e}"),
@@ -4210,14 +4303,14 @@ async fn create_enroll_token_handler(
     let expires_at_unix = now_unix + ttl_secs;
 
     // Infer the monitor's public URL from request headers:
-// Infer the monitor's public URL from request headers:
+    // Infer the monitor's public URL from request headers:
     //   1) Prefer `X-Forwarded-Proto` + `Host` (managed platforms / nginx inject these)
     //   2) Fallback: see enroll_url_scheme
     let monitor_url = public_base_url(&headers, state.tls_terminated_locally);
 
     // When ZHIWEI_NODE_BASE_URL is set (domestic / isolated-network self-hosted distribution source),
-// the command automatically includes an extra line so the runner doesn't have to remember
-// to add it. If unset, leave as-is (go through GitHub Releases).
+    // the command automatically includes an extra line so the runner doesn't have to remember
+    // to add it. If unset, leave as-is (go through GitHub Releases).
     let base_url_line = state
         .node_base_url
         .as_deref()
@@ -4356,8 +4449,7 @@ mod enroll_token_tests {
     #[tokio::test]
     async fn add_with_label_records_metadata() {
         let tokens = BootstrapTokens::default();
-        tokens
-            .add_with_label("zhi-bt-labeled".into(), 3600, "prod-web".into());
+        tokens.add_with_label("zhi-bt-labeled".into(), 3600, "prod-web".into());
         let metas = tokens.list_active();
         assert_eq!(metas.len(), 1);
         assert_eq!(metas[0].label, "prod-web");
@@ -4369,8 +4461,7 @@ mod enroll_token_tests {
     #[tokio::test]
     async fn expired_tokens_drop_out_of_list_active() {
         let tokens = BootstrapTokens::default();
-        tokens
-            .add_with_label("zhi-bt-expired".into(), 0, String::new());
+        tokens.add_with_label("zhi-bt-expired".into(), 0, String::new());
         // TTL=0 → expires_at == now, filter condition is `> now`, so immediately invisible
         assert!(tokens.list_active().is_empty());
         assert!(!tokens.check("zhi-bt-expired"));
@@ -4379,10 +4470,8 @@ mod enroll_token_tests {
     #[tokio::test]
     async fn revoke_by_id_removes_the_token() {
         let tokens = BootstrapTokens::default();
-        tokens
-            .add_with_label("zhi-bt-a".into(), 3600, "a".into());
-        tokens
-            .add_with_label("zhi-bt-b".into(), 3600, "b".into());
+        tokens.add_with_label("zhi-bt-a".into(), 3600, "a".into());
+        tokens.add_with_label("zhi-bt-b".into(), 3600, "b".into());
         let target_id = tokens
             .list_active()
             .into_iter()
@@ -4483,8 +4572,10 @@ mod enroll_token_tests {
 
     #[test]
     fn connection_refused_detected_even_without_the_right_kind() {
-        // Normal path: errno 111 → kind is also ConnectionRefused
-        let e = std::io::Error::from_raw_os_error(111);
+        // Real ECONNREFUSED maps to the right kind. The raw errno differs by
+        // platform (Linux 111, macOS/BSD 61), so derive it from the OS.
+        let refused_errno = if cfg!(target_os = "linux") { 111 } else { 61 };
+        let e = std::io::Error::from_raw_os_error(refused_errno);
         assert_eq!(e.kind(), std::io::ErrorKind::ConnectionRefused);
         assert!(is_connection_refused(&e));
 
@@ -4504,7 +4595,10 @@ mod enroll_token_tests {
     fn ops_connect_hint_always_says_what_to_do() {
         let refused = std::io::Error::other("Connection refused (os error 111)");
         let hint = ops_connect_error_hint(&refused, "http://127.0.0.1:8444");
-        assert!(hint.contains("no process is listening on that address"), "{hint}");
+        assert!(
+            hint.contains("no process is listening on that address"),
+            "{hint}"
+        );
         assert!(hint.contains("entrypoint"), "{hint}");
 
         let other = std::io::Error::other("connection reset by peer");
@@ -4514,8 +4608,8 @@ mod enroll_token_tests {
     }
 
     /// Overdue pending rows should be shown as expired: default TTL is only 60s; if the
-/// node stops polling, these rows stay "pending" forever and operators can't see in
-/// command history that they've long since been voided.
+    /// node stops polling, these rows stay "pending" forever and operators can't see in
+    /// command history that they've long since been voided.
     #[test]
     fn overdue_pending_is_shown_as_expired() {
         const NOW: i64 = 1_700_000_000_000_000_000;
@@ -4551,11 +4645,11 @@ mod enroll_token_tests {
 #[cfg(test)]
 mod channel_patch_tests {
     //! Channel edit (`PATCH /v1/channels/:id`) merge semantics.
-//!
-//! Key invariants:
-//!   1. Absent fields keep their existing values;
-//!   2. `secret` can only be overwritten; empty / absent cannot clear the stored credential;
-//!   3. The merged row must still pass the per-type required-field validation.
+    //!
+    //! Key invariants:
+    //!   1. Absent fields keep their existing values;
+    //!   2. `secret` can only be overwritten; empty / absent cannot clear the stored credential;
+    //!   3. The merged row must still pass the per-type required-field validation.
 
     use super::*;
     use zhiwei_storage::alerts_repo::NotifyChannel;

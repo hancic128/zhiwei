@@ -227,7 +227,8 @@ pub struct AlertsRepo {
 }
 
 impl AlertsRepo {
-    #[must_use] pub const fn new(pool: SqlitePool) -> Self {
+    #[must_use]
+    pub const fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 
@@ -456,14 +457,8 @@ impl AlertsRepo {
         let rules: Vec<AlertRule> = rows
             .into_iter()
             .map(|r| {
-                let (id_str, name, enabled, threshold, duration_seconds, updated_at) = (
-                    r.0.clone(),
-                    r.1.clone(),
-                    r.2 != 0,
-                    r.3,
-                    r.4,
-                    r.5,
-                );
+                let (id_str, name, enabled, threshold, duration_seconds, updated_at) =
+                    (r.0.clone(), r.1.clone(), r.2 != 0, r.3, r.4, r.5);
                 AlertRule {
                     id: 0, // metric rules use 0 as placeholder
                     name,
@@ -932,10 +927,7 @@ impl AlertsRepo {
             "UPDATE alerts SET resolved_at_unix_nano = ?
              WHERE source = 'cert' AND instr(source_ref, ?) = 1 AND resolved_at_unix_nano IS NULL"
         };
-        let key = cert_path.map_or_else(
-            || format!("{source_id}:"),
-            |p| format!("{source_id}:{p}"),
-        );
+        let key = cert_path.map_or_else(|| format!("{source_id}:"), |p| format!("{source_id}:{p}"));
         let r = sqlx::query(sql)
             .bind(now)
             .bind(key)
@@ -1353,7 +1345,10 @@ mod node_offline_tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(count, 1, "alerts table should have only one unresolved offline alert");
+        assert_eq!(
+            count, 1,
+            "alerts table should have only one unresolved offline alert"
+        );
 
         // Open a second node's offline alert: should insert a new row
         let id_c = repo
@@ -1425,7 +1420,10 @@ mod node_offline_tests {
             .open_node_offline_alert("n1", "host-a", "critical", "second", 300)
             .await
             .unwrap();
-        assert_ne!(first, second, "open after resolve should insert new row, not revive old");
+        assert_ne!(
+            first, second,
+            "open after resolve should insert new row, not revive old"
+        );
 
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM alerts WHERE source = 'node_offline'")
@@ -1488,7 +1486,10 @@ mod container_builtin_channel_tests {
         ] {
             assert!(ids.contains(&want), "missing builtin alert {want}: {ids:?}");
         }
-        assert!(list.iter().all(|r| r.enabled), "new builtin alerts should be enabled by default");
+        assert!(
+            list.iter().all(|r| r.enabled),
+            "new builtin alerts should be enabled by default"
+        );
     }
 
     #[tokio::test]
@@ -1520,7 +1521,10 @@ mod container_builtin_channel_tests {
             )
             .await
             .unwrap();
-        assert_eq!(a, b, "second open on same container should hit existing row");
+        assert_eq!(
+            a, b,
+            "second open on same container should hit existing row"
+        );
         assert_eq!(open_alert_count(&pool, "container").await, 1);
 
         // Another container's alert should not be accidentally closed

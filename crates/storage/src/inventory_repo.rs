@@ -17,7 +17,8 @@ pub struct InventoryRow {
 }
 
 impl InventoryRepo {
-    #[must_use] pub const fn new(pool: SqlitePool) -> Self {
+    #[must_use]
+    pub const fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 

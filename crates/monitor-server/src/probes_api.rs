@@ -32,13 +32,18 @@ pub async fn probe_config_handler(
     Query(q): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
-    let pq = uri.path_and_query().map_or("/", hyper::http::uri::PathAndQuery::as_str);
+    let pq = uri
+        .path_and_query()
+        .map_or("/", hyper::http::uri::PathAndQuery::as_str);
     let (node_id, _pub) = match verify_node(&state, &headers, method.as_str(), pq, &[]).await {
         Ok(id) => id,
         Err((code, msg)) => return err(code, msg),
     };
     if q.get("node_id").map(String::as_str) != Some(node_id.as_str()) {
-        return err(StatusCode::FORBIDDEN, "Can only fetch this node's probe config");
+        return err(
+            StatusCode::FORBIDDEN,
+            "Can only fetch this node's probe config",
+        );
     }
 
     let probes = match state
@@ -105,7 +110,9 @@ pub async fn probe_results_ingest_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let pq = uri.path_and_query().map_or("/", hyper::http::uri::PathAndQuery::as_str);
+    let pq = uri
+        .path_and_query()
+        .map_or("/", hyper::http::uri::PathAndQuery::as_str);
     let (node_id, _pub) = match verify_node(&state, &headers, method.as_str(), pq, &body).await {
         Ok(id) => id,
         Err((code, msg)) => return err(code, msg),
@@ -147,7 +154,10 @@ fn parse_probe_results(body: &Bytes) -> Result<ProbeResultsBody, (StatusCode, St
     let parsed: ProbeResultsBody = serde_json::from_slice(body)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid body: {e}")))?;
     if parsed.results.len() > 500 {
-        return Err((StatusCode::BAD_REQUEST, "Batch size cannot exceed 500".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Batch size cannot exceed 500".to_string(),
+        ));
     }
     Ok(parsed)
 }
@@ -220,8 +230,14 @@ async fn store_result(
         .await
     {
         Ok(transition) => {
-            crate::alerts::on_probe_transition(state, probe, &transition, node_id.as_str(), hostname)
-                .await;
+            crate::alerts::on_probe_transition(
+                state,
+                probe,
+                &transition,
+                node_id.as_str(),
+                hostname,
+            )
+            .await;
             true
         }
         Err(e) => {
@@ -525,7 +541,7 @@ pub async fn patch_service_handler(
                         .resolve_open_probe_alerts(&p.id, now)
                         .await
                     {
-                    warn!(error = %e, "Failed to close service probe alerts");
+                        warn!(error = %e, "Failed to close service probe alerts");
                     }
                 }
             }
@@ -639,7 +655,10 @@ fn normalize_probe_parts(
             if host.trim().is_empty() {
                 return Err(format!("{kind} probe: target.host cannot be empty"));
             }
-            let port = target.get("port").and_then(serde_json::Value::as_i64).unwrap_or(0);
+            let port = target
+                .get("port")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0);
             if !(1..=65535).contains(&port) {
                 return Err(format!("{kind} probe: target.port must be between 1-65535"));
             }
@@ -844,7 +863,12 @@ pub async fn patch_probe_handler(
                 Err(e) => return err(StatusCode::BAD_REQUEST, e),
             }
         }
-        (None, Some(_)) => return err(StatusCode::BAD_REQUEST, "Changing target requires providing kind at the same time"),
+        (None, Some(_)) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "Changing target requires providing kind at the same time",
+            )
+        }
         _ => None,
     };
 

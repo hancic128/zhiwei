@@ -248,7 +248,10 @@ async fn fetch_specs(
                     .get("interval_seconds")
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(60),
-                timeout_ms: p.get("timeout_ms").and_then(serde_json::Value::as_u64).unwrap_or(5000),
+                timeout_ms: p
+                    .get("timeout_ms")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(5000),
             })
         })
         .collect())
@@ -483,7 +486,11 @@ async fn probe_tcp(spec: &ProbeSpec) -> Outcome {
         let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
         let banner = String::from_utf8_lossy(&buf[..read]).to_string();
         if read > 0 && !banner.contains(needle) {
-            return Outcome::degraded(Some(latency_ms), None, format!("banner does not contain {needle:?}"));
+            return Outcome::degraded(
+                Some(latency_ms),
+                None,
+                format!("banner does not contain {needle:?}"),
+            );
         }
     }
 

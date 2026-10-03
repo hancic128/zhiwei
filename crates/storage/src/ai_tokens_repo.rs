@@ -31,7 +31,8 @@ pub struct AiToken {
 }
 
 impl AiToken {
-    #[must_use] pub const fn is_active(&self) -> bool {
+    #[must_use]
+    pub const fn is_active(&self) -> bool {
         self.revoked_at_unix_nano.is_none()
     }
 }
@@ -54,7 +55,8 @@ pub struct AiTokensRepo {
 }
 
 impl AiTokensRepo {
-    #[must_use] pub const fn new(pool: SqlitePool) -> Self {
+    #[must_use]
+    pub const fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 

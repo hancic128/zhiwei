@@ -250,7 +250,8 @@ const PROBE_COLS: &str =
      p.created_at_unix_nano, p.updated_at_unix_nano";
 
 /// Aggregate worst state (service health = worst probe state)
-#[must_use] pub fn worst_state(states: &[String]) -> String {
+#[must_use]
+pub fn worst_state(states: &[String]) -> String {
     if states.is_empty() {
         return "unknown".into();
     }
@@ -272,7 +273,8 @@ pub struct ProbesRepo {
 }
 
 impl ProbesRepo {
-    #[must_use] pub const fn new(pool: SqlitePool) -> Self {
+    #[must_use]
+    pub const fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 

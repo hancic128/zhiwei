@@ -24,7 +24,8 @@ pub struct CertSource {
 
 impl CertSource {
     /// Whether this applies to all nodes (`node_id` is empty string)
-    #[must_use] pub fn is_all_nodes(&self) -> bool {
+    #[must_use]
+    pub fn is_all_nodes(&self) -> bool {
         self.node_id.is_empty()
     }
 }
@@ -76,7 +77,8 @@ pub struct CertSourcesRepo {
 }
 
 impl CertSourcesRepo {
-    #[must_use] pub const fn new(pool: SqlitePool) -> Self {
+    #[must_use]
+    pub const fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 

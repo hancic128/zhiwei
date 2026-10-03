@@ -139,10 +139,7 @@ fn level_style(rule: &AlertRule, firing: bool) -> LevelStyle {
 /// this one line, and the body can elaborate on details.
 fn title_line(rule: &AlertRule, facts: &AlertFacts) -> String {
     let lv = level_style(rule, facts.firing);
-    format!(
-        "{} {} · {} ({})",
-        lv.emoji, lv.label, rule.name, facts.node
-    )
+    format!("{} {} · {} ({})", lv.emoji, lv.label, rule.name, facts.node)
 }
 
 /// JSON form of card columns (used by generic webhook / Bluebird payload).
@@ -416,8 +413,7 @@ async fn fire_metric_alert(
     } else {
         String::new()
     };
-    let message =
-        format!("{label} {sym}{threshold}{unit} (current: {value:.1}{unit}{duration})");
+    let message = format!("{label} {sym}{threshold}{unit} (current: {value:.1}{unit}{duration})");
     if !open_metric_alert(repo, rule, node_id, hostname, value, &message, now, since).await {
         return;
     }
@@ -780,7 +776,9 @@ fn now_unix_secs() -> i64 {
 /// Exchange (or reuse) the Feishu app's `tenant_access_token`.
 async fn feishu_token(app_id: &str, app_secret: &str) -> anyhow::Result<String> {
     {
-        let cache = feishu_tokens().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cache = feishu_tokens()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some((token, expire_at)) = cache.get(&(app_id.to_string(), app_secret.to_string())) {
             // Treat as expired 60s early — don't let the first notification hit 401 on the boundary
             if expire_at - 60 > now_unix_secs() {
@@ -795,8 +793,8 @@ async fn feishu_token(app_id: &str, app_secret: &str) -> anyhow::Result<String> 
     );
     let body = serde_json::json!({ "app_id": app_id, "app_secret": app_secret }).to_string();
     let raw = post_json(&url, "", &body).await?;
-    let v: serde_json::Value =
-        serde_json::from_slice(&raw).map_err(|e| anyhow::anyhow!("Feishu response is not JSON: {e}"))?;
+    let v: serde_json::Value = serde_json::from_slice(&raw)
+        .map_err(|e| anyhow::anyhow!("Feishu response is not JSON: {e}"))?;
     let token = v
         .get("tenant_access_token")
         .and_then(|t| t.as_str())
@@ -806,7 +804,10 @@ async fn feishu_token(app_id: &str, app_secret: &str) -> anyhow::Result<String> 
         let why = body_error(&raw).unwrap_or_else(|| body_detail(&raw));
         anyhow::bail!("Failed to exchange Feishu tenant_access_token{why}");
     }
-    let expire = v.get("expire").and_then(serde_json::Value::as_i64).unwrap_or(7200);
+    let expire = v
+        .get("expire")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(7200);
     feishu_tokens()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -896,7 +897,10 @@ pub async fn on_probe_transition(
     if transition.new_state != STATE_DOWN {
         return;
     }
-    handle_probe_down(state, &repo, probe, transition, node_id, hostname, &rule_name, now).await;
+    handle_probe_down(
+        state, &repo, probe, transition, node_id, hostname, &rule_name, now,
+    )
+    .await;
 }
 
 /// Probe returned to `ok`: close any open alert, then (if the `service_online` toggle allows)
@@ -965,7 +969,10 @@ async fn handle_probe_down(
 
     let severity = "critical";
     let detail = if transition.last_error.is_empty() {
-        format!("{} consecutive check failures", transition.consecutive_failures)
+        format!(
+            "{} consecutive check failures",
+            transition.consecutive_failures
+        )
     } else {
         transition.last_error.clone()
     };
@@ -976,16 +983,11 @@ async fn handle_probe_down(
 
     let opened = repo
         .open_probe_alert(
-            &probe.id,
-            rule_name,
+            &probe.id, rule_name,
             // Alert recorded on the node that "reported this result": the probe may be bound to
             // multiple nodes (or any node), recording the reporting node shows at a glance which
             // machine detected it
-            node_id,
-            hostname,
-            severity,
-            &message,
-            now,
+            node_id, hostname, severity, &message, now,
         )
         .await;
     let alert_id = match opened {
@@ -1112,7 +1114,13 @@ pub async fn on_node_liveness_change(state: &AppState, transitions: &[(String, S
 }
 
 /// Node went offline: open (or refresh) the single unresolved offline alert and notify once.
-async fn handle_node_offline(state: &AppState, repo: &AlertsRepo, node_id: &str, hostname: &str, now: i64) {
+async fn handle_node_offline(
+    state: &AppState,
+    repo: &AlertsRepo,
+    node_id: &str,
+    hostname: &str,
+    now: i64,
+) {
     // If the builtin rule is off, do nothing — neither open alert nor send notification
     if !builtin_enabled_or_default(repo, "node_offline").await {
         return;
@@ -1163,7 +1171,10 @@ async fn notify_node_offline(
     let facts = AlertFacts {
         node: hostname.to_string(),
         firing: true,
-        fields: vec![("Node", hostname.to_string()), ("Status", "offline".to_string())],
+        fields: vec![
+            ("Node", hostname.to_string()),
+            ("Status", "offline".to_string()),
+        ],
         detail: format!("Node {hostname} is offline"),
     };
     notify(state, &rule, &facts, now).await;
@@ -1171,7 +1182,13 @@ async fn notify_node_offline(
 }
 
 /// Node came back online: close any lingering offline alert and (per the `node_online` toggle) notify.
-async fn handle_node_online(state: &AppState, repo: &AlertsRepo, node_id: &str, hostname: &str, now: i64) {
+async fn handle_node_online(
+    state: &AppState,
+    repo: &AlertsRepo,
+    node_id: &str,
+    hostname: &str,
+    now: i64,
+) {
     let resolved = close_node_offline_alerts(repo, node_id, now).await;
     notify_node_online(state, repo, node_id, hostname, now).await;
     if resolved > 0 {
@@ -1193,7 +1210,13 @@ async fn close_node_offline_alerts(repo: &AlertsRepo, node_id: &str, now: i64) -
 
 /// "Online" is a separate event: as long as the transition goes from Offline to Online we send a
 /// notification, not dependent on the alert close count — sending is a separate path.
-async fn notify_node_online(state: &AppState, repo: &AlertsRepo, node_id: &str, hostname: &str, now: i64) {
+async fn notify_node_online(
+    state: &AppState,
+    repo: &AlertsRepo,
+    node_id: &str,
+    hostname: &str,
+    now: i64,
+) {
     if !builtin_enabled_or_default(repo, "node_online").await {
         return;
     }
@@ -1201,7 +1224,10 @@ async fn notify_node_online(state: &AppState, repo: &AlertsRepo, node_id: &str, 
     let facts = AlertFacts {
         node: hostname.to_string(),
         firing: true,
-        fields: vec![("Node", hostname.to_string()), ("Status", "online".to_string())],
+        fields: vec![
+            ("Node", hostname.to_string()),
+            ("Status", "online".to_string()),
+        ],
         detail: format!("Node {hostname} is online"),
     };
     notify(state, &rule, &facts, now).await;
@@ -1258,8 +1284,18 @@ pub async fn evaluate_cert_expiry(
 
     for source in sources.iter().filter(|s| s.notify_enabled) {
         for cert in &certs {
-            evaluate_cert(state, &repo, source, cert, node_id, hostname, now, &open, &mut open_by_ref)
-                .await;
+            evaluate_cert(
+                state,
+                &repo,
+                source,
+                cert,
+                node_id,
+                hostname,
+                now,
+                &open,
+                &mut open_by_ref,
+            )
+            .await;
         }
     }
 
@@ -1292,7 +1328,10 @@ async fn evaluate_cert(
     {
         return;
     }
-    let Some(not_after) = cert.get("not_after_unix_nano").and_then(serde_json::Value::as_i64) else {
+    let Some(not_after) = cert
+        .get("not_after_unix_nano")
+        .and_then(serde_json::Value::as_i64)
+    else {
         return;
     };
     let path = cert.get("path").and_then(|v| v.as_str()).unwrap_or("");
@@ -1345,8 +1384,19 @@ async fn evaluate_cert(
 
     let Some(id) = open_by_ref.remove(&source_ref) else {
         open_cert_alert(
-            state, repo, &name, &source_ref, severity, notify_days, days_left, &message,
-            node_id, hostname, source.notify_days_before, expired, now,
+            state,
+            repo,
+            &name,
+            &source_ref,
+            severity,
+            notify_days,
+            days_left,
+            &message,
+            node_id,
+            hostname,
+            source.notify_days_before,
+            expired,
+            now,
         )
         .await;
         return;
@@ -1401,7 +1451,14 @@ async fn open_cert_alert(
     let rule_name = format!("Certificate expiry · {name}");
     let opened = repo
         .open_cert_alert(
-            source_ref, &rule_name, node_id, hostname, severity, notify_days, days_left, message,
+            source_ref,
+            &rule_name,
+            node_id,
+            hostname,
+            severity,
+            notify_days,
+            days_left,
+            message,
             now,
         )
         .await;
@@ -1554,7 +1611,8 @@ fn diff_containers(previous_json: &str, current_json: &str) -> Vec<ContainerEven
                         id: id.clone(),
                         name: name.clone(),
                     });
-                } else if *prev_running && *cur_running
+                } else if *prev_running
+                    && *cur_running
                     && *prev_started > 0
                     && *cur_started > *prev_started
                 {
@@ -2207,7 +2265,10 @@ mod tests {
         let content: serde_json::Value =
             serde_json::from_str(body["content"].as_str().unwrap()).unwrap();
         assert_eq!(content["header"]["template"], "orange");
-        assert!(content.get("card").is_none(), "should not wrap in another `card`");
+        assert!(
+            content.get("card").is_none(),
+            "should not wrap in another `card`"
+        );
 
         assert_eq!(
             feishu_messages_url("https://open.feishu.cn", "chat_id"),

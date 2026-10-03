@@ -98,12 +98,18 @@ impl ControlPolls {
     /// Record one pull. On lock poisoning, recover the inner state (this table
     /// is just a "last seen" hint; not worth crashing the whole process over it).
     pub fn note(&self, node_id: &str, now_ms: i64) {
-        let mut map = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut map = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         map.insert(node_id.to_string(), now_ms);
     }
 
     pub fn last(&self, node_id: &str) -> Option<i64> {
-        let map = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let map = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         map.get(node_id).copied()
     }
 }

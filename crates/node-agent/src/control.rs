@@ -407,7 +407,10 @@ async fn run_shutdown(args: &[&str]) -> anyhow::Result<Vec<u8>> {
     for (bin, argv) in [("shutdown", args), ("systemctl", fallback)] {
         match tokio::process::Command::new(bin).args(argv).output().await {
             Ok(out) if out.status.success() => {
-                return Ok(format!("{bin} {} dispatched (executes in 1 minute)", argv.join(" ")).into_bytes());
+                return Ok(
+                    format!("{bin} {} dispatched (executes in 1 minute)", argv.join(" "))
+                        .into_bytes(),
+                );
             }
             Ok(out) => {
                 last = format!("{bin}: {}", String::from_utf8_lossy(&out.stderr).trim());
@@ -458,7 +461,10 @@ async fn submit_result(
         )
         .await?;
     if status != 204 {
-        anyhow::bail!("receipt submission returned {status}: {}", String::from_utf8_lossy(&body));
+        anyhow::bail!(
+            "receipt submission returned {status}: {}",
+            String::from_utf8_lossy(&body)
+        );
     }
     Ok(())
 }

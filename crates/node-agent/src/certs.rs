@@ -248,7 +248,11 @@ mod tests {
         std::fs::write(dir.join("notes.txt"), "ignored by glob").unwrap();
 
         let (patterns, entries) = scan_path(dir.to_str().unwrap());
-        assert_eq!(patterns.len(), 4, "directory should expand to 4 suffix globs");
+        assert_eq!(
+            patterns.len(),
+            4,
+            "directory should expand to 4 suffix globs"
+        );
         assert_eq!(
             entries.len(),
             1,
@@ -304,10 +308,7 @@ mod tests {
         // Multiple user globs comma-separated, empty segments dropped
         let merged = merge_globs("/opt/a/*.pem, ,/opt/b/*.crt");
         assert_eq!(merged.len(), default_count + 2);
-        assert!(merged.ends_with(&[
-            "/opt/a/*.pem".to_string(),
-            "/opt/b/*.crt".to_string()
-        ]));
+        assert!(merged.ends_with(&["/opt/a/*.pem".to_string(), "/opt/b/*.crt".to_string()]));
 
         // Empty = only scan defaults (not "scan nothing")
         let merged = merge_globs("");

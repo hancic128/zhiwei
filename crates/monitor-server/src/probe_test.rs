@@ -97,7 +97,8 @@ fn latency_verdict(expect: &Value, latency_ms: f64, status_code: Option<i64>) ->
 }
 
 pub async fn run(kind: &str, target: &Value, expect: &Value, timeout_ms: i64) -> Outcome {
-    let timeout = Duration::from_millis(u64::try_from(timeout_ms.clamp(100, 60_000)).unwrap_or(100));
+    let timeout =
+        Duration::from_millis(u64::try_from(timeout_ms.clamp(100, 60_000)).unwrap_or(100));
     match kind {
         "http" => tokio::time::timeout(timeout, probe_http(target, expect))
             .await
@@ -228,7 +229,13 @@ async fn probe_http(target: &Value, expect: &Value) -> Outcome {
 
 async fn probe_tcp(target: &Value, expect: &Value) -> Outcome {
     let host = str_field(target, "host");
-    let port = u16::try_from(target.get("port").and_then(serde_json::Value::as_u64).unwrap_or(0)).unwrap_or(0);
+    let port = u16::try_from(
+        target
+            .get("port")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+    )
+    .unwrap_or(0);
     if host.is_empty() || port == 0 {
         return Outcome::down("bad_url", json!({}));
     }
@@ -272,7 +279,13 @@ async fn probe_tcp(target: &Value, expect: &Value) -> Outcome {
 
 async fn probe_tls(target: &Value, expect: &Value) -> Outcome {
     let host = str_field(target, "host");
-    let port = u16::try_from(target.get("port").and_then(serde_json::Value::as_u64).unwrap_or(443)).unwrap_or(0);
+    let port = u16::try_from(
+        target
+            .get("port")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(443),
+    )
+    .unwrap_or(0);
     if host.is_empty() || port == 0 {
         return Outcome::down("bad_url", json!({}));
     }
@@ -302,7 +315,12 @@ async fn probe_tls(target: &Value, expect: &Value) -> Outcome {
     let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config(!verify)));
     let name = match rustls::pki_types::ServerName::try_from(sni.clone()) {
         Ok(n) => n,
-        Err(e) => return Outcome::down("tls", json!({ "detail": format!("Invalid SNI {sni}: {e}") })),
+        Err(e) => {
+            return Outcome::down(
+                "tls",
+                json!({ "detail": format!("Invalid SNI {sni}: {e}") }),
+            )
+        }
     };
     let tls_stream = match connector.connect(name, stream).await {
         Ok(s) => s,

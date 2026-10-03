@@ -59,39 +59,48 @@ impl Storage {
         Ok(Self { pool })
     }
 
-    #[must_use] pub const fn pool(&self) -> &SqlitePool {
+    #[must_use]
+    pub const fn pool(&self) -> &SqlitePool {
         &self.pool
     }
 
-    #[must_use] pub fn nodes(&self) -> NodeRepo {
+    #[must_use]
+    pub fn nodes(&self) -> NodeRepo {
         NodeRepo::new(self.pool.clone())
     }
 
-    #[must_use] pub fn telemetry(&self) -> TelemetryRepo {
+    #[must_use]
+    pub fn telemetry(&self) -> TelemetryRepo {
         TelemetryRepo::new(self.pool.clone())
     }
 
-    #[must_use] pub fn inventory(&self) -> InventoryRepo {
+    #[must_use]
+    pub fn inventory(&self) -> InventoryRepo {
         InventoryRepo::new(self.pool.clone())
     }
 
-    #[must_use] pub fn alerts(&self) -> AlertsRepo {
+    #[must_use]
+    pub fn alerts(&self) -> AlertsRepo {
         AlertsRepo::new(self.pool.clone())
     }
 
-    #[must_use] pub fn commands(&self) -> CommandsRepo {
+    #[must_use]
+    pub fn commands(&self) -> CommandsRepo {
         CommandsRepo::new(self.pool.clone())
     }
 
-    #[must_use] pub fn probes(&self) -> ProbesRepo {
+    #[must_use]
+    pub fn probes(&self) -> ProbesRepo {
         ProbesRepo::new(self.pool.clone())
     }
 
-    #[must_use] pub fn cert_sources(&self) -> CertSourcesRepo {
+    #[must_use]
+    pub fn cert_sources(&self) -> CertSourcesRepo {
         CertSourcesRepo::new(self.pool.clone())
     }
 
-    #[must_use] pub fn ai_tokens(&self) -> AiTokensRepo {
+    #[must_use]
+    pub fn ai_tokens(&self) -> AiTokensRepo {
         AiTokensRepo::new(self.pool.clone())
     }
 }

@@ -226,7 +226,9 @@ pub async fn container_remove(container: &str, force: bool) -> anyhow::Result<St
     // Already gone: console row is a ghost from the snapshot. Delete intent is satisfied, don't error --
     // refresh and this row disappears.
     if status == 404 {
-        return Ok(format!("Container {container} no longer exists (may have already been deleted)"));
+        return Ok(format!(
+            "Container {container} no longer exists (may have already been deleted)"
+        ));
     }
     if !(200..300).contains(&status) {
         anyhow::bail!("{}", docker_error_message(status, &body));
@@ -449,14 +451,12 @@ struct StatsCpuUsage {
 /// For single sample (stream=false), `cpu` and `precpu` are exactly two consecutive ticks.
 fn usage_from_stats(s: &StatsResponse) -> ContainerUsage {
     let mem = s.memory.as_ref();
-    let cache = mem
-        .and_then(|m| m.stats.as_ref())
-        .map_or(0, |st| {
-            ["inactive_file", "cache", "total_inactive_file"]
-                .iter()
-                .find_map(|k| st.get(*k).copied())
-                .unwrap_or(0)
-        });
+    let cache = mem.and_then(|m| m.stats.as_ref()).map_or(0, |st| {
+        ["inactive_file", "cache", "total_inactive_file"]
+            .iter()
+            .find_map(|k| st.get(*k).copied())
+            .unwrap_or(0)
+    });
     let mem_usage_bytes = mem.map_or(0, |m| m.usage.saturating_sub(cache));
 
     let cpu = s.cpu.as_ref().and_then(|c| c.cpu_usage.as_ref());
@@ -469,18 +469,15 @@ fn usage_from_stats(s: &StatsResponse) -> ContainerUsage {
     let cpu_delta = cpu
         .map_or(0, |c| c.total_usage)
         .saturating_sub(pre.map_or(0, |c| c.total_usage));
-    let cores = s
-        .cpu
-        .as_ref()
-        .map_or(0_u64, |c| {
-            if c.online_cpus > 0 {
-                c.online_cpus
-            } else {
-                c.cpu_usage
-                    .as_ref()
-                    .map_or(0, |u| u.percpu_usage.as_ref().map_or(0, std::vec::Vec::len) as u64)
-            }
-        });
+    let cores = s.cpu.as_ref().map_or(0_u64, |c| {
+        if c.online_cpus > 0 {
+            c.online_cpus
+        } else {
+            c.cpu_usage.as_ref().map_or(0, |u| {
+                u.percpu_usage.as_ref().map_or(0, std::vec::Vec::len) as u64
+            })
+        }
+    });
     // CPU deltas are nanosecond counters (system-wide over a sampling interval).
     // At typical sampling rates these fit comfortably in f64's 52-bit mantissa
     // (~16 weeks of nanoseconds before precision loss); the ratio is what matters.
@@ -504,7 +501,8 @@ async fn container_usage(id: &str) -> anyhow::Result<ContainerUsage> {
         Ok(b) => b,
         Err(_) => docker_get(&format!("/containers/{id}/stats?stream=false")).await?,
     };
-    let parsed: StatsResponse = serde_json::from_slice(&body).context("failed to parse docker stats response")?;
+    let parsed: StatsResponse =
+        serde_json::from_slice(&body).context("failed to parse docker stats response")?;
     Ok(usage_from_stats(&parsed))
 }
 

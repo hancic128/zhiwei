@@ -280,12 +280,10 @@ where
         }
     }
 
-    let is_chunked = transfer_encoding
-        .as_deref()
-        .is_some_and(|s| {
-            s.split(',')
-                .any(|t| t.trim().eq_ignore_ascii_case("chunked"))
-        });
+    let is_chunked = transfer_encoding.as_deref().is_some_and(|s| {
+        s.split(',')
+            .any(|t| t.trim().eq_ignore_ascii_case("chunked"))
+    });
 
     // ---- body ----
     let body = if is_chunked {
@@ -310,9 +308,7 @@ where
 ///
 /// chunk = size-line CRLF data CRLF, size-line = 1*HEX [ ";" ext ].
 /// Terminating chunk = "0" CRLF *( trailer CRLF ) CRLF.
-pub async fn decode_chunked_body<R>(
-    br: &mut tokio::io::BufReader<R>,
-) -> anyhow::Result<Vec<u8>>
+pub async fn decode_chunked_body<R>(br: &mut tokio::io::BufReader<R>) -> anyhow::Result<Vec<u8>>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -366,10 +362,7 @@ where
 }
 
 /// Allows `TlsStream` and `TcpStream` to share a trait object
-pub trait IoStream:
-    tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send
-{
-}
+pub trait IoStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> IoStream for T {}
 
 pub fn build_client_config(

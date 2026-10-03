@@ -10,7 +10,6 @@
 //!   - Every `interval` seconds, build a `TelemetryBatch` (CPU/mem/disk/net)
 //!     and POST it to /v1/telemetry.
 
-
 #![warn(clippy::pedantic, clippy::nursery, clippy::cargo)]
 // `multiple_crate_versions` flags transitive deps (e.g. ed25519-dalek pulls
 // `rand_core` 0.10 while `rand` 0.8 pulls 0.6). Not actionable from project
@@ -457,6 +456,27 @@ const fn bytes_to_f64(bytes: u64) -> f64 {
     bytes as f64
 }
 
+/// The fullest mount point's `(usage_percent, used_bytes, total_bytes)`.
+///
+/// Percent and byte-count come from the same disk, so the "absolute value /
+/// ratio" views in the big-card and trend graph stay consistent. Mounts with
+/// zero total space are skipped.
+fn fullest_disk_stats(disks: &sysinfo::Disks) -> (f64, u64, u64) {
+    let fullest = disks.iter().filter(|d| d.total_space() > 0).max_by(|a, b| {
+        let ra =
+            bytes_to_f64(a.total_space() - a.available_space()) / bytes_to_f64(a.total_space());
+        let rb =
+            bytes_to_f64(b.total_space() - b.available_space()) / bytes_to_f64(b.total_space());
+        ra.partial_cmp(&rb).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let usage = fullest.map_or(0.0, |d| {
+        bytes_to_f64(d.total_space() - d.available_space()) * 100.0 / bytes_to_f64(d.total_space())
+    });
+    let used = fullest.map_or(0, |d| d.total_space().saturating_sub(d.available_space()));
+    let total = fullest.map_or(0, sysinfo::Disk::total_space);
+    (usage, used, total)
+}
+
 /// Take the top N processes by CPU usage.
 fn snapshot_processes(sys: &sysinfo::System) -> ProcessSnapshot {
     const TOP_N: usize = 20;
@@ -699,20 +719,7 @@ fn build_batch(node_id: &str, key: &EdKeyPair) -> anyhow::Result<TelemetryBatch>
         .collect();
 
     let disks = Disks::new_with_refreshed_list();
-    // "The mount point with highest usage" (skip fake mounts with total space 0).
-    // Percent and byte-count come from the same disk, so the "absolute value /
-    // ratio" views in the big-card and trend graph stay consistent.
-    let fullest = disks.iter().filter(|d| d.total_space() > 0).max_by(|a, b| {
-        let ra = bytes_to_f64(a.total_space() - a.available_space()) / bytes_to_f64(a.total_space());
-        let rb = bytes_to_f64(b.total_space() - b.available_space()) / bytes_to_f64(b.total_space());
-        ra.partial_cmp(&rb).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let max_disk_usage = fullest.map_or(0.0, |d| {
-        bytes_to_f64(d.total_space() - d.available_space()) * 100.0 / bytes_to_f64(d.total_space())
-    });
-    let disk_used_bytes = fullest
-        .map_or(0, |d| d.total_space().saturating_sub(d.available_space()));
-    let disk_total_bytes = fullest.map_or(0, sysinfo::Disk::total_space);
+    let (max_disk_usage, disk_used_bytes, disk_total_bytes) = fullest_disk_stats(&disks);
     metrics.push(Metric {
         name: "host.disk.usage".into(),
         value: max_disk_usage,
@@ -900,7 +907,9 @@ mod tests {
     /// clap not reading that key made it useless; this test nails down that contract.
     #[test]
     fn interval_reads_from_env() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::env::set_var("ZHIWEI_INTERVAL", "120");
         let a = Args::try_parse_from(["zhiwei-node", "--monitor", "http://x"]).unwrap();
         assert_eq!(a.interval, 120, "env ZHIWEI_INTERVAL=120 should be applied");
@@ -909,7 +918,9 @@ mod tests {
 
     #[test]
     fn interval_cli_overrides_env() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::env::set_var("ZHIWEI_INTERVAL", "120");
         let a = Args::try_parse_from(["zhiwei-node", "--monitor", "http://x", "--interval", "5"])
             .unwrap();
@@ -931,7 +942,9 @@ mod tests {
     /// Alias / tags read from env (install-node.sh writes to a 0600 env file; systemd / launchd then inject).
     #[test]
     fn alias_and_tags_read_from_env() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::env::set_var("ZHIWEI_NODE_ALIAS", "Beijing Entry");
         std::env::set_var("ZHIWEI_NODE_TAGS", "prod bj");
         let a = Args::try_parse_from(["zhiwei-node", "--monitor", "http://x"]).unwrap();

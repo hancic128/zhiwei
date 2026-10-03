@@ -175,7 +175,9 @@ pub async fn run_once(state: &AppState, now_ns: i64) -> anyhow::Result<Stats> {
     let now_hour = hour_start(now_ns);
     let watermark = telemetry.max_hourly_ts().await?;
     let aggregated_through = watermark
-        .map_or(now_hour - INITIAL_LOOKBACK_HOURS * NANOS_PER_HOUR, |w| w + NANOS_PER_HOUR);
+        .map_or(now_hour - INITIAL_LOOKBACK_HOURS * NANOS_PER_HOUR, |w| {
+            w + NANOS_PER_HOUR
+        });
 
     // Only process already-sealed hours (excluding the current hour),
     // max 48 at a time

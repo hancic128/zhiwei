@@ -10,7 +10,8 @@ use crate::{Error, Result};
 pub struct Signature(pub Vec<u8>);
 
 impl Signature {
-    #[must_use] pub fn as_bytes(&self) -> &[u8] {
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 }
@@ -21,11 +22,13 @@ impl Signature {
 pub struct PublicKey(pub Vec<u8>);
 
 impl PublicKey {
-    #[must_use] pub fn as_bytes(&self) -> &[u8] {
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 
-    #[must_use] pub fn from_verifying_key(k: &VerifyingKey) -> Self {
+    #[must_use]
+    pub fn from_verifying_key(k: &VerifyingKey) -> Self {
         Self(k.to_bytes().to_vec())
     }
 
@@ -52,7 +55,8 @@ pub struct KeyPair {
 }
 
 impl KeyPair {
-    #[must_use] pub fn generate() -> Self {
+    #[must_use]
+    pub fn generate() -> Self {
         let mut csprng = OsRng;
         let signing_key = SigningKey::generate(&mut csprng);
         Self { signing_key }
@@ -71,15 +75,18 @@ impl KeyPair {
         })
     }
 
-    #[must_use] pub fn to_bytes(&self) -> [u8; 32] {
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; 32] {
         self.signing_key.to_bytes()
     }
 
-    #[must_use] pub fn public_key(&self) -> PublicKey {
+    #[must_use]
+    pub fn public_key(&self) -> PublicKey {
         PublicKey::from_verifying_key(&self.signing_key.verifying_key())
     }
 
-    #[must_use] pub fn sign(&self, message: &[u8]) -> Signature {
+    #[must_use]
+    pub fn sign(&self, message: &[u8]) -> Signature {
         let sig = self.signing_key.sign(message);
         Signature(sig.to_bytes().to_vec())
     }

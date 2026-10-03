@@ -217,8 +217,7 @@ pub async fn todo_handler(State(state): State<AppState>, headers: HeaderMap) -> 
 
 /// Whether a node last seen at `last_seen_unix_nano` is considered online at `now_epoch_ms`.
 fn is_online(last_seen_unix_nano: Option<i64>, now_epoch_ms: i64) -> bool {
-    last_seen_unix_nano
-        .is_some_and(|ts| now_epoch_ms - ts / 1_000_000 < NODE_OFFLINE_AFTER_MS)
+    last_seen_unix_nano.is_some_and(|ts| now_epoch_ms - ts / 1_000_000 < NODE_OFFLINE_AFTER_MS)
 }
 
 /// Node names in the todo always use the "display name" (alias if set) —

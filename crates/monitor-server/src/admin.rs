@@ -133,7 +133,9 @@ pub fn validate_env_token(name: &str, raw: &str) -> Result<String, String> {
 /// it's easy to copy correctly).
 pub fn validate_new_token(token: &str) -> Result<(), String> {
     if token.len() < MIN_TOKEN_LEN {
-        return Err(format!("credential must be at least {MIN_TOKEN_LEN} characters"));
+        return Err(format!(
+            "credential must be at least {MIN_TOKEN_LEN} characters"
+        ));
     }
     if token.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err("credential must not contain whitespace or control characters".into());
@@ -220,7 +222,10 @@ mod tests {
         let (token, source) = load_or_init(&dir).await.unwrap();
         std::env::remove_var("ZHIWEI_ADMIN_TOKEN");
 
-        assert_eq!(token, "env-token-0123456789abcdef", "leading/trailing whitespace should be trimmed");
+        assert_eq!(
+            token, "env-token-0123456789abcdef",
+            "leading/trailing whitespace should be trimmed"
+        );
         assert_eq!(source, TokenSource::Env);
         assert!(
             !token_path.exists(),

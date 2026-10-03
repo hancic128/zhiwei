@@ -14,7 +14,6 @@
 //!
 //! hyper-util's auto builder negotiates HTTP/1.1 or HTTP/2 per connection.
 
-
 #![warn(clippy::pedantic, clippy::nursery, clippy::cargo)]
 // `multiple_crate_versions` flags transitive deps (e.g. ed25519-dalek pulls
 // `rand_core` 0.10 while `rand` 0.8 pulls 0.6; sqlx pulls `thiserror` 2 while
@@ -97,14 +96,14 @@ struct Args {
 
 /// Whether we are running in a "`PaaS` that terminates TLS at the edge" environment:
 /// Render / Railway / Northflank / Heroku.
-    /// Only used as a default when `--plain-http` is not explicitly configured;
-    /// self-hosted hosts are not affected.
-    ///
-    /// Note: this is just a convenience layer. Platforms like Northflank neither
-    /// inject `PORT` nor have a stable env var prefix (in practice `listen` falls
-    /// back to the default loopback), so auto-detection does not cover them —
-    /// you must explicitly set `ZHIWEI_PLAIN_HTTP=1`. An explicit `--plain-http`
-    /// always wins over auto-detection.
+/// Only used as a default when `--plain-http` is not explicitly configured;
+/// self-hosted hosts are not affected.
+///
+/// Note: this is just a convenience layer. Platforms like Northflank neither
+/// inject `PORT` nor have a stable env var prefix (in practice `listen` falls
+/// back to the default loopback), so auto-detection does not cover them —
+/// you must explicitly set `ZHIWEI_PLAIN_HTTP=1`. An explicit `--plain-http`
+/// always wins over auto-detection.
 fn detect_paas_edge_terminates_tls() -> bool {
     // Render always injects `RENDER=true`.
     if std::env::var("RENDER").ok().as_deref() == Some("true") {
@@ -279,13 +278,7 @@ fn warn_missing_ops_binary(endpoint: &str) {
 
 /// Spawn the ops process and wait (briefly) for its port to accept connections, so the
 /// command channel is usable as soon as monitor is ready.
-async fn spawn_ops_server(
-    bin: &Path,
-    data_dir: &Path,
-    host: &str,
-    port: u16,
-    endpoint: &str,
-) {
+async fn spawn_ops_server(bin: &Path, data_dir: &Path, host: &str, port: u16, endpoint: &str) {
     let spawned = tokio::process::Command::new(bin)
         .env("ZHIWEI_DATA_DIR", data_dir)
         // Let the spawned ops listen on the address monitor actually connects to
@@ -363,7 +356,10 @@ fn init_tracing() {
 async fn load_startup_context() -> anyhow::Result<StartupContext> {
     let args = Args::parse();
     let cfg = config::MonitorConfig::load(&args.config).context("loading config")?;
-    let data_dir = args.data_dir.clone().unwrap_or_else(|| cfg.data_dir.clone());
+    let data_dir = args
+        .data_dir
+        .clone()
+        .unwrap_or_else(|| cfg.data_dir.clone());
     let listen = args.listen.clone().unwrap_or_else(|| cfg.listen.clone());
 
     tokio::fs::create_dir_all(&data_dir)
@@ -644,7 +640,10 @@ async fn start_background_tasks(state: &AppState) {
 }
 
 /// Serve forever over plain HTTP; TLS is terminated by the upstream edge.
-async fn serve_plain_http(listener: tokio::net::TcpListener, app: axum::Router) -> anyhow::Result<()> {
+async fn serve_plain_http(
+    listener: tokio::net::TcpListener,
+    app: axum::Router,
+) -> anyhow::Result<()> {
     // Node identity comes from request signatures, not the transport layer, so we do no
     // extra authentication here — every request has to prove itself.
     loop {
@@ -652,12 +651,11 @@ async fn serve_plain_http(listener: tokio::net::TcpListener, app: axum::Router) 
         let app = app.clone();
         tokio::spawn(async move {
             let io = TokioIo::new(stream);
-            let svc = hyper::service::service_fn(
-                move |req: hyper::Request<hyper::body::Incoming>| {
+            let svc =
+                hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
                     let app = app.clone();
                     async move { app.oneshot(req).await }
-                },
-            );
+                });
             if let Err(e) = AutoBuilder::new(TokioExecutor::new())
                 .serve_connection(io, svc)
                 .await
@@ -819,7 +817,10 @@ mod listen_tests {
             "[::1]:8443",
             "::1:8443",
         ] {
-            assert!(listen_is_loopback(addr), "{addr} should be classified as loopback");
+            assert!(
+                listen_is_loopback(addr),
+                "{addr} should be classified as loopback"
+            );
         }
     }
 
@@ -834,7 +835,10 @@ mod listen_tests {
             "10.0.0.5:8443",
             "monitor.internal:8443",
         ] {
-            assert!(!listen_is_loopback(addr), "{addr} should not be classified as loopback");
+            assert!(
+                !listen_is_loopback(addr),
+                "{addr} should not be classified as loopback"
+            );
         }
     }
 }

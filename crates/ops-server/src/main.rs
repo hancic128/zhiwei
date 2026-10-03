@@ -7,7 +7,6 @@
 //!
 //! Ops only listens on loopback address, for monitor to forward commands initiated by the console.
 
-
 #![warn(clippy::pedantic, clippy::nursery, clippy::cargo)]
 // `multiple_crate_versions` flags transitive deps (e.g. ed25519-dalek pulls
 // `rand_core` 0.10 while `rand` 0.8 pulls 0.6). Not actionable from project
@@ -74,7 +73,8 @@ async fn main() -> anyhow::Result<()> {
     let pub_path = args.data_dir.join("ops.pub");
     let key = if key_path.exists() {
         let raw = tokio::fs::read(&key_path).await?;
-        KeyPair::from_bytes(&raw).map_err(|e| anyhow::anyhow!("Failed to read ops private key: {e}"))?
+        KeyPair::from_bytes(&raw)
+            .map_err(|e| anyhow::anyhow!("Failed to read ops private key: {e}"))?
     } else {
         let kp = KeyPair::generate();
         tokio::fs::write(&key_path, kp.to_bytes()).await?;
@@ -157,7 +157,10 @@ fn parse_action(s: &str) -> Option<Action> {
 fn validate_params(action: Action, params: &serde_json::Value) -> Result<(), String> {
     match action {
         Action::KillProcess => {
-            let pid = params.get("pid").and_then(serde_json::Value::as_i64).unwrap_or(0);
+            let pid = params
+                .get("pid")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0);
             if pid <= 1 {
                 return Err("kill_process requires pid (positive integer, 1 not allowed)".into());
             }

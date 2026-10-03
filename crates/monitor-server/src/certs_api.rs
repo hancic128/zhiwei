@@ -39,13 +39,18 @@ pub async fn cert_config_handler(
     Query(q): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
-    let pq = uri.path_and_query().map_or("/", hyper::http::uri::PathAndQuery::as_str);
+    let pq = uri
+        .path_and_query()
+        .map_or("/", hyper::http::uri::PathAndQuery::as_str);
     let (node_id, _pub) = match verify_node(&state, &headers, method.as_str(), pq, &[]).await {
         Ok(id) => id,
         Err((code, msg)) => return err(code, msg),
     };
     if q.get("node_id").map(String::as_str) != Some(node_id.as_str()) {
-        return err(StatusCode::FORBIDDEN, "Can only fetch this node's certificate config");
+        return err(
+            StatusCode::FORBIDDEN,
+            "Can only fetch this node's certificate config",
+        );
     }
 
     let sources = match state
@@ -128,7 +133,10 @@ fn source_stats(source: &CertSource, snapshots: &[String], now_ns: i64) -> (i64,
             {
                 continue;
             }
-            if let Some(exp) = c.get("not_after_unix_nano").and_then(serde_json::Value::as_i64) {
+            if let Some(exp) = c
+                .get("not_after_unix_nano")
+                .and_then(serde_json::Value::as_i64)
+            {
                 let days_i64 = (exp - now_ns) / 86_400_000_000_000;
                 let days = f64::from(i32::try_from(days_i64).unwrap_or(i32::MAX));
                 nearest = Some(nearest.map_or(days, |cur: f64| cur.min(days)));
@@ -272,7 +280,10 @@ pub async fn create_cert_source_handler(
             // duplicate add).
             let msg = e.to_string();
             return if msg.contains("UNIQUE") {
-                err(StatusCode::CONFLICT, "A certificate source with this path already exists on this node")
+                err(
+                    StatusCode::CONFLICT,
+                    "A certificate source with this path already exists on this node",
+                )
             } else {
                 err(StatusCode::INTERNAL_SERVER_ERROR, format!("create: {msg}"))
             };
@@ -359,7 +370,10 @@ pub async fn patch_cert_source_handler(
     if let Err(e) = state.storage.cert_sources().update(&id, &update, now).await {
         let msg = e.to_string();
         return if msg.contains("UNIQUE") {
-            err(StatusCode::CONFLICT, "A certificate source with this path already exists on this node")
+            err(
+                StatusCode::CONFLICT,
+                "A certificate source with this path already exists on this node",
+            )
         } else {
             err(StatusCode::INTERNAL_SERVER_ERROR, format!("update: {msg}"))
         };
@@ -451,7 +465,7 @@ pub async fn test_cert_source_handler(
     };
     let node_id = b.node_id.trim().to_string();
     if node_id.is_empty() {
-return err(StatusCode::BAD_REQUEST, "Must select a node");
+        return err(StatusCode::BAD_REQUEST, "Must select a node");
     }
     let node = zhiwei_common::NodeId::from_string(node_id.clone());
     match state.storage.nodes().find_by_id(&node).await {
@@ -574,7 +588,10 @@ mod tests {
             cert_json("/etc/ssl/other.crt", "", 5, now),
         ];
         let (matched, nearest) = source_stats(&s, &snapshots, now);
-        assert_eq!(matched, 1, "only the one inside the directory counts as a match");
+        assert_eq!(
+            matched, 1,
+            "only the one inside the directory counts as a match"
+        );
         assert!((nearest.unwrap() - 20.0).abs() < 0.01);
     }
 

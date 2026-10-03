@@ -31,7 +31,8 @@ pub const MAX_SKEW_SECONDS: i64 = 300;
 /// Format: `zhiwei-v1\n<method>\n<path_and_query>\n<ts_nanos>\n<nonce_b64>\n<body>`
 /// First three fields contain no newlines (newlines in path are URL-encoded), and body comes last,
 /// so this concatenation is unambiguous, no extra hashing needed.
-#[must_use] pub fn canonical(
+#[must_use]
+pub fn canonical(
     method: &str,
     path_and_query: &str,
     ts_unix_nano: i64,
@@ -63,7 +64,8 @@ pub struct SignedHeaders {
 
 impl SignedHeaders {
     /// Sign one request using the node's private key
-    #[must_use] pub fn sign(
+    #[must_use]
+    pub fn sign(
         key: &KeyPair,
         node_id: &str,
         method: &str,
@@ -214,14 +216,23 @@ mod tests {
         let cache = NonceCache::default();
         let now = Timestamp::now().unix_nano();
 
-        assert!(cache.accept("nonce-a", now), "first occurrence should be accepted");
+        assert!(
+            cache.accept("nonce-a", now),
+            "first occurrence should be accepted"
+        );
         assert!(
             !cache.accept("nonce-a", now + 1),
             "same window repeat should be rejected"
         );
-        assert!(cache.accept("nonce-b", now), "different nonces don't affect each other");
+        assert!(
+            cache.accept("nonce-b", now),
+            "different nonces don't affect each other"
+        );
 
         let after_window = now + (MAX_SKEW_SECONDS + 1) * 1_000_000_000;
-        assert!(cache.accept("nonce-a", after_window), "reuse allowed after expiry");
+        assert!(
+            cache.accept("nonce-a", after_window),
+            "reuse allowed after expiry"
+        );
     }
 }

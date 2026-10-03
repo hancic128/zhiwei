@@ -211,7 +211,11 @@ pub async fn sse_handler(
             return sse_single(&rpc_error(&Value::Null, -32600, "jsonrpc must be \"2.0\""));
         }
         Err(e) => {
-            return sse_single(&rpc_error(&Value::Null, -32700, format!("parse error: {e}")));
+            return sse_single(&rpc_error(
+                &Value::Null,
+                -32700,
+                format!("parse error: {e}"),
+            ));
         }
     };
 
@@ -258,7 +262,10 @@ async fn call_tool(state: &AppState, bearer: Option<&str>, id: &Value, params: V
         Some(n) => n.to_string(),
         None => return rpc_error(id, -32602, "params.name required"),
     };
-    let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let arguments = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
     let Some(token) = bearer else {
         return rpc_error(id, -32603, "internal: bearer missing in handler context");
     };

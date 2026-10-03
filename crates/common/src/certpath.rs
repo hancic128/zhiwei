@@ -51,7 +51,8 @@ pub fn normalize(raw: &str) -> Result<String, String> {
 ///
 /// Input should already be normalized; here empty input returns empty list instead of error,
 /// caller (scan and match) safely handles empty list as "nothing matched".
-#[must_use] pub fn expand(raw: &str) -> Vec<String> {
+#[must_use]
+pub fn expand(raw: &str) -> Vec<String> {
     let p = raw.trim();
     if p.is_empty() {
         return Vec::new();
@@ -67,7 +68,8 @@ pub fn normalize(raw: &str) -> Result<String, String> {
 }
 
 /// Check if a reported cert path belongs to this source (path -> source lookup).
-#[must_use] pub fn matches(raw: &str, cert_path: &str) -> bool {
+#[must_use]
+pub fn matches(raw: &str, cert_path: &str) -> bool {
     // require_literal_separator: `*` doesn't cross directories, consistent with node side one-level expansion
     // (recursive glob with `**` is not affected)
     let opts = glob::MatchOptions {

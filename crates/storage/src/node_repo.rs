@@ -41,7 +41,8 @@ pub struct NodeRepo {
 }
 
 impl NodeRepo {
-    #[must_use] pub const fn new(pool: SqlitePool) -> Self {
+    #[must_use]
+    pub const fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 
@@ -492,7 +493,10 @@ mod delete_tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(audit_after, 1, "audit_log must be preserved -- it's an audit requirement");
+        assert_eq!(
+            audit_after, 1,
+            "audit_log must be preserved -- it's an audit requirement"
+        );
 
         // n1 is removed from probe's node_ids_json, n2 remains
         let raw: String = sqlx::query_scalar("SELECT node_ids_json FROM probes WHERE id = 'pr1'")
@@ -512,6 +516,9 @@ mod delete_tests {
         let pool = fresh_pool().await;
         let repo = NodeRepo::new(pool);
         let ok = repo.delete("does-not-exist").await.unwrap();
-        assert!(!ok, "deleting non-existent node should return false, not error");
+        assert!(
+            !ok,
+            "deleting non-existent node should return false, not error"
+        );
     }
 }
