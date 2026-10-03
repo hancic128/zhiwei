@@ -1,25 +1,17 @@
 import * as React from "react";
 import * as Popover from "@radix-ui/react-popover";
-import { useNavigate } from "react-router-dom";
 import {
-  Activity,
-  Box,
   Check,
   Globe,
-  HelpCircle,
-  Inbox,
   LogOut,
-  Menu,
   Moon,
   Palette,
-  Server,
   Settings,
-  ShieldCheck,
   Sun,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
-import { THEMES, type Locale, type Theme } from "@/lib/prefs";
+import { THEMES, type Theme } from "@/lib/prefs";
 import { usePrefs } from "@/components/prefs-provider";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useToast } from "@/components/ui/toast";
@@ -35,23 +27,6 @@ const THEME_SWATCH: Record<Theme, string> = {
 };
 
 /**
- * Popover menu lists available page views.
- *
- * Doesn't include "Settings": settings is a persistent entry (always visible in sidebar),
- * repeating it in the floating popover only muddies the "quick controls" group —
- * required on 2026-09-22.
- * Other page items share the same list as the sidebar.
- */
-const NAV_ITEMS = [
-  { to: "/", key: "todo", icon: Inbox },
-  { to: "/nodes", key: "nodes", icon: Server },
-  { to: "/services", key: "services", icon: Activity },
-  { to: "/containers", key: "containers", icon: Box },
-  { to: "/certificates", key: "certificates", icon: ShieldCheck },
-  { to: "/help", key: "help", icon: HelpCircle },
-] as const;
-
-/**
  * Spec 7.16 + prohibited list:
  *  - Converged to a single main button (Settings icon, brand solid), hover/focus expands sub-button group
  *  - Main button icon rotates 45° when expanded; auto-collapses ~180ms after mouse leaves; Esc collapses immediately
@@ -63,7 +38,6 @@ export function FloatingControls() {
   const { t } = useTranslation();
   const prefs = usePrefs();
   const toast = useToast();
-  const navigate = useNavigate();
 
   const [open, setOpen] = React.useState(false);
   const [confirmLogout, setConfirmLogout] = React.useState(false);
@@ -113,7 +87,7 @@ export function FloatingControls() {
           the transparent column in collapsed state also counts as hover area, so sweeping the mouse
           above the main button triggers expand. */}
       <div className="fixed bottom-6 right-6 z-30 flex flex-col items-end gap-3">
-        {/* Sub-button group: when expanded, top-to-bottom: nav → help → theme color → light/dark → language → logout.
+        {/* Sub-button group: when expanded, top-to-bottom: theme color → light/dark → language → logout.
             When folded, display:none (not just transparent): a non-collapsed transparent column would occupy
             the entire vertical strip, overlapping content at the bottom-right. */}
         <div
@@ -124,35 +98,6 @@ export function FloatingControls() {
           onMouseEnter={cancelClose}
           onMouseLeave={scheduleClose}
         >
-          {/* Page navigation */}
-          <Popover.Root>
-            <Popover.Trigger asChild>
-              <button type="button" className={subButton} aria-label={t("nav.menu")}>
-                <Menu className="w-5 h-5" aria-hidden="true" />
-              </button>
-            </Popover.Trigger>
-            <Popover.Portal>
-              <Popover.Content
-                side="left"
-                align="end"
-                sideOffset={12}
-                className="z-50 w-36 bg-surface-0 dark:bg-ink-700 rounded-xl shadow-lg border border-surface-3 dark:border-ink-700 p-2 animate-panel-slide"
-              >
-                {NAV_ITEMS.map((item) => (
-                  <button
-                    key={item.to}
-                    type="button"
-                    onClick={() => navigate(item.to)}
-                    className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-ink-700 hover:bg-surface-2 dark:text-surface-4 dark:hover:bg-ink-700/60"
-                  >
-                    <item.icon className="w-4 h-4 shrink-0" aria-hidden="true" />
-                    {t(`nav.${item.key}`)}
-                  </button>
-                ))}
-              </Popover.Content>
-            </Popover.Portal>
-          </Popover.Root>
-
           {/* Theme color: popover expands horizontally to the left of the button */}
           <Popover.Root>
             <Popover.Trigger asChild>
@@ -228,7 +173,7 @@ export function FloatingControls() {
           >
             <Globe className="w-5 h-5" aria-hidden="true" />
             <span className="absolute -bottom-1 -right-1 w-5 h-5 rounded-full bg-brand-600 text-white text-[10px] font-bold flex items-center justify-center">
-              {prefs.locale === "en-US" ? "EN" : "ZH"}
+              {prefs.locale === "en-US" ? "EN" : "中"}
             </span>
           </button>
 
@@ -293,9 +238,4 @@ export function FloatingControls() {
       />
     </>
   );
-}
-
-/** For reuse by language badge: short label for current locale */
-export function localeBadge(_locale: Locale) {
-  return "EN";
 }
