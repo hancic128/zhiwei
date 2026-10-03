@@ -35,11 +35,15 @@ type Row = (
 );
 
 impl CommandsRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    #[must_use] pub const fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 
     /// Insert when ops-server issues a command (payload is the full Command protobuf with signature)
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the insert fails (e.g. duplicate `id`).
     #[allow(clippy::too_many_arguments)]
     pub async fn insert(
         &self,
@@ -52,9 +56,9 @@ impl CommandsRepo {
         ttl_seconds: i64,
     ) -> anyhow::Result<()> {
         sqlx::query(
-            r#"INSERT INTO commands
+            r"INSERT INTO commands
                (id, node_id, action, params_json, payload_protobuf, issued_at_unix_nano, ttl_seconds, state)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')"#,
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')",
         )
         .bind(id)
         .bind(node_id)
@@ -68,6 +72,11 @@ impl CommandsRepo {
         Ok(())
     }
 
+    /// Record an audit-log row for a command issuance (outcome = `issued`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the underlying insert fails.
     pub async fn audit(
         &self,
         at_unix_nano: i64,
@@ -91,6 +100,10 @@ impl CommandsRepo {
 
     /// Same as [`Self::audit`], but with explicit outcome (`issued` / `done` / `failed` / `cancelled`).
     /// Used when "invalidating unsent commands and deleting a node" needs to leave a trace.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the insert fails.
     #[allow(clippy::too_many_arguments)]
     pub async fn audit_with_outcome(
         &self,
@@ -103,9 +116,9 @@ impl CommandsRepo {
         outcome: &str,
     ) -> anyhow::Result<()> {
         sqlx::query(
-            r#"INSERT INTO audit_log
+            r"INSERT INTO audit_log
                (at_unix_nano, actor, node_id, command_id, action, params_json, outcome)
-               VALUES (?, ?, ?, ?, ?, ?, ?)"#,
+               VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(at_unix_nano)
         .bind(actor)
@@ -123,6 +136,10 @@ impl CommandsRepo {
     ///
     /// Only counts still-valid ones: commands past TTL are always rejected by the node side
     /// (see [`PENDING_LIVE_SQL`]). Including them would permanently lock the node from deletion.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn count_pending_for_node(&self, node_id: &str, now_ns: i64) -> anyhow::Result<i64> {
         let n: i64 = sqlx::query_scalar(&format!(
         "SELECT COUNT(*) FROM commands WHERE node_id = ? AND state = 'pending' AND {PENDING_LIVE_SQL}"
@@ -135,15 +152,19 @@ impl CommandsRepo {
     }
 
     /// Invalidate all unsent commands for a node (`pending` -> `expired`), returns invalidated rows --
-    /// caller needs them to write to audit_log (after node deletion, command history disappears,
+    /// caller needs them to write to `audit_log` (after node deletion, command history disappears,
     /// audit needs to be stored separately).
     ///
     /// Difference from [`expire_overdue_for_node`]: this ignores TTL, it's "ops explicitly requested invalidation".
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if any of the queries fail.
     pub async fn cancel_pending_for_node(&self, node_id: &str) -> anyhow::Result<Vec<CommandRow>> {
         let rows = sqlx::query_as::<_, Row>(
-            r#"SELECT id, node_id, action, params_json, issued_at_unix_nano, ttl_seconds, state,
+            r"SELECT id, node_id, action, params_json, issued_at_unix_nano, ttl_seconds, state,
                   result_ok, result_error, result_payload, result_received_at_unix_nano
-           FROM commands WHERE node_id = ? AND state = 'pending' ORDER BY issued_at_unix_nano"#,
+           FROM commands WHERE node_id = ? AND state = 'pending' ORDER BY issued_at_unix_nano",
         )
         .bind(node_id)
         .fetch_all(&self.pool)
@@ -173,6 +194,10 @@ impl CommandsRepo {
     ///
     /// First clears this node's overdue pending commands (node would reject them anyway, see [`PENDING_LIVE_SQL`]),
     /// then gets the still-valid ones, finally marks them as delivered to avoid duplicate dispatch.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query or any per-row update fails.
     pub async fn pending_for(
         &self,
         node_id: &str,
@@ -208,6 +233,10 @@ impl CommandsRepo {
     }
 
     /// Node ID that owns this command. Used to verify receipt submitter matches command owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn owner_of(&self, id: &str) -> anyhow::Result<Option<String>> {
         let owner: Option<String> = sqlx::query_scalar("SELECT node_id FROM commands WHERE id = ?")
             .bind(id)
@@ -216,6 +245,11 @@ impl CommandsRepo {
         Ok(owner)
     }
 
+    /// Record a command execution result (and update the matching audit row outcome).
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if either update query fails.
     pub async fn submit_result(
         &self,
         id: &str,
@@ -225,13 +259,13 @@ impl CommandsRepo {
         now: i64,
     ) -> anyhow::Result<()> {
         sqlx::query(
-            r#"UPDATE commands SET
+            r"UPDATE commands SET
                  state = ?, result_ok = ?, result_error = ?, result_payload = ?,
                  result_received_at_unix_nano = ?
-               WHERE id = ?"#,
+               WHERE id = ?",
         )
         .bind(if ok { "done" } else { "failed" })
-        .bind(if ok { 1 } else { 0 })
+        .bind(i32::from(ok))
         .bind(error)
         .bind(payload)
         .bind(now)
@@ -246,11 +280,16 @@ impl CommandsRepo {
         Ok(())
     }
 
+    /// Look up a command by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn find(&self, id: &str) -> anyhow::Result<Option<CommandRow>> {
         let row: Option<Row> = sqlx::query_as(
-            r#"SELECT id, node_id, action, params_json, issued_at_unix_nano, ttl_seconds, state,
+            r"SELECT id, node_id, action, params_json, issued_at_unix_nano, ttl_seconds, state,
                       result_ok, result_error, result_payload, result_received_at_unix_nano
-               FROM commands WHERE id = ?"#,
+               FROM commands WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -258,11 +297,16 @@ impl CommandsRepo {
         Ok(row.map(map_row))
     }
 
+    /// Most recent commands (newest first).
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn recent(&self, limit: i64) -> anyhow::Result<Vec<CommandRow>> {
         let rows: Vec<Row> = sqlx::query_as(
-            r#"SELECT id, node_id, action, params_json, issued_at_unix_nano, ttl_seconds, state,
+            r"SELECT id, node_id, action, params_json, issued_at_unix_nano, ttl_seconds, state,
                       result_ok, result_error, result_payload, result_received_at_unix_nano
-               FROM commands ORDER BY issued_at_unix_nano DESC LIMIT ?"#,
+               FROM commands ORDER BY issued_at_unix_nano DESC LIMIT ?",
         )
         .bind(limit.clamp(1, 200))
         .fetch_all(&self.pool)
@@ -273,11 +317,11 @@ impl CommandsRepo {
 
 /// "Is this pending command still valid" -- logic must match node side verbatim
 /// (`node-agent/src/control.rs::verify`): `ttl_seconds <= 0` means never expires,
-/// otherwise node always rejects after issued_at + TTL (default TTL is 60s, see ops-server `--ttl`).
+/// otherwise node always rejects after `issued_at` + TTL (default TTL is 60s, see ops-server `--ttl`).
 ///
 /// Why monitor also checks: previously it completely ignored TTL, if any command wasn't pulled,
 /// the node would be permanently stuck on `DELETE /v1/nodes/:id` precheck; and "wait for node to pull"
-/// is impossible when node was reinstalled (`--reinstall` changes node_id) or command channel is broken.
+/// is impossible when node was reinstalled (`--reinstall` changes `node_id`) or command channel is broken.
 const PENDING_LIVE_SQL: &str =
     "(ttl_seconds <= 0 OR issued_at_unix_nano + ttl_seconds * 1000000000 > ?)";
 
@@ -328,7 +372,7 @@ mod tests {
     const SEC: i64 = 1_000_000_000;
 
     /// Each test gets an independent database file -- parallel tests in same process,
-    /// filenames must be distinct (this repo has no tempfile, uses temp_dir + pid like admin.rs tests).
+    /// filenames must be distinct (this repo has no tempfile, uses `temp_dir` + pid like admin.rs tests).
     async fn repo(tag: &str) -> CommandsRepo {
         let dir =
             std::env::temp_dir().join(format!("zhiwei-commands-{tag}-{}", std::process::id()));
@@ -443,7 +487,7 @@ mod tests {
         let rows: Vec<(String, String)> =
             sqlx::query_as("SELECT actor, outcome FROM audit_log WHERE command_id = ? ORDER BY id")
                 .bind("c1")
-                .fetch_all(r_pool(&r).await)
+                .fetch_all(r_pool(&r))
                 .await
                 .unwrap();
         assert_eq!(
@@ -455,8 +499,8 @@ mod tests {
         );
     }
 
-    /// Tests need direct access to audit_log: borrow the repo's pool (same crate, direct pool access)
-    async fn r_pool(r: &CommandsRepo) -> &SqlitePool {
+    /// Tests need direct access to `audit_log`: borrow the repo's pool (same crate, direct pool access)
+    fn r_pool(r: &CommandsRepo) -> &SqlitePool {
         &r.pool
     }
 }

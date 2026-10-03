@@ -1,7 +1,7 @@
 //! Service health storage: services / probes / probe state machine / probe result time series.
 //!
-//! Structure: services 1:N probes 1:1 probe_state (current state machine)
-//!                              1:N probe_results (historical details, rolling 7-day retention)
+//! Structure: services 1:N probes 1:1 `probe_state` (current state machine)
+//!                              1:N `probe_results` (historical details, rolling 7-day retention)
 //!
 //! Probes are executed by the node side (`location = node`), monitor only handles
 //! config distribution, state aggregation, and alert triggering. State machine rules
@@ -48,7 +48,7 @@ pub struct Probe {
     pub updated_at_unix_nano: i64,
 }
 
-/// probe_state row (probe's current state)
+/// `probe_state` row (probe's current state)
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ProbeState {
     pub probe_id: String,
@@ -228,7 +228,7 @@ fn probe_from_row(r: ProbeRow) -> Probe {
     }
 }
 
-/// Parse probes.node_ids_json; bad values treated as "any node", one bad row shouldn't break the whole page
+/// Parse `probes.node_ids_json`; bad values treated as "any node", one bad row shouldn't break the whole page
 fn parse_node_ids(raw: &str) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(raw).unwrap_or_default()
 }
@@ -250,7 +250,7 @@ const PROBE_COLS: &str =
      p.created_at_unix_nano, p.updated_at_unix_nano";
 
 /// Aggregate worst state (service health = worst probe state)
-pub fn worst_state(states: &[String]) -> String {
+#[must_use] pub fn worst_state(states: &[String]) -> String {
     if states.is_empty() {
         return "unknown".into();
     }
@@ -272,12 +272,17 @@ pub struct ProbesRepo {
 }
 
 impl ProbesRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    #[must_use] pub const fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 
     // ---------- Services ----------
 
+    /// List all services ordered by name.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn list_services(&self) -> anyhow::Result<Vec<Service>> {
         let rows: Vec<ServiceRow> = sqlx::query_as(&format!(
             "SELECT {SERVICE_COLS} FROM services ORDER BY name"
@@ -287,6 +292,11 @@ impl ProbesRepo {
         Ok(rows.into_iter().map(service_from_row).collect())
     }
 
+    /// Look up a service by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn find_service(&self, id: &str) -> anyhow::Result<Option<Service>> {
         let row: Option<ServiceRow> =
             sqlx::query_as(&format!("SELECT {SERVICE_COLS} FROM services WHERE id = ?"))
@@ -296,6 +306,12 @@ impl ProbesRepo {
         Ok(row.map(service_from_row))
     }
 
+    /// Insert a new service and return the resulting row.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the insert or lookup fails, or `anyhow::Error`
+    /// if the row is missing after a successful insert.
     pub async fn create_service(
         &self,
         name: &str,
@@ -323,6 +339,12 @@ impl ProbesRepo {
             .ok_or_else(|| anyhow::anyhow!("service not found after creation"))
     }
 
+    /// Apply a partial update to a service.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the lookup or update fails, or `anyhow::Error`
+    /// if no service matches the given id.
     pub async fn update_service(
         &self,
         id: &str,
@@ -333,13 +355,13 @@ impl ProbesRepo {
             anyhow::bail!("service not found");
         };
         if let Some(v) = &patch.name {
-            svc.name = v.clone();
+            svc.name.clone_from(v);
         }
         if let Some(v) = &patch.description {
-            svc.description = v.clone();
+            svc.description.clone_from(v);
         }
         if let Some(v) = &patch.group_name {
-            svc.group_name = v.clone();
+            svc.group_name.clone_from(v);
         }
         if let Some(v) = patch.tier {
             svc.tier = v;
@@ -364,6 +386,10 @@ impl ProbesRepo {
     }
 
     /// Delete service along with its probes, state, and result details
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if any of the queries fail.
     pub async fn delete_service(&self, id: &str) -> anyhow::Result<()> {
         let probe_ids: Vec<(String,)> =
             sqlx::query_as("SELECT id FROM probes WHERE service_id = ?")
@@ -382,6 +408,11 @@ impl ProbesRepo {
 
     // ---------- Probes ----------
 
+    /// List all probes (ordered by service name then probe name).
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query or label lookup fails.
     pub async fn list_probes(&self) -> anyhow::Result<Vec<Probe>> {
         let rows: Vec<ProbeRow> = sqlx::query_as(&format!(
             "SELECT {PROBE_COLS} FROM probes p
@@ -396,6 +427,10 @@ impl ProbesRepo {
     }
 
     /// Probes a specific node should execute: enabled + bound to this node (or no node specified)
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn probes_for_node(&self, node_id: &str) -> anyhow::Result<Vec<Probe>> {
         let rows: Vec<ProbeRow> = sqlx::query_as(&format!(
             "SELECT {PROBE_COLS} FROM probes p
@@ -411,6 +446,11 @@ impl ProbesRepo {
         Ok(rows.into_iter().map(probe_from_row).collect())
     }
 
+    /// Look up a probe by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query or label lookup fails.
     pub async fn find_probe(&self, id: &str) -> anyhow::Result<Option<Probe>> {
         let row: Option<ProbeRow> = sqlx::query_as(&format!(
             "SELECT {PROBE_COLS} FROM probes p
@@ -462,6 +502,12 @@ impl ProbesRepo {
         Ok(())
     }
 
+    /// Insert a new probe and return the resulting row.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the insert or lookup fails, or `anyhow::Error`
+    /// if the row is missing after a successful insert.
     pub async fn create_probe(&self, input: &ProbeInput, now: i64) -> anyhow::Result<Probe> {
         let id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
@@ -491,21 +537,27 @@ impl ProbesRepo {
             .ok_or_else(|| anyhow::anyhow!("probe not found after creation"))
     }
 
+    /// Apply a partial update to a probe (PATCH semantics).
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the lookup or update fails, or `anyhow::Error`
+    /// if no probe matches the given id.
     pub async fn update_probe(&self, id: &str, patch: &ProbePatch, now: i64) -> anyhow::Result<()> {
         let Some(mut p) = self.find_probe(id).await? else {
             anyhow::bail!("probe not found");
         };
         if let Some(v) = &patch.name {
-            p.name = v.clone();
+            p.name.clone_from(v);
         }
         if let Some(v) = &patch.kind {
-            p.kind = v.clone();
+            p.kind.clone_from(v);
         }
         if let Some(v) = &patch.target_json {
-            p.target_json = v.clone();
+            p.target_json.clone_from(v);
         }
         if let Some(v) = &patch.expect_json {
-            p.expect_json = v.clone();
+            p.expect_json.clone_from(v);
         }
         if let Some(v) = patch.interval_seconds {
             p.interval_seconds = v;
@@ -548,6 +600,11 @@ impl ProbesRepo {
         Ok(())
     }
 
+    /// Delete a probe and its associated results and state.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if any of the delete queries fail.
     pub async fn delete_probe(&self, id: &str) -> anyhow::Result<()> {
         sqlx::query("DELETE FROM probe_results WHERE probe_id = ?")
             .bind(id)
@@ -566,6 +623,11 @@ impl ProbesRepo {
 
     // ---------- State machine ----------
 
+    /// Load current state for a probe (returns `None` if it has never been checked).
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn get_state(&self, probe_id: &str) -> anyhow::Result<Option<ProbeState>> {
         let row: Option<StateRow> = sqlx::query_as(&format!(
             "SELECT {STATE_COLS} FROM probe_state WHERE probe_id = ?"
@@ -580,6 +642,10 @@ impl ProbesRepo {
     ///
     /// Rules: ok immediately returns ok (clears failure count); non-ok accumulates failure count,
     /// only goes down when `failure_threshold` is reached, otherwise degraded.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if any of the queries fail.
     #[allow(clippy::too_many_arguments)]
     pub async fn record_result(
         &self,
@@ -664,6 +730,11 @@ impl ProbesRepo {
         })
     }
 
+    /// Most recent probe results for a probe (newest first).
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn recent_results(
         &self,
         probe_id: &str,
@@ -692,6 +763,10 @@ impl ProbesRepo {
     // ---------- Aggregate views ----------
 
     /// Service page data: service -> probes -> state
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if any underlying query fails.
     pub async fn services_with_probes(&self) -> anyhow::Result<Vec<ServiceWithProbes>> {
         let services = self.list_services().await?;
         let mut states = self.all_states().await?;
@@ -744,6 +819,10 @@ impl ProbesRepo {
     /// Disabled probes (`p.enabled = 0`) and fully disabled services (`s.enabled = 0`) are excluded:
     /// disabled probes won't be dispatched anymore, shouldn't expect them to work, their down
     /// shouldn't count toward cluster failures.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if any underlying query fails.
     pub async fn probe_counts(&self) -> anyhow::Result<(i64, i64)> {
         let services = self.services_with_probes().await?;
         let mut total = 0i64;
@@ -772,6 +851,10 @@ impl ProbesRepo {
     /// Returns `(service_id, bucket_start_unix_nano, ok_count, total_count)`.
     /// Charts show "what proportion of probes in this bucket were ok" -- better than showing single
     /// probe raw results, smoother trend, not affected by varying sampling density.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the aggregation query fails.
     pub async fn health_buckets(
         &self,
         from_ns: i64,
@@ -784,6 +867,10 @@ impl ProbesRepo {
 
     /// Same as above, but aggregated by **probe**, returns `(probe_id, bucket_start_unix_nano, ok, total)`.
     /// When a service has multiple probes, service-level curves flatten out "which probe is jittering".
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn health_buckets_by_probe(
         &self,
         from_ns: i64,
@@ -804,7 +891,7 @@ impl ProbesRepo {
         let bucket_ns = bucket_ns.max(1);
         // group_col only comes from two constants in this file, no external input accepted
         let sql = format!(
-            r#"
+            r"
             SELECT {group_col} AS grp,
                    (r.ts_unix_nano / ?) * ? AS bucket_start,
                    SUM(CASE WHEN r.state = 'ok' THEN 1 ELSE 0 END) AS ok_count,
@@ -814,7 +901,7 @@ impl ProbesRepo {
             WHERE r.ts_unix_nano >= ? AND r.ts_unix_nano <= ?
             GROUP BY grp, bucket_start
             ORDER BY grp, bucket_start
-            "#
+            "
         );
         let rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(&sql)
             .bind(bucket_ns)
@@ -827,6 +914,10 @@ impl ProbesRepo {
     }
 
     /// Delete result details older than `cutoff_unix_nano`, returns rows deleted
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the delete fails.
     pub async fn cleanup_results(&self, cutoff_unix_nano: i64) -> anyhow::Result<u64> {
         let res = sqlx::query("DELETE FROM probe_results WHERE ts_unix_nano < ?")
             .bind(cutoff_unix_nano)

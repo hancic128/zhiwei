@@ -47,11 +47,11 @@ pub enum Channel {
 }
 
 impl Channel {
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
-            Channel::Ok => "ok",
-            Channel::Down => "down",
-            Channel::Unknown => "unknown",
+            Self::Ok => "ok",
+            Self::Down => "down",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -61,7 +61,7 @@ impl Channel {
 ///
 /// The three conditions are checked in priority order: observation window →
 /// node online → poll interval.
-pub fn channel_state(
+pub const fn channel_state(
     node_last_seen_ms: Option<i64>,
     last_poll_ms: Option<i64>,
     monitor_uptime_ms: i64,
@@ -98,12 +98,12 @@ impl ControlPolls {
     /// Record one pull. On lock poisoning, recover the inner state (this table
     /// is just a "last seen" hint; not worth crashing the whole process over it).
     pub fn note(&self, node_id: &str, now_ms: i64) {
-        let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         map.insert(node_id.to_string(), now_ms);
     }
 
     pub fn last(&self, node_id: &str) -> Option<i64> {
-        let map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let map = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         map.get(node_id).copied()
     }
 }

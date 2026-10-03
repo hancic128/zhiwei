@@ -13,7 +13,7 @@ use hyper_util::rt::TokioIo;
 use tracing::{info, warn};
 use zhiwei_common::{NodeId, Timestamp};
 use zhiwei_proto::telemetry::TelemetryBatch;
-use zhiwei_storage::alerts_repo::AlertRule;
+use zhiwei_storage::alerts_repo::{AlertRule, AlertsRepo, EvalState};
 
 use crate::state::AppState;
 
@@ -156,20 +156,20 @@ fn fields_json(facts: &AlertFacts) -> Vec<serde_json::Value> {
 
 /// Neutralization of dynamic values before they go into `lark_md`.
 ///
-/// Only `<` can open a lark_md tag, and node aliases are **user input without character
+/// Only `<` can open a `lark_md` tag, and node aliases are **user input without character
 /// validation** (see `routes::normalize_alias`, which only trims + limits length). If an alias
 /// contains `<at id=all></at>` it will genuinely @everyone. We replace it with fullwidth `＜`
 /// rather than deleting it: that blocks tag parsing while not breaking legitimate content like
-/// "threshold `> 90%`" the way character removal would (`>` is not a lark_md marker and is left alone).
+/// "threshold `> 90%`" the way character removal would (`>` is not a `lark_md` marker and is left alone).
 fn md_escape(raw: &str) -> String {
-    raw.replace('<', "＜").replace('\n', " ").replace('\r', " ")
+    raw.replace('<', "＜").replace(['\n', '\r'], " ")
 }
 
 /// Neutralization of dynamic values before Slack `mrkdwn`: only blocks `<`, preserves newlines.
 ///
-/// Slack's `<@U123>` / `<!channel>` will genuinely @ people — same class of issue as lark_md;
+/// Slack's `<@U123>` / `<!channel>` will genuinely @ people — same class of issue as `lark_md`;
 /// but Slack body text (probe failure reasons, etc.) can be multi-line, so we can't collapse it
-/// to one line the way lark_md card columns do.
+/// to one line the way `lark_md` card columns do.
 fn slack_escape(raw: &str) -> String {
     raw.replace('<', "＜").replace('\r', "")
 }
@@ -282,16 +282,26 @@ fn slack_payload(rule: &AlertRule, facts: &AlertFacts) -> serde_json::Value {
 
 /// Run all enabled rules against a batch of telemetry.
 pub async fn evaluate(state: &AppState, node_id: &NodeId, hostname: &str, batch: &TelemetryBatch) {
-    // Get user-defined rules
+    let all_rules = load_enabled_rules(state).await;
+    if all_rules.is_empty() {
+        return;
+    }
+    let now = Timestamp::now().unix_nano();
+    let repo = state.storage.alerts();
+    for rule in all_rules {
+        evaluate_rule(state, &repo, &rule, node_id, hostname, batch, now).await;
+    }
+}
+
+/// Load user-defined + builtin metric rules (`cpu_high`, `mem_high`, `disk_high`) in one list.
+async fn load_enabled_rules(state: &AppState) -> Vec<AlertRule> {
     let rules = match state.storage.alerts().enabled_rules().await {
         Ok(r) => r,
         Err(e) => {
             warn!(error = %e, "Failed to read alert rules");
-            return;
+            return Vec::new();
         }
     };
-
-    // Get builtin metric rules (cpu_high, mem_high, disk_high)
     let builtin_rules = match state.storage.alerts().enabled_builtin_rules().await {
         Ok(r) => r,
         Err(e) => {
@@ -299,125 +309,190 @@ pub async fn evaluate(state: &AppState, node_id: &NodeId, hostname: &str, batch:
             Vec::new()
         }
     };
+    rules.into_iter().chain(builtin_rules).collect()
+}
 
-    // Combine all rules
-    let all_rules: Vec<_> = rules.into_iter().chain(builtin_rules.into_iter()).collect();
+/// Extract this rule's metric from the batch and dispatch to breach / recovery handling.
+async fn evaluate_rule(
+    state: &AppState,
+    repo: &AlertsRepo,
+    rule: &AlertRule,
+    node_id: &NodeId,
+    hostname: &str,
+    batch: &TelemetryBatch,
+    now: i64,
+) {
+    // Use a unified extraction path: derived metrics (memory percentage, network totals)
+    // can also be used by rules. This used to only query `metrics[]` — the seeded rule
+    // "Memory usage high" uses host.mem.usage, which nodes never report, so that rule
+    // would never fire.
+    let Some(value) = crate::routes::extract_metric(batch, &rule.metric) else {
+        return;
+    };
+    let hit = breaching(value, &rule.op, rule.threshold);
 
-    if all_rules.is_empty() {
+    let st = match repo.get_state(rule.id, node_id.as_str()).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(error = %e, "Failed to read alert state");
+            return;
+        }
+    };
+
+    if hit {
+        handle_breach(state, repo, rule, node_id, hostname, value, now, &st).await;
+    } else {
+        handle_recovery(repo, rule, node_id, value, now, &st).await;
+    }
+}
+
+/// A breaching sample. First breach is held until `duration_seconds` elapse before the alert is
+/// opened; subsequent breaching samples only refresh the latest value.
+#[allow(clippy::too_many_arguments)] // the state machine needs all of rule/state/value; grouping would only shuffle names
+async fn handle_breach(
+    state: &AppState,
+    repo: &zhiwei_storage::alerts_repo::AlertsRepo,
+    rule: &AlertRule,
+    node_id: &NodeId,
+    hostname: &str,
+    value: f64,
+    now: i64,
+    st: &EvalState,
+) {
+    if st.firing {
+        // Still breaching: only update the latest value
+        let _ = repo
+            .upsert_state(
+                rule.id,
+                node_id.as_str(),
+                st.breaching_since_unix_nano.or(Some(now)),
+                st.firing,
+                st.open_alert_id,
+                Some(value),
+            )
+            .await;
         return;
     }
 
-    let now = Timestamp::now().unix_nano();
-    let repo = state.storage.alerts();
+    // First breach: record the start; only open the alert after sustained long enough
+    let since = st.breaching_since_unix_nano.unwrap_or(now);
+    let held_ns = now.saturating_sub(since);
+    let need_ns = rule.duration_seconds.saturating_mul(1_000_000_000);
+    if held_ns < need_ns {
+        let _ = repo
+            .upsert_state(
+                rule.id,
+                node_id.as_str(),
+                Some(since),
+                false,
+                st.open_alert_id,
+                Some(value),
+            )
+            .await;
+        return;
+    }
+    fire_metric_alert(state, repo, rule, node_id, hostname, value, now, since).await;
+}
 
-    for rule in all_rules {
-        // Use a unified extraction path: derived metrics (memory percentage, network totals)
-        // can also be used by rules. This used to only query `metrics[]` — the seeded rule
-        // "Memory usage high" uses host.mem.usage, which nodes never report, so that rule
-        // would never fire.
-        let Some(value) = crate::routes::extract_metric(batch, &rule.metric) else {
-            continue;
-        };
-        let hit = breaching(value, &rule.op, rule.threshold);
+/// Open + notify an alert for a rule that has been breaching long enough.
+#[allow(clippy::too_many_arguments)] // mirrors handle_breach; a struct would just relocate the fields
+async fn fire_metric_alert(
+    state: &AppState,
+    repo: &zhiwei_storage::alerts_repo::AlertsRepo,
+    rule: &AlertRule,
+    node_id: &NodeId,
+    hostname: &str,
+    value: f64,
+    now: i64,
+    since: i64,
+) {
+    // The text should answer at a glance "which machine, what metric, what value now" —
+    // node name is in the notification title line (see plain_text); here we give metric and value.
+    let (label, unit) = metric_label(&rule.metric);
+    let sym = op_symbol(&rule.op);
+    let threshold = rule.threshold;
+    let duration = if rule.duration_seconds > 0 {
+        format!(", sustained {}s", rule.duration_seconds)
+    } else {
+        String::new()
+    };
+    let message =
+        format!("{label} {sym}{threshold}{unit} (current: {value:.1}{unit}{duration})");
+    if !open_metric_alert(repo, rule, node_id, hostname, value, &message, now, since).await {
+        return;
+    }
+    let facts = AlertFacts {
+        node: hostname.to_string(),
+        firing: true,
+        fields: vec![
+            ("Node", hostname.to_string()),
+            ("Metric", label.to_string()),
+            ("Current", format!("{value:.1}{unit}")),
+            ("Threshold", format!("{sym}{threshold}{unit}")),
+        ],
+        detail: message,
+    };
+    notify(state, rule, &facts, now).await;
+}
 
-        let st = match repo.get_state(rule.id, node_id.as_str()).await {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(error = %e, "Failed to read alert state");
-                continue;
-            }
-        };
+/// Open the alert and mark the eval state as firing. Returns whether it opened.
+#[allow(clippy::too_many_arguments)]
+async fn open_metric_alert(
+    repo: &zhiwei_storage::alerts_repo::AlertsRepo,
+    rule: &AlertRule,
+    node_id: &NodeId,
+    hostname: &str,
+    value: f64,
+    message: &str,
+    now: i64,
+    since: i64,
+) -> bool {
+    let alert_id = match repo
+        .open_alert(rule, node_id.as_str(), hostname, value, message, now)
+        .await
+    {
+        Ok(alert_id) => alert_id,
+        Err(e) => {
+            warn!(error = %e, "Failed to open alert");
+            return false;
+        }
+    };
+    info!(rule = %rule.name, %node_id, alert_id, "Alert firing");
+    let _ = repo
+        .upsert_state(
+            rule.id,
+            node_id.as_str(),
+            Some(since),
+            true,
+            Some(alert_id),
+            Some(value),
+        )
+        .await;
+    true
+}
 
-        if hit && !st.firing {
-            // First breach: record the start; only open the alert after sustained long enough
-            let since = st.breaching_since_unix_nano.unwrap_or(now);
-            let held_ns = now.saturating_sub(since);
-            let need_ns = rule.duration_seconds.saturating_mul(1_000_000_000);
-
-            if held_ns >= need_ns {
-                // The text should answer at a glance "which machine, what metric, what value now" —
-                // node name is in the notification title line (see plain_text); here we give metric and value.
-                let (label, unit) = metric_label(&rule.metric);
-                let sym = op_symbol(&rule.op);
-                let threshold = rule.threshold;
-                let duration = if rule.duration_seconds > 0 {
-                    format!(", sustained {}s", rule.duration_seconds)
-                } else {
-                    String::new()
-                };
-                let message =
-                    format!("{label} {sym}{threshold}{unit} (current: {value:.1}{unit}{duration})");
-                match repo
-                    .open_alert(&rule, node_id.as_str(), hostname, value, &message, now)
-                    .await
-                {
-                    Ok(alert_id) => {
-                        info!(rule = %rule.name, %node_id, alert_id, "Alert firing");
-                        let _ = repo
-                            .upsert_state(
-                                rule.id,
-                                node_id.as_str(),
-                                Some(since),
-                                true,
-                                Some(alert_id),
-                                Some(value),
-                            )
-                            .await;
-                        let facts = AlertFacts {
-                            node: hostname.to_string(),
-                            firing: true,
-                            fields: vec![
-                                ("Node", hostname.to_string()),
-                                ("Metric", label.to_string()),
-                                ("Current", format!("{value:.1}{unit}")),
-                                ("Threshold", format!("{sym}{threshold}{unit}")),
-                            ],
-                            detail: message.clone(),
-                        };
-                        notify(state, &rule, &facts, now).await;
-                    }
-                    Err(e) => warn!(error = %e, "Failed to open alert"),
-                }
+/// A non-breaching sample: close a firing alert if present, then clear the state.
+async fn handle_recovery(
+    repo: &zhiwei_storage::alerts_repo::AlertsRepo,
+    rule: &AlertRule,
+    node_id: &NodeId,
+    value: f64,
+    now: i64,
+    st: &EvalState,
+) {
+    // Recovered: if currently firing, close it
+    if st.firing {
+        if let Some(alert_id) = st.open_alert_id {
+            if let Err(e) = repo.resolve_alert(alert_id, now).await {
+                warn!(error = %e, "Failed to close alert");
             } else {
-                let _ = repo
-                    .upsert_state(
-                        rule.id,
-                        node_id.as_str(),
-                        Some(since),
-                        false,
-                        st.open_alert_id,
-                        Some(value),
-                    )
-                    .await;
+                info!(rule = %rule.name, %node_id, alert_id, "Alert resolved");
             }
-        } else if !hit {
-            // Recovered: if currently firing, close it
-            if st.firing {
-                if let Some(alert_id) = st.open_alert_id {
-                    if let Err(e) = repo.resolve_alert(alert_id, now).await {
-                        warn!(error = %e, "Failed to close alert");
-                    } else {
-                        info!(rule = %rule.name, %node_id, alert_id, "Alert resolved");
-                    }
-                }
-            }
-            let _ = repo
-                .upsert_state(rule.id, node_id.as_str(), None, false, None, Some(value))
-                .await;
-        } else {
-            // Still breaching: only update the latest value
-            let _ = repo
-                .upsert_state(
-                    rule.id,
-                    node_id.as_str(),
-                    st.breaching_since_unix_nano.or(Some(now)),
-                    st.firing,
-                    st.open_alert_id,
-                    Some(value),
-                )
-                .await;
         }
     }
+    let _ = repo
+        .upsert_state(rule.id, node_id.as_str(), None, false, None, Some(value))
+        .await;
 }
 
 /// Deliver to enabled notification channels by severity.
@@ -429,42 +504,52 @@ async fn notify(state: &AppState, rule: &AlertRule, facts: &AlertFacts, now: i64
             return;
         }
     };
-
     for ch in channels
         .into_iter()
         .filter(|c| c.enabled && severity_rank(&c.min_severity) <= severity_rank(&rule.severity))
     {
-        // Channels with incomplete config (old DB rows may lack fields) only log once, don't repeatedly spam delivery failures
-        if let Err(msg) = validate_channel(
-            &ch.kind,
-            &ch.url,
-            &ch.secret,
-            &ch.app_id,
-            &ch.receive_id,
-            &ch.receive_id_type,
-        ) {
-            warn!(channel = %ch.name, kind = %ch.kind, reason = %msg, "Channel config incomplete, skipping");
-            continue;
-        }
-        if let Err(e) = deliver(&ch, rule, facts, now).await {
-            warn!(channel = %ch.name, kind = %ch.kind, error = %e, "Failed to deliver notification");
-        }
+        deliver_to_channel(&ch, rule, facts, now).await;
+    }
+}
+
+/// Validate + deliver to a single channel; incomplete config logs once instead of recurring
+/// delivery failures.
+async fn deliver_to_channel(
+    ch: &zhiwei_storage::alerts_repo::NotifyChannel,
+    rule: &AlertRule,
+    facts: &AlertFacts,
+    now: i64,
+) {
+    // Channels with incomplete config (old DB rows may lack fields) only log once, don't repeatedly spam delivery failures
+    if let Err(msg) = validate_channel(
+        &ch.kind,
+        &ch.url,
+        &ch.secret,
+        &ch.app_id,
+        &ch.receive_id,
+        &ch.receive_id_type,
+    ) {
+        warn!(channel = %ch.name, kind = %ch.kind, reason = %msg, "Channel config incomplete, skipping");
+        return;
+    }
+    if let Err(e) = deliver(ch, rule, facts, now).await {
+        warn!(channel = %ch.name, kind = %ch.kind, error = %e, "Failed to deliver notification");
     }
 }
 
 /// Supported notification channel kinds (field design aligns with Bluebird's delivery channels).
 ///
 /// Each kind requires different fields:
-/// - `feishu`: uses the official app API — App ID + App Secret exchange for tenant_access_token,
-///   then sends via receive_id (group / user), no bot address needed;
+/// - `feishu`: uses the official app API — App ID + App Secret exchange for `tenant_access_token`,
+///   then sends via `receive_id` (group / user), no bot address needed;
 /// - `slack`: Incoming Webhook URL, the URL itself is the credential;
 /// - `bluebird`: Bluebird notification gateway's **generic source** URL `…/hooks/<source ID>`
-///   plus a Token — hands the alert to it for concurrent delivery to Bark / Feishu / WeCom, etc.;
-///   ZhiWei no longer integrates those directly;
+///   plus a Token — hands the alert to it for concurrent delivery to Bark / Feishu / `WeCom`, etc.;
+///   `ZhiWei` no longer integrates those directly;
 /// - `webhook`: our own receiver, optional Token for auth.
 pub const CHANNEL_KINDS: &[&str] = &["feishu", "slack", "bluebird", "webhook"];
 
-/// Whitelist of Feishu receive_id_type values (consistent with im/v1/messages on open.feishu.cn).
+/// Whitelist of Feishu `receive_id_type` values (consistent with im/v1/messages on open.feishu.cn).
 /// Feishu returns 99992402 if wrong — better to catch it before saving.
 pub const FEISHU_RECEIVE_ID_TYPES: &[&str] =
     &["chat_id", "open_id", "user_id", "union_id", "email"];
@@ -675,15 +760,16 @@ pub fn feishu_message_body(receive_id: &str, card: &str) -> String {
     .to_string()
 }
 
-/// tenant_access_token cache: 2h validity, keyed by (app_id, app_secret).
+/// Cache key (`app_id`, `app_secret`); value (`tenant_access_token`, `expires_at_unix_secs`).
+type FeishuTokenCache = std::collections::HashMap<(String, String), (String, i64)>;
+
+/// `tenant_access_token` cache: 2h validity, keyed by (`app_id`, `app_secret`).
 /// During an alert storm, dozens of notifications should only trigger one token exchange
 /// (the exchange API also has rate limits).
-static FEISHU_TOKENS: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashMap<(String, String), (String, i64)>>,
-> = std::sync::OnceLock::new();
+static FEISHU_TOKENS: std::sync::OnceLock<std::sync::Mutex<FeishuTokenCache>> =
+    std::sync::OnceLock::new();
 
-fn feishu_tokens(
-) -> &'static std::sync::Mutex<std::collections::HashMap<(String, String), (String, i64)>> {
+fn feishu_tokens() -> &'static std::sync::Mutex<FeishuTokenCache> {
     FEISHU_TOKENS.get_or_init(Default::default)
 }
 
@@ -691,10 +777,10 @@ fn now_unix_secs() -> i64 {
     Timestamp::now().unix_nano() / 1_000_000_000
 }
 
-/// Exchange (or reuse) the Feishu app's tenant_access_token.
+/// Exchange (or reuse) the Feishu app's `tenant_access_token`.
 async fn feishu_token(app_id: &str, app_secret: &str) -> anyhow::Result<String> {
     {
-        let cache = feishu_tokens().lock().unwrap_or_else(|e| e.into_inner());
+        let cache = feishu_tokens().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some((token, expire_at)) = cache.get(&(app_id.to_string(), app_secret.to_string())) {
             // Treat as expired 60s early — don't let the first notification hit 401 on the boundary
             if expire_at - 60 > now_unix_secs() {
@@ -720,10 +806,10 @@ async fn feishu_token(app_id: &str, app_secret: &str) -> anyhow::Result<String> 
         let why = body_error(&raw).unwrap_or_else(|| body_detail(&raw));
         anyhow::bail!("Failed to exchange Feishu tenant_access_token{why}");
     }
-    let expire = v.get("expire").and_then(|e| e.as_i64()).unwrap_or(7200);
+    let expire = v.get("expire").and_then(serde_json::Value::as_i64).unwrap_or(7200);
     feishu_tokens()
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(
             (app_id.to_string(), app_secret.to_string()),
             (token.clone(), now_unix_secs() + expire),
@@ -803,60 +889,77 @@ pub async fn on_probe_transition(
     let rule_name = format!("Service {} · {}", probe.service_name, probe.name);
 
     if transition.new_state == STATE_OK {
-        match repo.resolve_open_probe_alerts(&probe.id, now).await {
-            Ok(n) if n > 0 => {
-                info!(probe = %probe.name, "Service probe recovered, alert closed");
-                // The "back online" push is controlled by the builtin toggle service_online; closing
-                // the alert itself is unaffected — the person came back, leaving the old alert up
-                // would be misleading.
-                let notify_on = match repo.builtin_rule_enabled("service_online").await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        warn!(error = %e, "Failed to check service_online builtin toggle, enabling by default");
-                        true
-                    }
-                };
-                if !notify_on {
-                    return;
-                }
-                let rule = probe_alert_rule(&rule_name, "warning");
-                let message = format!(
-                    "Probe {} for service {} recovered (previously {:?})",
-                    probe.name, probe.service_name, transition.previous_state
-                );
-                let facts = AlertFacts {
-                    node: hostname.to_string(),
-                    firing: false,
-                    fields: vec![
-                        ("Node", hostname.to_string()),
-                        ("Service", probe.service_name.clone()),
-                        ("Probe", probe.name.clone()),
-                    ],
-                    detail: message,
-                };
-                notify(state, &rule, &facts, now).await;
-            }
-            Ok(_) => {}
-            Err(e) => warn!(error = %e, "Failed to close service probe alert"),
-        }
+        handle_probe_recovered(state, &repo, probe, transition, hostname, &rule_name, now).await;
         return;
     }
 
     if transition.new_state != STATE_DOWN {
         return;
     }
+    handle_probe_down(state, &repo, probe, transition, node_id, hostname, &rule_name, now).await;
+}
 
+/// Probe returned to `ok`: close any open alert, then (if the `service_online` toggle allows)
+/// push a "back online" notification.
+async fn handle_probe_recovered(
+    state: &AppState,
+    repo: &AlertsRepo,
+    probe: &zhiwei_storage::probes_repo::Probe,
+    transition: &zhiwei_storage::probes_repo::StateTransition,
+    hostname: &str,
+    rule_name: &str,
+    now: i64,
+) {
+    let resolved = match repo.resolve_open_probe_alerts(&probe.id, now).await {
+        Ok(n) => n,
+        Err(e) => {
+            warn!(error = %e, "Failed to close service probe alert");
+            return;
+        }
+    };
+    if resolved == 0 {
+        return;
+    }
+    info!(probe = %probe.name, "Service probe recovered, alert closed");
+    // The "back online" push is controlled by the builtin toggle service_online; closing
+    // the alert itself is unaffected — the person came back, leaving the old alert up
+    // would be misleading.
+    if !builtin_enabled_or_default(repo, "service_online").await {
+        return;
+    }
+    let rule = probe_alert_rule(rule_name, "warning");
+    let message = format!(
+        "Probe {} for service {} recovered (previously {:?})",
+        probe.name, probe.service_name, transition.previous_state
+    );
+    let facts = AlertFacts {
+        node: hostname.to_string(),
+        firing: false,
+        fields: vec![
+            ("Node", hostname.to_string()),
+            ("Service", probe.service_name.clone()),
+            ("Probe", probe.name.clone()),
+        ],
+        detail: message,
+    };
+    notify(state, &rule, &facts, now).await;
+}
+
+/// Probe transitioned to `down`: if the `service_offline` toggle allows, open an alert and notify.
+async fn handle_probe_down(
+    state: &AppState,
+    repo: &AlertsRepo,
+    probe: &zhiwei_storage::probes_repo::Probe,
+    transition: &zhiwei_storage::probes_repo::StateTransition,
+    node_id: &str,
+    hostname: &str,
+    rule_name: &str,
+    now: i64,
+) {
     // Service offline: opening alerts and sending notifications are both controlled by the
     // builtin toggle service_offline. Disabled = completely untouched (no requirement that the
     // service comes back up to clear red).
-    let enabled = match repo.builtin_rule_enabled("service_offline").await {
-        Ok(v) => v,
-        Err(e) => {
-            warn!(error = %e, "Failed to check service_offline builtin toggle, enabling by default");
-            true
-        }
-    };
-    if !enabled {
+    if !builtin_enabled_or_default(repo, "service_offline").await {
         return;
     }
 
@@ -871,41 +974,60 @@ pub async fn on_probe_transition(
         probe.name, probe.service_name
     );
 
-    match repo
+    let opened = repo
         .open_probe_alert(
-            &probe.id, &rule_name,
+            &probe.id,
+            rule_name,
             // Alert recorded on the node that "reported this result": the probe may be bound to
             // multiple nodes (or any node), recording the reporting node shows at a glance which
             // machine detected it
-            node_id, hostname, severity, &message, now,
+            node_id,
+            hostname,
+            severity,
+            &message,
+            now,
         )
-        .await
-    {
-        Ok(alert_id) => {
-            info!(probe = %probe.name, alert_id, "Service probe alert firing");
-            let rule = probe_alert_rule(&rule_name, severity);
-            let facts = AlertFacts {
-                node: hostname.to_string(),
-                firing: true,
-                fields: vec![
-                    ("Node", hostname.to_string()),
-                    ("Service", probe.service_name.clone()),
-                    ("Probe", probe.name.clone()),
-                    (
-                        "Consecutive failures",
-                        format!("{} times", transition.consecutive_failures),
-                    ),
-                ],
-                detail: message,
-            };
-            notify(state, &rule, &facts, now).await;
+        .await;
+    let alert_id = match opened {
+        Ok(alert_id) => alert_id,
+        Err(e) => {
+            warn!(error = %e, "Failed to open service probe alert");
+            return;
         }
-        Err(e) => warn!(error = %e, "Failed to open service probe alert"),
+    };
+    info!(probe = %probe.name, alert_id, "Service probe alert firing");
+    let rule = probe_alert_rule(rule_name, severity);
+    let facts = AlertFacts {
+        node: hostname.to_string(),
+        firing: true,
+        fields: vec![
+            ("Node", hostname.to_string()),
+            ("Service", probe.service_name.clone()),
+            ("Probe", probe.name.clone()),
+            (
+                "Consecutive failures",
+                format!("{} times", transition.consecutive_failures),
+            ),
+        ],
+        detail: message,
+    };
+    notify(state, &rule, &facts, now).await;
+}
+
+/// Read a builtin toggle; on error log and fall back to enabled (fail-open), matching the
+/// startup default.
+async fn builtin_enabled_or_default(repo: &AlertsRepo, id: &str) -> bool {
+    match repo.builtin_rule_enabled(id).await {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error = %e, %id, "Failed to check builtin toggle, enabling by default");
+            true
+        }
     }
 }
 
 /// Probe alerts have no metric rule row; this creates a carrier for just "name + severity",
-/// so the existing notify() severity filter logic can be reused as-is.
+/// so the existing `notify()` severity filter logic can be reused as-is.
 fn probe_alert_rule(name: &str, severity: &str) -> AlertRule {
     AlertRule {
         id: 0,
@@ -921,7 +1043,7 @@ fn probe_alert_rule(name: &str, severity: &str) -> AlertRule {
     }
 }
 
-/// Carrier for node offline alerts — like `probe_alert_rule`, purely for feeding notify()'s
+/// Carrier for node offline alerts — like `probe_alert_rule`, purely for feeding `notify()`'s
 /// "severity filter + naming". `metric = host.online` is to clearly distinguish from probe/cert
 /// alert metric columns (prefix `host.`), won't conflict with real metrics.
 fn node_offline_alert_rule(severity: &str) -> AlertRule {
@@ -959,8 +1081,8 @@ fn node_online_alert_rule() -> AlertRule {
 /// Node online/offline events — feed in a batch of node state changes at once.
 ///
 /// Design: a background task scans all nodes every ~30s (see `spawn_node_liveness_watcher`):
-/// last_seen online / still online now = skip; last_seen online / offline now = open alert + notify;
-/// last_seen offline / online now = close old offline alert + send "Node X is online" notification;
+/// `last_seen` online / still online now = skip; `last_seen` online / offline now = open alert + notify;
+/// `last_seen` offline / online now = close old offline alert + send "Node X is online" notification;
 /// others (never reported / new observation window) = skip.
 ///
 /// One node is allowed at most one unresolved offline alert at a time (checked inside
@@ -983,90 +1105,107 @@ pub async fn on_node_liveness_change(state: &AppState, transitions: &[(String, S
         let now = Timestamp::now().unix_nano();
         let repo = state.storage.alerts();
         match status {
-            Liveness::Offline => {
-                // If the builtin rule is off, do nothing — neither open alert nor send notification
-                let enabled = match repo.builtin_rule_enabled("node_offline").await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        warn!(%node_id, error = %e, "Failed to check node_offline builtin toggle, enabling by default");
-                        true
-                    }
-                };
-                if !enabled {
-                    continue;
-                }
-
-                // Already open: only refresh message / started_at, don't re-notify (avoid spam every 30s)
-                let existing = match repo.open_node_offline_alert_id(node_id).await {
-                    Ok(id) => id,
-                    Err(e) => {
-                        warn!(%node_id, error = %e, "Failed to query node offline alert");
-                        continue;
-                    }
-                };
-                let message = format!("Node {hostname} is offline");
-                let severity = "critical";
-                let alert_id = match repo
-                    .open_node_offline_alert(node_id, hostname, severity, &message, now)
-                    .await
-                {
-                    Ok(id) => id,
-                    Err(e) => {
-                        warn!(%node_id, error = %e, "Failed to open node offline alert");
-                        continue;
-                    }
-                };
-                if existing.is_none() {
-                    // Only notify on "first open" — avoid repeated pushes in the 30s cycle
-                    let rule = node_offline_alert_rule(severity);
-                    let facts = AlertFacts {
-                        node: hostname.clone(),
-                        firing: true,
-                        fields: vec![("Node", hostname.clone()), ("Status", "offline".to_string())],
-                        detail: message,
-                    };
-                    notify(state, &rule, &facts, now).await;
-                    info!(alert_id, %node_id, "Node offline alert firing");
-                }
-            }
-            Liveness::Online => {
-                // Close the leftover offline alert (this is not affected by the builtin toggle:
-                // the person came back online, leaving the old alert up would be misleading to ops)
-                let resolved = match repo.resolve_node_offline_alerts(node_id, now).await {
-                    Ok(n) => n,
-                    Err(e) => {
-                        warn!(%node_id, error = %e, "Failed to close node offline alert");
-                        0
-                    }
-                };
-
-                // "Online" is a separate event: as long as the transition goes from Offline to Online
-                // we send a notification, not dependent on resolved > 0 — resolve is for clearing old
-                // alerts, sending notification is a separate path.
-                let enabled = match repo.builtin_rule_enabled("node_online").await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        warn!(%node_id, error = %e, "Failed to check node_online builtin toggle, enabling by default");
-                        true
-                    }
-                };
-                if enabled {
-                    let rule = node_online_alert_rule();
-                    let facts = AlertFacts {
-                        node: hostname.clone(),
-                        firing: true,
-                        fields: vec![("Node", hostname.clone()), ("Status", "online".to_string())],
-                        detail: format!("Node {hostname} is online"),
-                    };
-                    notify(state, &rule, &facts, now).await;
-                    info!(%node_id, "Node online notification sent");
-                }
-                if resolved > 0 {
-                    info!(count = resolved, %node_id, "Node offline alert closed");
-                }
-            }
+            Liveness::Offline => handle_node_offline(state, &repo, node_id, hostname, now).await,
+            Liveness::Online => handle_node_online(state, &repo, node_id, hostname, now).await,
         }
     }
+}
+
+/// Node went offline: open (or refresh) the single unresolved offline alert and notify once.
+async fn handle_node_offline(state: &AppState, repo: &AlertsRepo, node_id: &str, hostname: &str, now: i64) {
+    // If the builtin rule is off, do nothing — neither open alert nor send notification
+    if !builtin_enabled_or_default(repo, "node_offline").await {
+        return;
+    }
+    // Notify only when this call *first* opened the alert (see `ensure_node_offline_alert`)
+    if let Some(alert_id) = ensure_node_offline_alert(repo, node_id, hostname, now).await {
+        notify_node_offline(state, node_id, hostname, alert_id, now).await;
+    }
+}
+
+/// Open (or refresh) the node's offline alert. Returns `Some(alert_id)` only when it was newly
+/// opened — an already-open alert is merely refreshed to avoid repeated pushes in the 30s cycle.
+async fn ensure_node_offline_alert(
+    repo: &AlertsRepo,
+    node_id: &str,
+    hostname: &str,
+    now: i64,
+) -> Option<i64> {
+    let existing = match repo.open_node_offline_alert_id(node_id).await {
+        Ok(id) => id,
+        Err(e) => {
+            warn!(%node_id, error = %e, "Failed to query node offline alert");
+            return None;
+        }
+    };
+    let message = format!("Node {hostname} is offline");
+    let opened = repo
+        .open_node_offline_alert(node_id, hostname, "critical", &message, now)
+        .await;
+    let alert_id = match opened {
+        Ok(id) => id,
+        Err(e) => {
+            warn!(%node_id, error = %e, "Failed to open node offline alert");
+            return None;
+        }
+    };
+    existing.is_none().then_some(alert_id)
+}
+
+async fn notify_node_offline(
+    state: &AppState,
+    node_id: &str,
+    hostname: &str,
+    alert_id: i64,
+    now: i64,
+) {
+    let rule = node_offline_alert_rule("critical");
+    let facts = AlertFacts {
+        node: hostname.to_string(),
+        firing: true,
+        fields: vec![("Node", hostname.to_string()), ("Status", "offline".to_string())],
+        detail: format!("Node {hostname} is offline"),
+    };
+    notify(state, &rule, &facts, now).await;
+    info!(alert_id, %node_id, "Node offline alert firing");
+}
+
+/// Node came back online: close any lingering offline alert and (per the `node_online` toggle) notify.
+async fn handle_node_online(state: &AppState, repo: &AlertsRepo, node_id: &str, hostname: &str, now: i64) {
+    let resolved = close_node_offline_alerts(repo, node_id, now).await;
+    notify_node_online(state, repo, node_id, hostname, now).await;
+    if resolved > 0 {
+        info!(count = resolved, %node_id, "Node offline alert closed");
+    }
+}
+
+/// Close the node's unresolved offline alerts. This is independent of the builtin toggle: the
+/// person came back online, leaving the old alert up would be misleading to ops.
+async fn close_node_offline_alerts(repo: &AlertsRepo, node_id: &str, now: i64) -> u64 {
+    match repo.resolve_node_offline_alerts(node_id, now).await {
+        Ok(n) => n,
+        Err(e) => {
+            warn!(%node_id, error = %e, "Failed to close node offline alert");
+            0
+        }
+    }
+}
+
+/// "Online" is a separate event: as long as the transition goes from Offline to Online we send a
+/// notification, not dependent on the alert close count — sending is a separate path.
+async fn notify_node_online(state: &AppState, repo: &AlertsRepo, node_id: &str, hostname: &str, now: i64) {
+    if !builtin_enabled_or_default(repo, "node_online").await {
+        return;
+    }
+    let rule = node_online_alert_rule();
+    let facts = AlertFacts {
+        node: hostname.to_string(),
+        firing: true,
+        fields: vec![("Node", hostname.to_string()), ("Status", "online".to_string())],
+        detail: format!("Node {hostname} is online"),
+    };
+    notify(state, &rule, &facts, now).await;
+    info!(%node_id, "Node online notification sent");
 }
 
 /// Certificate expiry evaluation: runs once each time a node sends back a snapshot.
@@ -1077,6 +1216,13 @@ pub async fn on_node_liveness_change(state: &AppState, transitions: &[(String, S
 ///   * One alert per certificate, `source_ref = {source_id}:{cert_path}`;
 ///   * Renewal (days remaining goes back above threshold) / path changed / source deleted → auto resolved.
 ///
+/// Round a day count for display (clamped at 0). The `f64` → `i64` cast is safe:
+/// certificate expiry windows are at most a few decades, far below 2^53.
+#[allow(clippy::cast_possible_truncation)]
+fn days_for_display(days: f64) -> i64 {
+    days.floor().max(0.0) as i64
+}
+
 /// Following snapshots rather than a separate scheduled task: certificates only appear in snapshots,
 /// judging while the data is freshest is simplest and avoids the mismatch of "snapshot changed but
 /// alert stuck on old value".
@@ -1112,147 +1258,190 @@ pub async fn evaluate_cert_expiry(
 
     for source in sources.iter().filter(|s| s.notify_enabled) {
         for cert in &certs {
-            if !cert_belongs_to(source, cert) {
-                continue;
-            }
-            if cert
-                .get("parse_error")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            let Some(not_after) = cert.get("not_after_unix_nano").and_then(|v| v.as_i64()) else {
-                continue;
-            };
-            let path = cert.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let days_left = (not_after - now) as f64 / 86_400_000_000_000.0;
-            if days_left > source.notify_days_before as f64 {
-                continue;
-            }
-
-            let subject = cert
-                .get("subject")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let domains: Vec<String> = cert
-                .get("domains")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|d| d.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let name = domains.first().cloned().unwrap_or_else(|| subject.clone());
-            let expired = days_left < 0.0;
-            let severity = if expired { "critical" } else { "warning" };
-            let message = if expired {
-                format!(
-                    "Certificate {name} ({path}) expired {} days ago",
-                    (-days_left).floor().max(0.0) as i64
-                )
-            } else {
-                format!(
-                    "Certificate {name} ({path}) expires in {} days (threshold {} days)",
-                    days_left.floor().max(0.0) as i64,
-                    source.notify_days_before
-                )
-            };
-            let source_ref = format!("{}:{}", source.id, path);
-
-            // Global toggle: cert alerts are split by severity into two tiers (cert_expiring / cert_expired),
-            // forming an AND with each source's own `notify_enabled`. Disabling a tier both stops opening
-            // new alerts and closes already-open ones — being above the local threshold means we wouldn't
-            // enter this loop in the first place, so getting here means "should it report" is already true.
-            let gate = if expired {
-                "cert_expired"
-            } else {
-                "cert_expiring"
-            };
-            let gate_enabled = match repo.builtin_rule_enabled(gate).await {
-                Ok(v) => v,
-                Err(e) => {
-                    warn!(error = %e, %gate, "Failed to check builtin toggle, enabling by default");
-                    true
-                }
-            };
-            if !gate_enabled {
-                if let Some(id) = open_by_ref.remove(&source_ref) {
-                    if let Err(e) = repo.resolve_alert(id, now).await {
-                        warn!(error = %e, %source_ref, "Failed to close cert alert");
-                    }
-                }
-                continue;
-            }
-
-            match open_by_ref.remove(&source_ref) {
-                // Already opened: only update on severity/text change, avoid writing DB on every snapshot
-                Some(id) => {
-                    if let Some(existing) = open.iter().find(|a| a.id == id) {
-                        if existing.severity != severity || existing.message != message {
-                            let _ = repo
-                                .update_alert_message(id, severity, days_left, &message)
-                                .await;
-                        }
-                    }
-                }
-                None => {
-                    let rule_name = format!("Certificate expiry · {name}");
-                    match repo
-                        .open_cert_alert(
-                            &source_ref,
-                            &rule_name,
-                            node_id,
-                            hostname,
-                            severity,
-                            source.notify_days_before as f64,
-                            days_left,
-                            &message,
-                            now,
-                        )
-                        .await
-                    {
-                        Ok(id) => {
-                            info!(cert = %name, %severity, id, "Certificate expiry alert firing");
-                            let rule = cert_alert_rule(&rule_name, severity);
-                            let days_field = if expired {
-                                format!("Expired {} days ago", (-days_left).floor().max(0.0) as i64)
-                            } else {
-                                format!("{} days", days_left.floor().max(0.0) as i64)
-                            };
-                            let facts = AlertFacts {
-                                node: hostname.to_string(),
-                                firing: true,
-                                fields: vec![
-                                    ("Node", hostname.to_string()),
-                                    ("Certificate", name.clone()),
-                                    ("Remaining", days_field),
-                                    ("Notify threshold", format!("{} days", source.notify_days_before)),
-                                ],
-                                detail: message,
-                            };
-                            notify(state, &rule, &facts, now).await;
-                        }
-                        Err(e) => warn!(error = %e, "Failed to open cert alert"),
-                    }
-                }
-            }
+            evaluate_cert(state, &repo, source, cert, node_id, hostname, now, &open, &mut open_by_ref)
+                .await;
         }
     }
 
     // Everything left is "no longer valid": certificate renewed, file deleted, source disabled/deleted
     for (source_ref, id) in open_by_ref {
-        if let Err(e) = repo.resolve_alert(id, now).await {
-            warn!(error = %e, %source_ref, "Failed to close cert alert");
-        } else {
-            info!(%source_ref, "Cert alert resolved");
+        resolve_cert_alert(&repo, id, &source_ref, now).await;
+    }
+}
+
+/// Evaluate a single `(source, cert)` pair and open / update / resolve as needed.
+#[allow(clippy::too_many_arguments)] // per-cert evaluation legitimately spans source, node, state and repo
+async fn evaluate_cert(
+    state: &AppState,
+    repo: &AlertsRepo,
+    source: &zhiwei_storage::cert_sources_repo::CertSource,
+    cert: &serde_json::Value,
+    node_id: &str,
+    hostname: &str,
+    now: i64,
+    open: &[zhiwei_storage::alerts_repo::Alert],
+    open_by_ref: &mut std::collections::HashMap<String, i64>,
+) {
+    if !cert_belongs_to(source, cert) {
+        return;
+    }
+    if cert
+        .get("parse_error")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let Some(not_after) = cert.get("not_after_unix_nano").and_then(serde_json::Value::as_i64) else {
+        return;
+    };
+    let path = cert.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    // Truncate to integer days first (cert alerting only cares about day granularity),
+    // then convert via f32 -- stays within f32 mantissa precision for any reasonable window.
+    let days_i64 = (not_after - now) / 86_400_000_000_000;
+    let days_left = f64::from(i32::try_from(days_i64).unwrap_or(i32::MAX));
+    let notify_days = f64::from(i32::try_from(source.notify_days_before).unwrap_or(0));
+    if days_left > notify_days {
+        return;
+    }
+
+    let subject = cert
+        .get("subject")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let domains: Vec<String> = cert
+        .get("domains")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|d| d.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let name = domains.first().cloned().unwrap_or_else(|| subject.clone());
+    let expired = days_left < 0.0;
+    let severity = if expired { "critical" } else { "warning" };
+    let message = cert_message(&name, path, source.notify_days_before, days_left, expired);
+    let source_ref = format!("{}:{}", source.id, path);
+
+    // Global toggle: cert alerts are split by severity into two tiers (cert_expiring / cert_expired),
+    // forming an AND with each source's own `notify_enabled`. Disabling a tier both stops opening
+    // new alerts and closes already-open ones — being above the local threshold means we wouldn't
+    // enter this loop in the first place, so getting here means "should it report" is already true.
+    let gate = if expired {
+        "cert_expired"
+    } else {
+        "cert_expiring"
+    };
+    if !builtin_enabled_or_default(repo, gate).await {
+        if let Some(id) = open_by_ref.remove(&source_ref) {
+            if let Err(e) = repo.resolve_alert(id, now).await {
+                warn!(error = %e, %source_ref, "Failed to close cert alert");
+            }
+        }
+        return;
+    }
+
+    let Some(id) = open_by_ref.remove(&source_ref) else {
+        open_cert_alert(
+            state, repo, &name, &source_ref, severity, notify_days, days_left, &message,
+            node_id, hostname, source.notify_days_before, expired, now,
+        )
+        .await;
+        return;
+    };
+    // Already opened: only update on severity/text change, avoid writing DB on every snapshot
+    if let Some(existing) = open.iter().find(|a| a.id == id) {
+        if existing.severity != severity || existing.message != message {
+            let _ = repo
+                .update_alert_message(id, severity, days_left, &message)
+                .await;
         }
     }
 }
 
-/// Whether a certificate source "owns" this certificate (consistent with certs_api's judgment)
+fn cert_message(
+    name: &str,
+    path: &str,
+    notify_days_before: i64,
+    days_left: f64,
+    expired: bool,
+) -> String {
+    if expired {
+        format!(
+            "Certificate {name} ({path}) expired {} days ago",
+            days_for_display(-days_left)
+        )
+    } else {
+        format!(
+            "Certificate {name} ({path}) expires in {} days (threshold {notify_days_before} days)",
+            days_for_display(days_left)
+        )
+    }
+}
+
+/// Open a fresh cert alert and push the notification.
+#[allow(clippy::too_many_arguments)]
+async fn open_cert_alert(
+    state: &AppState,
+    repo: &AlertsRepo,
+    name: &str,
+    source_ref: &str,
+    severity: &str,
+    notify_days: f64,
+    days_left: f64,
+    message: &str,
+    node_id: &str,
+    hostname: &str,
+    notify_days_before: i64,
+    expired: bool,
+    now: i64,
+) {
+    let rule_name = format!("Certificate expiry · {name}");
+    let opened = repo
+        .open_cert_alert(
+            source_ref, &rule_name, node_id, hostname, severity, notify_days, days_left, message,
+            now,
+        )
+        .await;
+    let id = match opened {
+        Ok(id) => id,
+        Err(e) => {
+            warn!(error = %e, "Failed to open cert alert");
+            return;
+        }
+    };
+    info!(cert = %name, %severity, id, "Certificate expiry alert firing");
+    let rule = cert_alert_rule(&rule_name, severity);
+    let days_field = if expired {
+        format!("Expired {} days ago", days_for_display(-days_left))
+    } else {
+        format!("{} days", days_for_display(days_left))
+    };
+    let facts = AlertFacts {
+        node: hostname.to_string(),
+        firing: true,
+        fields: vec![
+            ("Node", hostname.to_string()),
+            ("Certificate", name.to_string()),
+            ("Remaining", days_field),
+            ("Notify threshold", format!("{notify_days_before} days")),
+        ],
+        detail: message.to_string(),
+    };
+    notify(state, &rule, &facts, now).await;
+}
+
+async fn resolve_cert_alert(repo: &AlertsRepo, id: i64, source_ref: &str, now: i64) {
+    if let Err(e) = repo.resolve_alert(id, now).await {
+        warn!(error = %e, %source_ref, "Failed to close cert alert");
+    } else {
+        info!(%source_ref, "Cert alert resolved");
+    }
+}
+
+/// Whether a certificate source "owns" this certificate (consistent with `certs_api`'s judgment)
 fn cert_belongs_to(
     source: &zhiwei_storage::cert_sources_repo::CertSource,
     cert: &serde_json::Value,
@@ -1281,7 +1470,7 @@ fn cert_alert_rule(name: &str, severity: &str) -> AlertRule {
     }
 }
 
-/// Carrier for container start/stop events — purely for feeding notify()'s severity filter + naming,
+/// Carrier for container start/stop events — purely for feeding `notify()`'s severity filter + naming,
 /// same pattern as `probe_alert_rule` / `node_offline_alert_rule`.
 fn container_event_rule(name: &str, severity: &str) -> AlertRule {
     AlertRule {
@@ -1312,11 +1501,11 @@ fn container_running(state: &str) -> bool {
 /// Snapshot diff (pure function, easy to unit-test): two container snapshot JSON → event list.
 ///
 /// Main criterion is **state (running / non-running)**; timestamps only supplement "restart within cycle":
-/// old node-agent versions don't report started_at / finished_at (proto3 default is 0), using timestamps
+/// old node-agent versions don't report `started_at` / `finished_at` (proto3 default is 0), using timestamps
 /// as the main criterion would cause all existing containers to be misreported as "started / stopped" after agent upgrade.
 ///
 /// - Appearing in snapshot and running → `Started` (new container, exited→running, restart within cycle);
-///   "restart within cycle" requires the previous started_at to be known and updated (> 0),
+///   "restart within cycle" requires the previous `started_at` to be known and updated (> 0),
 ///   to avoid treating "just learned to read start time" as "just started";
 /// - running→non-running, or disappearing from snapshot (rm / cleanup) → `Stopped`;
 /// - Others (non-running→non-running, new but already exited) don't emit events — one-shot containers
@@ -1386,7 +1575,7 @@ fn diff_containers(previous_json: &str, current_json: &str) -> Vec<ContainerEven
 /// Container start/stop event detection: compare the previous and current container snapshots for the
 /// same node, convert the diff into events.
 ///
-/// Diff is computed directly on the latest snapshot from node_inventory (same time every 5 minutes);
+/// Diff is computed directly on the latest snapshot from `node_inventory` (same time every 5 minutes);
 /// baseline is stored in the database, so node / monitor restarts don't lose it. When there's no
 /// historical snapshot (`previous_json = None`), only establish the baseline, don't emit events —
 /// avoids flashing a screen of "started" for existing containers after upgrade / fresh install.
@@ -1420,86 +1609,105 @@ pub async fn on_container_events(
             }
         };
         let short = id.chars().take(12).collect::<String>();
-
         match event {
             ContainerEvent::Stopped { .. } => {
-                let enabled = match repo.builtin_rule_enabled("container_stopped").await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        warn!(error = %e, "Failed to check container_stopped builtin toggle, enabling by default");
-                        true
-                    }
-                };
-                if !enabled {
-                    continue;
-                }
-                let message = format!("Container {name} ({short}) stopped");
-                match repo
-                    .open_container_alert(
-                        &id,
-                        "Container stopped",
-                        node_id,
-                        hostname,
-                        "warning",
-                        &message,
-                        now,
-                    )
-                    .await
-                {
-                    Ok(alert_id) => {
-                        info!(container = %name, alert_id, %node_id, "Container stopped alert firing");
-                        let rule = container_event_rule("Container stopped", "warning");
-                        let facts = AlertFacts {
-                            node: hostname.to_string(),
-                            firing: true,
-                            fields: vec![
-                                ("Node", hostname.to_string()),
-                                ("Container", name.clone()),
-                                ("ID", short.clone()),
-                            ],
-                            detail: message,
-                        };
-                        notify(state, &rule, &facts, now).await;
-                    }
-                    Err(e) => warn!(error = %e, "Failed to open container stopped alert"),
-                }
+                handle_container_stopped(state, &repo, &id, &name, &short, node_id, hostname, now)
+                    .await;
             }
             ContainerEvent::Started { .. } => {
-                // Close this container's unresolved stopped alert - even if started toggle is off:
-                // if container is up, the old "stopped" alert would be misleading
-                if let Err(e) = repo.resolve_open_container_alerts(&id, now).await {
-                    warn!(error = %e, "Failed to close container stopped alert");
-                }
-                let enabled = match repo.builtin_rule_enabled("container_started").await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        warn!(error = %e, "Failed to check container_started builtin toggle, enabling by default");
-                        true
-                    }
-                };
-                if !enabled {
-                    continue;
-                }
-                let message = format!("Container {name} ({short}) started");
-                let rule = container_event_rule("Container started", "info");
-                let facts = AlertFacts {
-                    node: hostname.to_string(),
-                    firing: true,
-                    fields: vec![
-                        ("Node", hostname.to_string()),
-                        ("Container", name.clone()),
-                        ("ID", short.clone()),
-                    ],
-                    detail: message,
-                };
-                notify(state, &rule, &facts, now).await;
-                info!(container = %name, %node_id, "Container started notification sent");
+                handle_container_started(state, &repo, &id, &name, &short, node_id, hostname, now)
+                    .await;
             }
         }
     }
 }
 
-/// Snapshot JSON → { container_id: (name, started_at_unix_nano, running) }.
+/// Container stopped: open a `source = container` alert and notify.
+#[allow(clippy::too_many_arguments)] // event payload + node context; wrapping adds no clarity
+async fn handle_container_stopped(
+    state: &AppState,
+    repo: &AlertsRepo,
+    id: &str,
+    name: &str,
+    short: &str,
+    node_id: &str,
+    hostname: &str,
+    now: i64,
+) {
+    if !builtin_enabled_or_default(repo, "container_stopped").await {
+        return;
+    }
+    let message = format!("Container {name} ({short}) stopped");
+    let opened = repo
+        .open_container_alert(
+            id,
+            "Container stopped",
+            node_id,
+            hostname,
+            "warning",
+            &message,
+            now,
+        )
+        .await;
+    let alert_id = match opened {
+        Ok(alert_id) => alert_id,
+        Err(e) => {
+            warn!(error = %e, "Failed to open container stopped alert");
+            return;
+        }
+    };
+    info!(container = %name, alert_id, %node_id, "Container stopped alert firing");
+    let rule = container_event_rule("Container stopped", "warning");
+    let facts = AlertFacts {
+        node: hostname.to_string(),
+        firing: true,
+        fields: vec![
+            ("Node", hostname.to_string()),
+            ("Container", name.to_string()),
+            ("ID", short.to_string()),
+        ],
+        detail: message,
+    };
+    notify(state, &rule, &facts, now).await;
+}
+
+/// Container started: close the unresolved stopped alert, then (per toggle) notify.
+#[allow(clippy::too_many_arguments)] // event payload + node context; wrapping adds no clarity
+async fn handle_container_started(
+    state: &AppState,
+    repo: &AlertsRepo,
+    id: &str,
+    name: &str,
+    short: &str,
+    node_id: &str,
+    hostname: &str,
+    now: i64,
+) {
+    // Close this container's unresolved stopped alert - even if started toggle is off:
+    // if container is up, the old "stopped" alert would be misleading
+    if let Err(e) = repo.resolve_open_container_alerts(id, now).await {
+        warn!(error = %e, "Failed to close container stopped alert");
+    }
+    if !builtin_enabled_or_default(repo, "container_started").await {
+        return;
+    }
+    let message = format!("Container {name} ({short}) started");
+    let rule = container_event_rule("Container started", "info");
+    let facts = AlertFacts {
+        node: hostname.to_string(),
+        firing: true,
+        fields: vec![
+            ("Node", hostname.to_string()),
+            ("Container", name.to_string()),
+            ("ID", short.to_string()),
+        ],
+        detail: message,
+    };
+    notify(state, &rule, &facts, now).await;
+    info!(container = %name, %node_id, "Container started notification sent");
+}
+
+/// Snapshot JSON → { `container_id`: (name, `started_at_unix_nano`, running) }.
 /// Field names may not exactly match node-agent versions, treat missing values as 0 / false.
 fn parse_container_map(json: &str) -> std::collections::HashMap<String, (String, i64, bool)> {
     let mut out = std::collections::HashMap::new();
@@ -1520,7 +1728,7 @@ fn parse_container_map(json: &str) -> std::collections::HashMap<String, (String,
             .to_string();
         let started = c
             .get("started_at_unix_nano")
-            .and_then(|v| v.as_i64())
+            .and_then(serde_json::Value::as_i64)
             .unwrap_or(0);
         let running = c
             .get("state")
@@ -1534,7 +1742,7 @@ fn parse_container_map(json: &str) -> std::collections::HashMap<String, (String,
 /// Deliver a JSON request body, return the response body.
 ///
 /// When `token` is non-empty, includes `Authorization: Bearer <token>` — Feishu app API uses it
-/// to carry tenant_access_token, self-hosted receivers can use it for auth; Slack's Incoming
+/// to carry `tenant_access_token`, self-hosted receivers can use it for auth; Slack's Incoming
 /// Webhook URL is itself the "URL is the credential", just leave it empty.
 pub async fn post_json(url: &str, token: &str, body: &str) -> anyhow::Result<Vec<u8>> {
     let url = url.to_string();
@@ -1543,10 +1751,9 @@ pub async fn post_json(url: &str, token: &str, body: &str) -> anyhow::Result<Vec
         .or_else(|| url.strip_prefix("https://"))
         .ok_or_else(|| anyhow::anyhow!("only http(s) webhooks are supported"))?;
     let tls = url.starts_with("https://");
-    let (host_port, path) = match authority.find('/') {
-        Some(i) => (&authority[..i], &authority[i..]),
-        None => (authority, "/"),
-    };
+    let (host_port, path) = authority
+        .find('/')
+        .map_or((authority, "/"), |i| (&authority[..i], &authority[i..]));
 
     let (host, port) = match host_port.split_once(':') {
         Some((h, p)) => (h, p.parse::<u16>().unwrap_or(if tls { 443 } else { 80 })),
@@ -1562,7 +1769,7 @@ pub async fn post_json(url: &str, token: &str, body: &str) -> anyhow::Result<Vec
 
     // Feishu / Slack URLs are all https; self-hosted receivers are mostly internal plaintext http
     if tls {
-        let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(tls_config()?));
+        let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(tls_config()));
         let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
             .map_err(|e| anyhow::anyhow!("invalid hostname {host}: {e}"))?;
         let tls_stream = tokio::time::timeout(
@@ -1579,15 +1786,15 @@ pub async fn post_json(url: &str, token: &str, body: &str) -> anyhow::Result<Vec
 }
 
 /// System root certificates (webhook targets all have proper certs: Feishu / Slack or user's own domain)
-fn tls_config() -> anyhow::Result<rustls::ClientConfig> {
+fn tls_config() -> rustls::ClientConfig {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    Ok(rustls::ClientConfig::builder()
+    rustls::ClientConfig::builder()
         .with_root_certificates(roots)
-        .with_no_client_auth())
+        .with_no_client_auth()
 }
 
-/// POST a JSON body and read back the response. Shared by http and https (TcpStream and TlsStream both implement the same set of traits).
+/// POST a JSON body and read back the response. Shared by http and https (`TcpStream` and `TlsStream` both implement the same set of traits).
 async fn send_post<S>(
     stream: S,
     host: &str,
@@ -1614,15 +1821,15 @@ where
     }
     let req = builder.body(Full::new(Bytes::from(body.to_string())))?;
 
-    let res = tokio::time::timeout(Duration::from_secs(5), sender.send_request(req))
+    let resp = tokio::time::timeout(Duration::from_secs(5), sender.send_request(req))
         .await
         .map_err(|_| anyhow::anyhow!("request timed out"))??;
-    let status = res.status();
-    let body = res
+    let status = resp.status();
+    let body = resp
         .into_body()
         .collect()
         .await
-        .map(|b| b.to_bytes())
+        .map(http_body_util::Collected::to_bytes)
         .unwrap_or_default();
     if !status.is_success() {
         anyhow::bail!("API returned {status}{}", body_detail(&body));
@@ -1666,7 +1873,8 @@ fn body_detail(body: &[u8]) -> String {
 
 /// Known error codes -> troubleshooting hints. Only covers Feishu since its error codes are opaque.
 /// Slack / self-hosted webhooks: if something's wrong, the HTTP status already tells you.
-fn channel_hint(code: i64) -> &'static str {
+#[allow(clippy::unreadable_literal)] // Feishu error codes are opaque identifiers, not quantities
+const fn channel_hint(code: i64) -> &'static str {
     match code {
         10003 => ": App ID / App Secret is incomplete or invalid",
         10014 => ": App ID or App Secret is incorrect",
@@ -1747,7 +1955,7 @@ const LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(30);
 /// flooding the alerts page with fake alerts. 120s is empirical: restarts longer than this are
 /// usually not normal rolling restarts but the whole cluster being down, and alerting then is fine.
 ///
-/// During this window, don't read last_seen_state, don't send any transitions: the first real
+/// During this window, don't read `last_seen_state`, don't send any transitions: the first real
 /// "first round" happens after warmup, logic stays the same (None→Offline still really alerts).
 pub const LIVENESS_WARMUP_MS: i64 = 120_000;
 
@@ -1795,13 +2003,13 @@ pub fn spawn_node_liveness_watcher(state: AppState) {
     });
 }
 
-/// Compute one round of "state transitions": for each node, get the latest last_seen and compute
+/// Compute one round of "state transitions": for each node, get the latest `last_seen` and compute
 /// Liveness, then compare with the previous round — only report when "both previous and current rounds can confirm it".
 ///
 /// `monitor_started_at_unix_ms` is the Unix milliseconds when the monitor process started, used to
 /// suppress cold-start false alarms after restart: see [`LIVENESS_WARMUP_MS`].
 /// During warmup **no transitions are sent** — including the "first round pushes all offline nodes
-/// once" path; otherwise during restart all nodes' last_seen would look ≥ 60s threshold and
+/// once" path; otherwise during restart all nodes' `last_seen` would look ≥ 60s threshold and
 /// still flood a screen of fake offline alerts.
 async fn compute_transitions(
     state: &AppState,
@@ -1838,10 +2046,10 @@ async fn compute_transitions(
         // Only report when "previous round recorded, and different from now", to avoid cold-start noise.
         match last_seen_state.get(&n.id) {
             Some(prev) if *prev != current => {
-                let hostname = if !n.alias.is_empty() {
-                    n.alias.clone()
-                } else {
+                let hostname = if n.alias.is_empty() {
                     n.hostname.clone()
+                } else {
+                    n.alias.clone()
                 };
                 out.push((n.id, hostname, current));
             }
@@ -1852,10 +2060,10 @@ async fn compute_transitions(
                 // top of the function; reaching here means we've passed warmup, monitor has run for at
                 // least LIVENESS_WARMUP_MS, normal behavior.
                 if current == Liveness::Offline {
-                    let hostname = if !n.alias.is_empty() {
-                        n.alias.clone()
-                    } else {
+                    let hostname = if n.alias.is_empty() {
                         n.hostname.clone()
+                    } else {
+                        n.alias.clone()
                     };
                     out.push((n.id, hostname, current));
                 }
@@ -1868,6 +2076,10 @@ async fn compute_transitions(
 
 #[cfg(test)]
 mod tests {
+    // Test fixtures use raw Unix timestamps (1700000000 = 2023-11-14) and
+    // container IDs; underscores would obscure the intended value.
+    #![allow(clippy::unreadable_literal)]
+
     use super::*;
 
     fn rule(severity: &str) -> AlertRule {
@@ -2020,8 +2232,8 @@ mod tests {
         assert_eq!(elements[2]["text"]["tag"], "plain_text");
     }
 
-    /// Alias has no character validation (routes::normalize_alias only trims + limits length),
-    /// injecting into lark_md would @mention everyone — `<` that can open tags must be neutralized
+    /// Alias has no character validation (`routes::normalize_alias` only trims + limits length),
+    /// injecting into `lark_md` would @mention everyone — `<` that can open tags must be neutralized
     #[test]
     fn feishu_card_neutralizes_markup_in_alias() {
         let mut f = facts(true);
@@ -2149,7 +2361,7 @@ mod tests {
         }
     }
 
-    /// Temporary channel for the Test button: even with only url / kind filled, must be constructable (receive_id_type filled with default)
+    /// Temporary channel for the Test button: even with only url / kind filled, must be constructable (`receive_id_type` filled with default)
     #[test]
     fn test_channel_fills_defaults() {
         let ch = test_channel("feishu", "", " secret ", " cli_x ", " oc_1 ", "");
@@ -2189,7 +2401,7 @@ mod tests {
         assert_eq!(body_detail(b"   "), "");
     }
 
-    /// Card color and text are pure functions, but "who counts as severe" must align with severity_rank
+    /// Card color and text are pure functions, but "who counts as severe" must align with `severity_rank`
     #[test]
     fn level_palette_follows_severity() {
         assert_eq!(level_style(&rule("critical"), true).feishu, "red");
@@ -2330,7 +2542,7 @@ mod tests {
         assert_eq!(diff_containers(&up, &dead), vec![stopped("c1", "web")]);
     }
 
-    /// Restart within one cycle: state stays running, only started_at gets newer → counts as started
+    /// Restart within one cycle: state stays running, only `started_at` gets newer → counts as started
     #[test]
     fn restart_within_one_cycle_reports_start_only() {
         let prev = snap(&[("c1", "web", 1000, "running")]);

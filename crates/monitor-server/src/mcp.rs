@@ -51,7 +51,7 @@ fn tools_list() -> Value {
             tool_def(
                 "list_nodes",
                 "List all nodes in the cluster with hostname, last_seen, and key latest metrics.",
-                json!({
+                &json!({
                     "type": "object",
                     "properties": {},
                     "additionalProperties": false,
@@ -60,7 +60,7 @@ fn tools_list() -> Value {
             tool_def(
                 "get_node",
                 "Get single node details: host_info (OS/kernel/CPU/memory) and latest metrics. Returns error if not found.",
-                json!({
+                &json!({
                     "type": "object",
                     "properties": {
                         "node_id": { "type": "string", "description": "Node ID" }
@@ -72,7 +72,7 @@ fn tools_list() -> Value {
             tool_def(
                 "get_telemetry",
                 "Get latest telemetry frame for a node (CPU/memory/disk/network).",
-                json!({
+                &json!({
                     "type": "object",
                     "properties": {
                         "node_id": { "type": "string" },
@@ -85,7 +85,7 @@ fn tools_list() -> Value {
             tool_def(
                 "list_alerts",
                 "List active alerts and the last 50 resolved alerts (fixed 50-item window, no pagination).",
-                json!({
+                &json!({
                     "type": "object",
                     "properties": {},
                     "additionalProperties": false,
@@ -94,7 +94,7 @@ fn tools_list() -> Value {
             tool_def(
                 "list_certs",
                 "List certificate scan sources (node + path configured in console), without certificate content.",
-                json!({
+                &json!({
                     "type": "object",
                     "properties": {},
                     "additionalProperties": false,
@@ -103,7 +103,7 @@ fn tools_list() -> Value {
             tool_def(
                 "list_containers",
                 "List latest container snapshot for a node (requires inventory reported by node).",
-                json!({
+                &json!({
                     "type": "object",
                     "properties": {
                         "node_id": { "type": "string" }
@@ -115,7 +115,7 @@ fn tools_list() -> Value {
             tool_def(
                 "list_processes",
                 "List latest process snapshot TopN for a node (requires inventory reported by node).",
-                json!({
+                &json!({
                     "type": "object",
                     "properties": {
                         "node_id": { "type": "string" },
@@ -134,7 +134,7 @@ fn tools_list() -> Value {
     })
 }
 
-fn tool_def(name: &str, description: &str, input_schema: Value) -> Value {
+fn tool_def(name: &str, description: &str, input_schema: &Value) -> Value {
     json!({
         "name": name,
         "description": description,
@@ -162,7 +162,7 @@ struct JsonRpcError {
     data: Option<Value>,
 }
 
-fn rpc_error(id: Value, code: i32, message: impl Into<String>) -> Value {
+fn rpc_error(id: &Value, code: i32, message: impl Into<String>) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -170,7 +170,7 @@ fn rpc_error(id: Value, code: i32, message: impl Into<String>) -> Value {
     })
 }
 
-fn rpc_result(id: Value, result: Value) -> Value {
+fn rpc_result(id: &Value, result: &Value) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -208,10 +208,10 @@ pub async fn sse_handler(
     let req: JsonRpcRequest = match serde_json::from_slice::<JsonRpcRequest>(&body) {
         Ok(r) if r.jsonrpc == "2.0" => r,
         Ok(_) => {
-            return sse_single(rpc_error(Value::Null, -32600, "jsonrpc must be \"2.0\""));
+            return sse_single(&rpc_error(&Value::Null, -32600, "jsonrpc must be \"2.0\""));
         }
         Err(e) => {
-            return sse_single(rpc_error(Value::Null, -32700, format!("parse error: {e}")));
+            return sse_single(&rpc_error(&Value::Null, -32700, format!("parse error: {e}")));
         }
     };
 
@@ -222,18 +222,18 @@ pub async fn sse_handler(
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|s| s.to_string());
+        .map(std::string::ToString::to_string);
 
-    let response = dispatch(&state, &bearer, req).await;
-    sse_single(response)
+    let response = dispatch(&state, bearer.as_deref(), req).await;
+    sse_single(&response)
 }
 
 /// Dispatch JSON-RPC method to specific implementation.
-async fn dispatch(state: &AppState, bearer: &Option<String>, req: JsonRpcRequest) -> Value {
+async fn dispatch(state: &AppState, bearer: Option<&str>, req: JsonRpcRequest) -> Value {
     match req.method.as_str() {
         "initialize" => rpc_result(
-            req.id,
-            json!({
+            &req.id,
+            &json!({
                 "protocolVersion": MCP_PROTOCOL_VERSION,
                 "capabilities": server_capabilities(),
                 "serverInfo": server_info(),
@@ -242,23 +242,23 @@ async fn dispatch(state: &AppState, bearer: &Option<String>, req: JsonRpcRequest
         "notifications/initialized" => {
             // Notifications don't need a response (id usually null).
             // But our transport is synchronous-return, so return an ack.
-            rpc_result(req.id, json!({ "acknowledged": true }))
+            rpc_result(&req.id, &json!({ "acknowledged": true }))
         }
-        "ping" => rpc_result(req.id, json!({})),
-        "tools/list" => rpc_result(req.id, tools_list()),
-        "tools/call" => call_tool(state, bearer, req.id, req.params).await,
-        other => rpc_error(req.id, -32601, format!("method not found: {other}")),
+        "ping" => rpc_result(&req.id, &json!({})),
+        "tools/list" => rpc_result(&req.id, &tools_list()),
+        "tools/call" => call_tool(state, bearer, &req.id, req.params).await,
+        other => rpc_error(&req.id, -32601, format!("method not found: {other}")),
     }
 }
 
 /// Call a tool: parse name + arguments, call monitor REST API, wrap as MCP
 /// `content`.
-async fn call_tool(state: &AppState, bearer: &Option<String>, id: Value, params: Value) -> Value {
+async fn call_tool(state: &AppState, bearer: Option<&str>, id: &Value, params: Value) -> Value {
     let name = match params.get("name").and_then(|v| v.as_str()) {
         Some(n) => n.to_string(),
         None => return rpc_error(id, -32602, "params.name required"),
     };
-    let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+    let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
     let Some(token) = bearer else {
         return rpc_error(id, -32603, "internal: bearer missing in handler context");
     };
@@ -274,17 +274,17 @@ async fn call_tool(state: &AppState, bearer: &Option<String>, id: Value, params:
     // from cfg.listen. See AppState.mcp_base_url for the complete approach.
     let base_url = &state.mcp_base_url;
 
-    match call_tool_impl(base_url, token, &name, arguments).await {
+    match call_tool_impl(base_url, token, &name, &arguments).await {
         Ok(text) => rpc_result(
             id,
-            json!({
+            &json!({
                 "content": [{ "type": "text", "text": text }],
                 "isError": false,
             }),
         ),
         Err(e) => rpc_result(
             id,
-            json!({
+            &json!({
                 "content": [{ "type": "text", "text": format!("tool error: {e}") }],
                 "isError": true,
             }),
@@ -298,19 +298,18 @@ async fn call_tool_impl(
     base_url: &str,
     token: &str,
     name: &str,
-    arguments: Value,
+    arguments: &Value,
 ) -> anyhow::Result<String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
     let url_path = match name {
-        "list_nodes" => "/v1/nodes".to_string(),
         // Note: the backend has no `GET /v1/nodes/:id` endpoint (only the four
         // sub-resources: telemetry/series/containers/processes). `/v1/nodes`
-        // list itself already includes host_info + latest metrics, so the
-        // "single node details" is implemented via list + client-side filter.
-        "get_node" => "/v1/nodes".to_string(),
+        // list itself already includes host_info + latest metrics, so
+        // "get_node" reuses the list path with client-side filtering.
+        "list_nodes" | "get_node" => "/v1/nodes".to_string(),
         "get_telemetry" => {
             let node_id = arguments
                 .get("node_id")
@@ -318,7 +317,7 @@ async fn call_tool_impl(
                 .ok_or_else(|| anyhow::anyhow!("node_id required"))?;
             let limit = arguments
                 .get("limit")
-                .and_then(|v| v.as_i64())
+                .and_then(serde_json::Value::as_i64)
                 .unwrap_or(100);
             format!("/v1/nodes/{node_id}/telemetry?limit={limit}")
         }
@@ -381,15 +380,16 @@ async fn call_tool_impl(
     // body is moved into Value::String in unwrap_or, so the closure can't
     // grab it. Keep a fallback string copy.
     let body_owned = body;
-    let v: Value = serde_json::from_str(&body_owned).unwrap_or(Value::String(body_owned.clone()));
+    let v: Value =
+        serde_json::from_str(&body_owned).unwrap_or_else(|_| Value::String(body_owned.clone()));
     Ok(serde_json::to_string_pretty(&v).unwrap_or(body_owned))
 }
 
 /// Wrap a single JSON-RPC response as an SSE event stream.
-fn sse_single(message: Value) -> Response {
+fn sse_single(message: &Value) -> Response {
     let body = format!(
         "event: message\ndata: {}\n\n",
-        serde_json::to_string(&message).unwrap_or_else(|_| "{}".to_string())
+        serde_json::to_string(message).unwrap_or_else(|_| "{}".to_string())
     );
     (
         StatusCode::OK,
@@ -452,7 +452,7 @@ mod tests {
 
     #[test]
     fn rpc_result_carries_id_and_result() {
-        let v = rpc_result(json!(7), json!({"ok": true}));
+        let v = rpc_result(&json!(7), &json!({"ok": true}));
         assert_eq!(v["jsonrpc"], "2.0");
         assert_eq!(v["id"], 7);
         assert_eq!(v["result"]["ok"], true);
@@ -461,7 +461,7 @@ mod tests {
 
     #[test]
     fn rpc_error_carries_code_and_message() {
-        let v = rpc_error(Value::Null, -32601, "method not found: nope");
+        let v = rpc_error(&Value::Null, -32601, "method not found: nope");
         assert_eq!(v["jsonrpc"], "2.0");
         assert_eq!(v["error"]["code"], -32601);
         assert!(v["error"]["message"]

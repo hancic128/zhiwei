@@ -2,7 +2,7 @@
 //!
 //! Why not mTLS: managed platforms terminate TLS at the edge and do not
 //! forward client certificates into containers, so the "authenticate nodes via
-//! client certificates" approach won't work on PaaS. After switching to
+//! client certificates" approach won't work on `PaaS`. After switching to
 //! "authenticate nodes via signatures", it can be deployed anywhere that can
 //! run HTTP — which is also the literal meaning of
 //! DESIGN.md principle #3 "signatures instead of credentials".
@@ -31,7 +31,7 @@ pub const MAX_SKEW_SECONDS: i64 = 300;
 /// Format: `zhiwei-v1\n<method>\n<path_and_query>\n<ts_nanos>\n<nonce_b64>\n<body>`
 /// First three fields contain no newlines (newlines in path are URL-encoded), and body comes last,
 /// so this concatenation is unambiguous, no extra hashing needed.
-pub fn canonical(
+#[must_use] pub fn canonical(
     method: &str,
     path_and_query: &str,
     ts_unix_nano: i64,
@@ -63,7 +63,7 @@ pub struct SignedHeaders {
 
 impl SignedHeaders {
     /// Sign one request using the node's private key
-    pub fn sign(
+    #[must_use] pub fn sign(
         key: &KeyPair,
         node_id: &str,
         method: &str,
@@ -86,8 +86,13 @@ impl SignedHeaders {
         }
     }
 
-    /// Server verification: time window -> signature. Nonce deduplication is caller's responsibility via NonceCache
+    /// Server verification: time window -> signature. Nonce deduplication is caller's responsibility via `NonceCache`
     /// (requires cross-request state, not suitable here).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::Invalid` if the timestamp is outside the allowed skew window,
+    /// the signature is not valid base64, or signature verification fails.
     pub fn verify(
         &self,
         public_key: &PublicKey,
@@ -197,7 +202,7 @@ mod tests {
     fn stale_timestamp_is_rejected() {
         let k = key();
         let signed = SignedHeaders::sign(&k, "node-1", "POST", "/v1/telemetry", b"x");
-        let mut stale = signed.clone();
+        let mut stale = signed;
         stale.timestamp -= (MAX_SKEW_SECONDS + 30) * 1_000_000_000;
         assert!(stale
             .verify(&k.public_key(), "POST", "/v1/telemetry", b"x")

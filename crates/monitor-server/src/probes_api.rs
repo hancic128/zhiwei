@@ -32,7 +32,7 @@ pub async fn probe_config_handler(
     Query(q): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
-    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    let pq = uri.path_and_query().map_or("/", hyper::http::uri::PathAndQuery::as_str);
     let (node_id, _pub) = match verify_node(&state, &headers, method.as_str(), pq, &[]).await {
         Ok(id) => id,
         Err((code, msg)) => return err(code, msg),
@@ -105,19 +105,16 @@ pub async fn probe_results_ingest_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    let pq = uri.path_and_query().map_or("/", hyper::http::uri::PathAndQuery::as_str);
     let (node_id, _pub) = match verify_node(&state, &headers, method.as_str(), pq, &body).await {
         Ok(id) => id,
         Err((code, msg)) => return err(code, msg),
     };
 
-    let parsed: ProbeResultsBody = match serde_json::from_slice(&body) {
+    let parsed = match parse_probe_results(&body) {
         Ok(v) => v,
-        Err(e) => return err(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
+        Err((code, msg)) => return err(code, msg),
     };
-    if parsed.results.len() > 500 {
-        return err(StatusCode::BAD_REQUEST, "Batch size cannot exceed 500");
-    }
 
     let hostname = state
         .storage
@@ -131,63 +128,9 @@ pub async fn probe_results_ingest_handler(
 
     let now = zhiwei_common::Timestamp::now().unix_nano();
     let mut stored = 0usize;
-
     for item in &parsed.results {
-        let result_state = match item.state.as_str() {
-            "ok" => "ok",
-            "degraded" => "degraded",
-            _ => "down",
-        };
-
-        let probe = match state.storage.probes().find_probe(&item.probe_id).await {
-            Ok(Some(p)) => p,
-            Ok(None) => {
-                debug!(probe_id = %item.probe_id, "Received result for non-existent probe, ignored");
-                continue;
-            }
-            Err(e) => {
-                warn!(error = %e, "Failed to query probes");
-                continue;
-            }
-        };
-
-        // Ownership check: when probe is bound to a different node, don't accept this node's results
-        if !probe.node_ids.is_empty() && !probe.node_ids.iter().any(|n| n == node_id.as_str()) {
-            continue;
-        }
-
-        let ts = if item.ts_unix_nano > 0 {
-            item.ts_unix_nano
-        } else {
-            now
-        };
-
-        match state
-            .storage
-            .probes()
-            .record_result(
-                &probe,
-                node_id.as_str(),
-                ts,
-                result_state,
-                item.latency_ms,
-                item.status_code,
-                &item.error,
-            )
-            .await
-        {
-            Ok(transition) => {
-                stored += 1;
-                crate::alerts::on_probe_transition(
-                    &state,
-                    &probe,
-                    &transition,
-                    node_id.as_str(),
-                    &hostname,
-                )
-                .await;
-            }
-            Err(e) => warn!(error = %e, probe = %probe.name, "Failed to write probe results"),
+        if ingest_one_result(&state, &node_id, &hostname, item, now).await {
+            stored += 1;
         }
     }
 
@@ -196,6 +139,96 @@ pub async fn probe_results_ingest_handler(
         return err(StatusCode::BAD_REQUEST, "No results were accepted");
     }
     StatusCode::NO_CONTENT.into_response()
+}
+
+/// Decode + size-check the batch body. On failure returns `(status, message)` for the caller
+/// to hand to [`err`].
+fn parse_probe_results(body: &Bytes) -> Result<ProbeResultsBody, (StatusCode, String)> {
+    let parsed: ProbeResultsBody = serde_json::from_slice(body)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid body: {e}")))?;
+    if parsed.results.len() > 500 {
+        return Err((StatusCode::BAD_REQUEST, "Batch size cannot exceed 500".to_string()));
+    }
+    Ok(parsed)
+}
+
+/// Persist one submitted probe result. Returns whether a row was stored (false for
+/// non-existent probes, ownership mismatches, or write failures).
+async fn ingest_one_result(
+    state: &AppState,
+    node_id: &zhiwei_common::NodeId,
+    hostname: &str,
+    item: &ProbeResultItem,
+    now: i64,
+) -> bool {
+    let result_state = normalize_result_state(&item.state);
+
+    let probe = match state.storage.probes().find_probe(&item.probe_id).await {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            debug!(probe_id = %item.probe_id, "Received result for non-existent probe, ignored");
+            return false;
+        }
+        Err(e) => {
+            warn!(error = %e, "Failed to query probes");
+            return false;
+        }
+    };
+
+    // Ownership check: when probe is bound to a different node, don't accept this node's results
+    if !probe.node_ids.is_empty() && !probe.node_ids.iter().any(|n| n == node_id.as_str()) {
+        return false;
+    }
+
+    let ts = if item.ts_unix_nano > 0 {
+        item.ts_unix_nano
+    } else {
+        now
+    };
+    store_result(state, &probe, node_id, hostname, item, ts, result_state).await
+}
+
+fn normalize_result_state(state: &str) -> &'static str {
+    match state {
+        "ok" => "ok",
+        "degraded" => "degraded",
+        _ => "down",
+    }
+}
+
+async fn store_result(
+    state: &AppState,
+    probe: &zhiwei_storage::probes_repo::Probe,
+    node_id: &zhiwei_common::NodeId,
+    hostname: &str,
+    item: &ProbeResultItem,
+    ts: i64,
+    result_state: &'static str,
+) -> bool {
+    match state
+        .storage
+        .probes()
+        .record_result(
+            probe,
+            node_id.as_str(),
+            ts,
+            result_state,
+            item.latency_ms,
+            item.status_code,
+            &item.error,
+        )
+        .await
+    {
+        Ok(transition) => {
+            crate::alerts::on_probe_transition(state, probe, &transition, node_id.as_str(), hostname)
+                .await;
+            true
+        }
+        Err(e) => {
+            warn!(error = %e, probe = %probe.name, "Failed to write probe results");
+            false
+        }
+    }
 }
 
 // ---------- Console side ----------
@@ -208,7 +241,8 @@ fn ratio_series(rows: Vec<(String, i64, i64, i64)>) -> HashMap<String, Vec<serde
         if total <= 0 {
             continue;
         }
-        let ratio = ok as f64 * 100.0 / total as f64;
+        let ratio = f64::from(i32::try_from(ok).unwrap_or(0)) * 100.0_f64
+            / f64::from(i32::try_from(total).unwrap_or(1));
         series.entry(key).or_default().push(serde_json::json!({
             "t": bucket / 1_000_000,
             "v": ratio,
@@ -260,52 +294,60 @@ pub async fn services_timeline_handler(
     let by_probe = q.get("level").map(String::as_str) == Some("probe");
 
     if by_probe {
-        let rows = match state
-            .storage
-            .probes()
-            .health_buckets_by_probe(from_ms * 1_000_000, to_ms * 1_000_000, bucket_ns)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("query probe results: {e}"),
-                )
-            }
-        };
-        let probes = state
-            .storage
-            .probes()
-            .list_probes()
-            .await
-            .unwrap_or_default();
-
-        let mut series = ratio_series(rows);
-
-        let out: Vec<serde_json::Value> = probes
-            .iter()
-            .filter_map(|p| {
-                let points = series.remove(&p.id)?;
-                Some(serde_json::json!({
-                    "id": p.id,
-                    "name": format!("{} / {}", p.service_name, p.name),
-                    "group": p.service_name,
-                    "points": points,
-                }))
-            })
-            .collect();
-
-        return Json(serde_json::json!({
-            "from_ms": from_ms,
-            "to_ms": to_ms,
-            "bucket_ms": bucket_ns / 1_000_000,
-            "level": "probe",
-            "series": out,
-        }))
-        .into_response();
+        return probe_timeline(&state, from_ms, to_ms, bucket_ns).await;
     }
+    service_timeline(&state, from_ms, to_ms, bucket_ns).await
+}
 
+/// `level=probe`: one line per probe, using the service name as group prefix.
+async fn probe_timeline(state: &AppState, from_ms: i64, to_ms: i64, bucket_ns: i64) -> Response {
+    let rows = match state
+        .storage
+        .probes()
+        .health_buckets_by_probe(from_ms * 1_000_000, to_ms * 1_000_000, bucket_ns)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("query probe results: {e}"),
+            )
+        }
+    };
+    let probes = state
+        .storage
+        .probes()
+        .list_probes()
+        .await
+        .unwrap_or_default();
+
+    let mut series = ratio_series(rows);
+    let out: Vec<serde_json::Value> = probes
+        .iter()
+        .filter_map(|p| {
+            let points = series.remove(&p.id)?;
+            Some(serde_json::json!({
+                "id": p.id,
+                "name": format!("{} / {}", p.service_name, p.name),
+                "group": p.service_name,
+                "points": points,
+            }))
+        })
+        .collect();
+
+    Json(serde_json::json!({
+        "from_ms": from_ms,
+        "to_ms": to_ms,
+        "bucket_ms": bucket_ns / 1_000_000,
+        "level": "probe",
+        "series": out,
+    }))
+    .into_response()
+}
+
+/// `level=service` (default): one line per service.
+async fn service_timeline(state: &AppState, from_ms: i64, to_ms: i64, bucket_ns: i64) -> Response {
     let rows = match state
         .storage
         .probes()
@@ -329,7 +371,6 @@ pub async fn services_timeline_handler(
 
     // service_id -> point set (in bucket order)
     let mut series = ratio_series(rows);
-
     let out: Vec<serde_json::Value> = services
         .iter()
         .filter_map(|s| {
@@ -374,12 +415,6 @@ pub async fn create_service_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !read_auth_ok(&state, &headers).await {
-        return err(
-            StatusCode::UNAUTHORIZED,
-            "authentication required (Bearer admin token)",
-        );
-    }
     #[derive(serde::Deserialize)]
     struct Body {
         name: String,
@@ -390,8 +425,14 @@ pub async fn create_service_handler(
         #[serde(default = "default_tier")]
         tier: i64,
     }
-    fn default_tier() -> i64 {
+    const fn default_tier() -> i64 {
         2
+    }
+    if !read_auth_ok(&state, &headers).await {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "authentication required (Bearer admin token)",
+        );
     }
 
     let b: Body = match serde_json::from_slice(&body) {
@@ -429,12 +470,6 @@ pub async fn patch_service_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !read_auth_ok(&state, &headers).await {
-        return err(
-            StatusCode::UNAUTHORIZED,
-            "authentication required (Bearer admin token)",
-        );
-    }
     #[derive(serde::Deserialize)]
     struct Body {
         #[serde(default)]
@@ -447,6 +482,12 @@ pub async fn patch_service_handler(
         tier: Option<i64>,
         #[serde(default)]
         enabled: Option<bool>,
+    }
+    if !read_auth_ok(&state, &headers).await {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "authentication required (Bearer admin token)",
+        );
     }
     let b: Body = match serde_json::from_slice(&body) {
         Ok(b) => b,
@@ -598,7 +639,7 @@ fn normalize_probe_parts(
             if host.trim().is_empty() {
                 return Err(format!("{kind} probe: target.host cannot be empty"));
             }
-            let port = target.get("port").and_then(|v| v.as_i64()).unwrap_or(0);
+            let port = target.get("port").and_then(serde_json::Value::as_i64).unwrap_or(0);
             if !(1..=65535).contains(&port) {
                 return Err(format!("{kind} probe: target.port must be between 1-65535"));
             }
@@ -614,12 +655,6 @@ pub async fn create_probe_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !read_auth_ok(&state, &headers).await {
-        return err(
-            StatusCode::UNAUTHORIZED,
-            "authentication required (Bearer admin token)",
-        );
-    }
     #[derive(serde::Deserialize)]
     struct Body {
         service_id: String,
@@ -641,17 +676,23 @@ pub async fn create_probe_handler(
         #[serde(default = "default_enabled")]
         enabled: bool,
     }
-    fn default_interval() -> i64 {
+    const fn default_interval() -> i64 {
         60
     }
-    fn default_timeout() -> i64 {
+    const fn default_timeout() -> i64 {
         5000
     }
-    fn default_threshold() -> i64 {
+    const fn default_threshold() -> i64 {
         3
     }
-    fn default_enabled() -> bool {
+    const fn default_enabled() -> bool {
         true
+    }
+    if !read_auth_ok(&state, &headers).await {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "authentication required (Bearer admin token)",
+        );
     }
 
     let b: Body = match serde_json::from_slice(&body) {
@@ -711,12 +752,6 @@ pub async fn test_probe_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !read_auth_ok(&state, &headers).await {
-        return err(
-            StatusCode::UNAUTHORIZED,
-            "authentication required (Bearer admin token)",
-        );
-    }
     #[derive(serde::Deserialize)]
     struct Body {
         kind: String,
@@ -727,8 +762,14 @@ pub async fn test_probe_handler(
         #[serde(default = "default_timeout")]
         timeout_ms: i64,
     }
-    fn default_timeout() -> i64 {
+    const fn default_timeout() -> i64 {
         5000
+    }
+    if !read_auth_ok(&state, &headers).await {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "authentication required (Bearer admin token)",
+        );
     }
 
     let b: Body = match serde_json::from_slice(&body) {
@@ -761,12 +802,6 @@ pub async fn patch_probe_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !read_auth_ok(&state, &headers).await {
-        return err(
-            StatusCode::UNAUTHORIZED,
-            "authentication required (Bearer admin token)",
-        );
-    }
     #[derive(serde::Deserialize)]
     struct Body {
         #[serde(default)]
@@ -788,6 +823,12 @@ pub async fn patch_probe_handler(
         node_ids: Option<Vec<String>>,
         #[serde(default)]
         enabled: Option<bool>,
+    }
+    if !read_auth_ok(&state, &headers).await {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "authentication required (Bearer admin token)",
+        );
     }
     let b: Body = match serde_json::from_slice(&body) {
         Ok(b) => b,

@@ -14,6 +14,7 @@ use time::{Duration, OffsetDateTime};
 
 use crate::ca::Ca;
 
+#[allow(clippy::struct_field_names)] // `_pem` suffix is the point: these are PEM-encoded strings
 pub struct IssuedCert {
     pub cert_pem: String,
     pub key_pem: String,
@@ -77,7 +78,7 @@ pub fn ensure_server_cert(ca: &Ca, data_dir: &Path, cn: &str) -> anyhow::Result<
     })
 }
 
-/// Build a rustls ServerConfig.
+/// Build a rustls `ServerConfig`.
 ///
 /// Does not require client certificates: node identity is carried by Ed25519
 /// request signatures (`routes::verify_node`), so this still works when

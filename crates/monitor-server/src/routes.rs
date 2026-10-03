@@ -1,7 +1,7 @@
 //! HTTP routes for the monitor server.
 //!
 //! Two endpoint families:
-//!   POST /v1/enroll       — bootstrap token + node Ed25519 public key → node_id
+//!   POST /v1/enroll       — bootstrap token + node Ed25519 public key → `node_id`
 //!   POST /v1/telemetry    — node Ed25519 request signature, protobuf payload
 //!
 //! Bootstrap tokens are short-lived (default 10 minutes) and stored in memory.
@@ -31,6 +31,25 @@ use crate::state::AppState;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .merge(monitor_routes())
+        .merge(certs_routes())
+        .merge(alerts_routes())
+        .merge(probes_routes())
+        .merge(admin_routes())
+        .merge(commands_routes())
+        // Node enrollment script. **Intentionally unauthenticated**: the target machine has no
+// credentials yet; the real secret is the ZHIWEI_BOOTSTRAP_TOKEN passed in the enroll command.
+        // The script itself contains no secrets; exposing it is equivalent to exposing the install
+        // method (same approach as Tailscale et al.).
+        .route("/install-node.sh", get(install_node_script_handler))
+        // Fallback: console static assets + SPA deep links (returns 404 when console isn't built)
+        .fallback(ui_handler)
+        .with_state(state)
+}
+
+/// Core node/telemetry endpoints: health, enroll, telemetry, inventory, node views.
+fn monitor_routes() -> Router<AppState> {
+    Router::new()
         .route("/v1", get(index_handler))
         .route("/v1/enroll", post(enroll_handler))
         .route("/v1/telemetry", post(telemetry_handler))
@@ -46,6 +65,12 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/inventory", post(inventory_handler))
         .route("/v1/containers", get(all_containers_handler))
         .route("/v1/certificates", get(all_certificates_handler))
+        .route("/v1/series/nodes", get(all_nodes_series_handler))
+}
+
+/// Certificate-source configuration endpoints.
+fn certs_routes() -> Router<AppState> {
+    Router::new()
         .route(
             "/v1/cert-sources",
             get(crate::certs_api::list_cert_sources_handler)
@@ -64,13 +89,14 @@ pub fn router(state: AppState) -> Router {
             "/v1/cert-config",
             get(crate::certs_api::cert_config_handler),
         )
+}
+
+/// Alerting: alerts, rules, builtin toggles, notification channels, CA.
+fn alerts_routes() -> Router<AppState> {
+    Router::new()
         .route("/v1/alerts", get(alerts_handler))
         .route("/v1/alerts/:id/silence", post(silence_alert_handler))
         .route("/v1/alerts/:id/resolve", post(resolve_alert_handler))
-        .route(
-            "/v1/services/timeline",
-            get(crate::probes_api::services_timeline_handler),
-        )
         .route(
             "/v1/rules",
             get(list_rules_handler).post(create_rule_handler),
@@ -89,12 +115,20 @@ pub fn router(state: AppState) -> Router {
             get(list_channels_handler).post(create_channel_handler),
         )
         .route("/v1/channels/test", post(test_channel_handler))
-        .route("/v1/admin/token", post(change_admin_token_handler))
         .route(
             "/v1/channels/:id",
             axum::routing::patch(patch_channel_handler).delete(delete_channel_handler),
         )
         .route("/v1/ca", get(ca_handler))
+}
+
+/// Service / probe definitions, timelines and result ingestion.
+fn probes_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/v1/services/timeline",
+            get(crate::probes_api::services_timeline_handler),
+        )
         .route(
             "/v1/services",
             get(crate::probes_api::list_services_handler)
@@ -132,9 +166,15 @@ pub fn router(state: AppState) -> Router {
             "/v1/probe-results",
             post(crate::probes_api::probe_results_ingest_handler),
         )
+}
+
+/// Console dashboards, token management, MCP transport and health.
+fn admin_routes() -> Router<AppState> {
+    Router::new()
         .route("/v1/todo", get(crate::todo_api::todo_handler))
         .route("/v1/retention", get(crate::retention::retention_handler))
         .route("/v1/help", get(help_handler))
+        .route("/v1/admin/token", post(change_admin_token_handler))
         .route("/mcp/sse", axum::routing::post(crate::mcp::sse_handler))
         .route(
             "/v1/ai-tokens",
@@ -152,21 +192,17 @@ pub fn router(state: AppState) -> Router {
             "/v1/enroll-tokens/:id",
             axum::routing::delete(delete_enroll_token_handler),
         )
-        .route("/v1/series/nodes", get(all_nodes_series_handler))
+        .route("/healthz", get(healthz))
+}
+
+/// Command channel: execute, poll results, history.
+fn commands_routes() -> Router<AppState> {
+    Router::new()
         .route("/v1/commands", get(node_commands_handler))
         .route("/v1/commands/:id/result", post(command_result_handler))
         .route("/v1/exec", post(exec_handler))
         .route("/v1/commands/history", get(command_history_handler))
         .route("/v1/commands/:id", get(command_detail_handler))
-        .route("/healthz", get(healthz))
-        // Node enrollment script. **Intentionally unauthenticated**: the target machine has no
-// credentials yet; the real secret is the ZHIWEI_BOOTSTRAP_TOKEN passed in the enroll command.
-        // The script itself contains no secrets; exposing it is equivalent to exposing the install
-        // method (same approach as Tailscale et al.).
-        .route("/install-node.sh", get(install_node_script_handler))
-        // Fallback: console static assets + SPA deep links (returns 404 when console isn't built)
-        .fallback(ui_handler)
-        .with_state(state)
 }
 
 /// Validate the node request signature (replacing the old mTLS client certificates).
@@ -178,7 +214,7 @@ pub fn router(state: AppState) -> Router {
 /// Returns `(node id, node public key)` — callers that need to verify a further layer of
 /// payload signatures (e.g. command receipts) can use this public key directly without
 /// hitting the database again.
-pub(crate) async fn verify_node(
+pub async fn verify_node(
     state: &AppState,
     headers: &HeaderMap,
     method: &str,
@@ -189,7 +225,7 @@ pub(crate) async fn verify_node(
         headers
             .get(name)
             .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
     };
 
     let unauthorized = || (StatusCode::UNAUTHORIZED, "Node signature verification failed".to_string());
@@ -262,10 +298,10 @@ pub(crate) async fn verify_node(
 /// itself). When write-class "manage" endpoints are added later, handlers can just add
 /// `matches!(kind, Admin | AiToken)` to open them up to AI tokens.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ReadAuthKind {
+pub enum ReadAuthKind {
     /// Console / browser / anyone with the admin token.
     Admin,
-    /// AI token, with the token id (used to audit last_used_at).
+    /// AI token, with the token id (used to audit `last_used_at`).
     AiToken(String),
     /// No valid credentials.
     None,
@@ -273,9 +309,9 @@ pub(crate) enum ReadAuthKind {
 
 /// Parse the Authorization header and return the credential type.
 ///
-/// Order: admin token (in-memory ct_eq compare, fastest) → AI token (SHA-256 then
-/// query SQLite). An AI token that doesn't match or has been revoked returns None.
-pub(crate) async fn read_auth_ok_v2(state: &AppState, headers: &HeaderMap) -> ReadAuthKind {
+/// Order: admin token (in-memory `ct_eq` compare, fastest) → AI token (SHA-256 then
+/// query `SQLite`). An AI token that doesn't match or has been revoked returns None.
+pub async fn read_auth_ok_v2(state: &AppState, headers: &HeaderMap) -> ReadAuthKind {
     let Some(value) = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
@@ -290,7 +326,7 @@ pub(crate) async fn read_auth_ok_v2(state: &AppState, headers: &HeaderMap) -> Re
     // Take the String out and drop the guard; otherwise RwLockReadGuard is not Send,
     // and the entire handler future stops being Send, which axum rejects.
     let admin_ok = {
-        let current = state.admin_token.read().unwrap_or_else(|e| e.into_inner());
+        let current = state.admin_token.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::admin::ct_eq(token.as_bytes(), current.as_bytes())
     };
     if admin_ok {
@@ -318,14 +354,18 @@ pub(crate) async fn read_auth_ok_v2(state: &AppState, headers: &HeaderMap) -> Re
 ///
 /// Equivalent to `matches!(v2(...), Admin | AiToken(_))`, but without unwrapping or
 /// dispatching — callers are already using bool, no need to add mental overhead for new code.
-pub(crate) async fn read_auth_ok(state: &AppState, headers: &HeaderMap) -> bool {
+pub async fn read_auth_ok(state: &AppState, headers: &HeaderMap) -> bool {
     !matches!(read_auth_ok_v2(state, headers).await, ReadAuthKind::None)
 }
 
 /// SHA-256 → lowercase hex (using ring, which is already in dependencies). AI token hashing only.
 fn sha256_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
     let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
-    digest.as_ref().iter().map(|b| format!("{b:02x}")).collect()
+    digest.as_ref().iter().fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
 /// Metadata for an enrollment token. `id` is for UI display + revocation; the `token`
@@ -336,7 +376,7 @@ pub struct BootstrapTokenMeta {
     pub label: String,
     pub created_at_unix: u64,
     pub expires_at_unix: u64,
-    /// Long-lived (from ZHIWEI_BOOTSTRAP_TOKEN); UI can flag it specially.
+    /// Long-lived (from `ZHIWEI_BOOTSTRAP_TOKEN`); UI can flag it specially.
     pub permanent: bool,
 }
 
@@ -352,15 +392,16 @@ pub struct BootstrapTokens {
 const NEVER_EXPIRES: u64 = u64::MAX;
 
 impl BootstrapTokens {
-    pub async fn is_empty(&self) -> bool {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
         self.inner.lock().is_empty()
     }
-    pub async fn add(&self, token: String, ttl_secs: u64) {
-        self.add_with_label(token, ttl_secs, String::new()).await;
+    pub fn add(&self, token: String, ttl_secs: u64) {
+        self.add_with_label(token, ttl_secs, String::new());
     }
     /// Add a labeled temporary token. An empty `label` is also valid.
-/// `id` is auto-generated (`boot-<6 hex>`), used only for UI display and revocation.
-    pub async fn add_with_label(&self, token: String, ttl_secs: u64, label: String) {
+    /// `id` is auto-generated (`boot-<6 hex>`), used only for UI display and revocation.
+    pub fn add_with_label(&self, token: String, ttl_secs: u64, label: String) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -428,18 +469,18 @@ impl BootstrapTokens {
     }
     /// Revoke by id (find the first matching token string and remove it).
     /// Returns whether anything was actually revoked.
+    // The lock guard must stay alive until `remove`, so it can't be scoped tighter.
+    #[allow(clippy::significant_drop_tightening)]
     pub fn revoke_by_id(&self, id: &str) -> bool {
         let mut guard = self.inner.lock();
         let target = guard
             .iter()
             .find(|(_, m)| m.id == id)
             .map(|(t, _)| t.clone());
-        if let Some(token) = target {
+        target.is_some_and(|token| {
             guard.remove(&token);
             true
-        } else {
-            false
-        }
+        })
     }
 }
 
@@ -450,9 +491,10 @@ fn rand_bytes_3() -> [u8; 3] {
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
-        s.push_str(&format!("{b:02x}"));
+        let _ = write!(s, "{b:02x}");
     }
     s
 }
@@ -462,7 +504,7 @@ struct ErrorBody {
     error: String,
 }
 
-pub(crate) fn err(status: StatusCode, msg: impl Into<String>) -> Response {
+pub fn err(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, Json(ErrorBody { error: msg.into() })).into_response()
 }
 
@@ -472,7 +514,7 @@ pub(crate) fn err(status: StatusCode, msg: impl Into<String>) -> Response {
 /// when using `ServeDir::not_found_service` the page rendered but the status was 404,
 /// causing online probes, crawlers, and proxy caches to misinterpret it as "page does
 /// not exist". Here we read the file ourselves and set the correct MIME type.
-pub(crate) async fn ui_handler(State(state): State<AppState>, uri: axum::http::Uri) -> Response {
+pub async fn ui_handler(State(state): State<AppState>, uri: axum::http::Uri) -> Response {
     use axum::http::header::CONTENT_TYPE;
 
     let Some(dir) = state.ui_dir.clone() else {
@@ -545,7 +587,7 @@ async fn healthz() -> Response {
 /// will treat it as its only trust root, resulting in **enroll succeeds, every subsequent request
 /// fails TLS validation** — a very time-consuming thing to debug.
 /// So we simply don't issue it here, letting the node use the system roots.
-pub(crate) fn enroll_ca_pem(ca_cert_pem: &str, tls_terminated_locally: bool) -> String {
+pub fn enroll_ca_pem(ca_cert_pem: &str, tls_terminated_locally: bool) -> String {
     if tls_terminated_locally {
         ca_cert_pem.to_string()
     } else {
@@ -560,7 +602,7 @@ pub(crate) fn enroll_ca_pem(ca_cert_pem: &str, tls_terminated_locally: bool) -> 
 /// (see `scripts/docker-entrypoint.sh`). An early-starting monitor shouldn't permanently
 /// withhold the public key from new nodes — those nodes would remain "without ops public
 /// key", and the command channel would silently fail.
-pub(crate) async fn ops_public_key(state: &AppState) -> String {
+pub async fn ops_public_key(state: &AppState) -> String {
     if !state.ops_public_key.is_empty() {
         return state.ops_public_key.clone();
     }
@@ -579,9 +621,8 @@ async fn enroll_handler(
     let auth = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok());
-    let token = match auth.and_then(|s| s.strip_prefix("Bearer ")) {
-        Some(t) => t,
-        None => return err(StatusCode::UNAUTHORIZED, "missing bearer token"),
+    let Some(token) = auth.and_then(|s| s.strip_prefix("Bearer ")) else {
+        return err(StatusCode::UNAUTHORIZED, "missing bearer token");
     };
     if !state.bootstrap_tokens.check(token) {
         return err(
@@ -701,7 +742,7 @@ async fn telemetry_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    let pq = uri.path_and_query().map_or("/", hyper::http::uri::PathAndQuery::as_str);
     let (node_id, _node_pub) = match verify_node(&state, &headers, method.as_str(), pq, &body).await
     {
         Ok(id) => id,
@@ -793,7 +834,7 @@ async fn index_handler(State(state): State<AppState>, headers: HeaderMap) -> Res
         .nodes()
         .list_all()
         .await
-        .map(|v| v.len() as i64)
+        .map(|v| i64::try_from(v.len()).unwrap_or(i64::MAX))
         .unwrap_or(-1);
     let batches = state.storage.telemetry().count_all().await.unwrap_or(-1);
     Json(IndexBody {
@@ -877,8 +918,26 @@ fn latest_view(ts_unix_nano: i64, batch: &TelemetryBatch) -> NodeLatestView {
         disk_usage_percent: get("host.disk.usage"),
         disk_used_bytes: get("host.disk.used_bytes"),
         disk_total_bytes: get("host.disk.total_bytes"),
-        net_rx_bytes: sum_if_present(batch.network.iter().map(|n| n.rx_bytes as f64)),
-        net_tx_bytes: sum_if_present(batch.network.iter().map(|n| n.tx_bytes as f64)),
+        net_rx_bytes: sum_u64_to_f64(batch.network.iter().map(|n| n.rx_bytes)),
+        net_tx_bytes: sum_u64_to_f64(batch.network.iter().map(|n| n.tx_bytes)),
+    }
+}
+
+/// Sum u64 counters into f64 for JSON serialization. f64 cannot represent integers
+/// above 2^53 exactly (≈9 PB); callers should treat values above that as approximate.
+#[allow(clippy::cast_precision_loss)] // intentional: display-only, precision above 2^53 irrelevant
+fn sum_u64_to_f64(it: impl Iterator<Item = u64>) -> Option<f64> {
+    let mut total: u64 = 0;
+    let mut any = false;
+    for v in it {
+        total = total.saturating_add(v);
+        any = true;
+    }
+    if any {
+        // Intentional cast: result is for display, byte precision above 2^53 is unnecessary.
+        Some(total as f64)
+    } else {
+        None
     }
 }
 
@@ -913,7 +972,7 @@ async fn list_nodes_handler(State(state): State<AppState>, headers: HeaderMap) -
     let mut out = Vec::with_capacity(nodes.len());
     for n in nodes {
         out.push(NodeView {
-            labels: serde_json::from_str(&n.labels_json).unwrap_or(serde_json::json!({})),
+            labels: serde_json::from_str(&n.labels_json).unwrap_or_else(|_| serde_json::json!({})),
             alias: n.alias.clone(),
             tags: parse_tags(&n.tags_json),
             latest: latest_by_node.remove(&n.id),
@@ -1087,9 +1146,9 @@ async fn patch_node_handler(
 /// leave dangling records if the node is deleted (no one will ever receive the receipt).
 /// Expired ones (TTL passed) don't count: the node would refuse them upon receipt,
 /// and using them to block deletion would make the node permanently undeletable
-/// (a re-installed node gets a new node_id and never comes back to poll).
+/// (a re-installed node gets a new `node_id` and never comes back to poll).
 ///
-/// `?force=1`: voids all unsent commands for this node (writes audit_log, outcome=cancelled),
+/// `?force=1`: voids all unsent commands for this node (writes `audit_log`, outcome=cancelled),
 /// then deletes. "Cancel first" needs a button somewhere — when the command channel is broken
 /// or the node is reinstalled, "wait for the node to pull" will simply never happen.
 ///
@@ -1121,7 +1180,7 @@ async fn delete_node_handler(
 
     let force = matches!(
         q.get("force").map(String::as_str),
-        Some("1") | Some("true") | Some("yes")
+        Some("1" | "true" | "yes")
     );
 
     let now_ns = zhiwei_common::Timestamp::now().unix_nano();
@@ -1149,49 +1208,66 @@ async fn delete_node_handler(
                 ),
             );
         }
-        // Cancel + record trail: command history goes with the node on delete, audit must be written separately
-        let cancelled = match state
-            .storage
-            .commands()
-            .cancel_pending_for_node(&trimmed)
-            .await
-        {
-            Ok(rows) => rows,
-            Err(e) => {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("cancel commands: {e}"),
-                )
-            }
-        };
-        for c in &cancelled {
-            if let Err(e) = state
-                .storage
-                .commands()
-                .audit_with_outcome(
-                    now_ns,
-                    "admin",
-                    &trimmed,
-                    &c.id,
-                    &c.action,
-                    &c.params_json,
-                    "cancelled",
-                )
-                .await
-            {
-                warn!(node_id = %trimmed, command_id = %c.id, error = %e, "failed to write audit log when voiding command");
-            }
+        if let Err(resp) = void_pending_commands(&state, &trimmed, now_ns).await {
+            return resp;
         }
-        warn!(
-            node_id = %trimmed,
-            cancelled = cancelled.len(),
-            "force-deleted node: unsent commands have been voided"
-        );
     }
 
-    match state.storage.nodes().delete(&trimmed).await {
+    delete_node_row(&state, &trimmed, exists).await
+}
+
+/// `?force=1` path: void every unsent command for the node and write one `audit_log`
+/// row per command (command history goes with the node on delete, so the trail must
+/// be recorded separately).
+async fn void_pending_commands(
+    state: &AppState,
+    node_id: &str,
+    now_ns: i64,
+) -> Result<(), Response> {
+    let cancelled = match state
+        .storage
+        .commands()
+        .cancel_pending_for_node(node_id)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            return Err(err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("cancel commands: {e}"),
+            ))
+        }
+    };
+    for c in &cancelled {
+        if let Err(e) = state
+            .storage
+            .commands()
+            .audit_with_outcome(
+                now_ns,
+                "admin",
+                node_id,
+                &c.id,
+                &c.action,
+                &c.params_json,
+                "cancelled",
+            )
+            .await
+        {
+            warn!(node_id = %node_id, command_id = %c.id, error = %e, "failed to write audit log when voiding command");
+        }
+    }
+    warn!(
+        node_id = %node_id,
+        cancelled = cancelled.len(),
+        "force-deleted node: unsent commands have been voided"
+    );
+    Ok(())
+}
+
+async fn delete_node_row(state: &AppState, node_id: &str, exists: bool) -> Response {
+    match state.storage.nodes().delete(node_id).await {
         Ok(true) => {
-            info!(node_id = %trimmed, "Node deleted");
+            info!(node_id = %node_id, "Node deleted");
             (StatusCode::NO_CONTENT).into_response()
         }
         Ok(false) => {
@@ -1377,10 +1453,10 @@ async fn node_series_handler(
     if from_ms >= to_ms {
         return err(StatusCode::BAD_REQUEST, "from must be earlier than to");
     }
-    let rate = matches!(q.get("rate").map(String::as_str), Some("1") | Some("true"));
+    let rate = matches!(q.get("rate").map(String::as_str), Some("1" | "true"));
 
     // Window start earlier than raw retention → hourly aggregation; otherwise raw data.
-/// Raw retention days: see retention::RAW_RETENTION_DAYS.
+// Raw retention days: see retention::RAW_RETENTION_DAYS.
     let raw_floor_ms = now_ms - crate::retention::RAW_RETENTION_DAYS * 24 * 60 * 60 * 1000;
     if from_ms < raw_floor_ms {
         return hourly_series(
@@ -1465,7 +1541,7 @@ async fn all_nodes_series_handler(
         .get("limit")
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(300);
-    let rate = matches!(q.get("rate").map(String::as_str), Some("1") | Some("true"));
+    let rate = matches!(q.get("rate").map(String::as_str), Some("1" | "true"));
     let now_ms = zhiwei_common::Timestamp::now().unix_nano() / 1_000_000;
     let to_ms = q
         .get("to")
@@ -1495,56 +1571,9 @@ async fn all_nodes_series_handler(
     let telemetry = state.storage.telemetry();
     let mut out: Vec<serde_json::Value> = Vec::with_capacity(nodes.len());
     for n in &nodes {
-        // Network metrics are counters; computing rates needs at least two samples.
-/// In the "downsample by window" raw path, the interval between adjacent points is
-// determined by sampling density, so when converting to bytes/s we subtract the previous
-// frame's cumulative value, then divide by dt.
-        let raw_points: Vec<(i64, f64)> = if hourly {
-            match telemetry
-                .hourly_range(
-                    &n.id,
-                    &metric,
-                    from_ms * 1_000_000,
-                    to_ms * 1_000_000,
-                    limit,
-                )
-                .await
-            {
-                Ok(rows) => rows
-                    .into_iter()
-                    .map(|(ts, avg, _min, _max, first, last, _samples)| {
-                        // Within an hour it's already an average; in rate mode fall back to "(last-first) spread over 1h"
-                        let v = if rate {
-                            ((last - first) / 3600.0).max(0.0)
-                        } else {
-                            avg
-                        };
-                        (ts / 1_000_000, v)
-                    })
-                    .collect(),
-                Err(e) => {
-                    warn!(error = %e, node = %n.hostname, "failed to fetch hourly aggregation");
-                    Vec::new()
-                }
-            }
-        } else {
-            match telemetry
-                .range(&n.id, from_ms * 1_000_000, to_ms * 1_000_000, limit)
-                .await
-            {
-                Ok(rows) => rows
-                    .into_iter()
-                    .filter_map(|(ts, _interval, payload)| {
-                        let batch = TelemetryBatch::decode(&payload[..]).ok()?;
-                        extract_metric(&batch, &metric).map(|v| (ts / 1_000_000, v))
-                    })
-                    .collect(),
-                Err(e) => {
-                    warn!(error = %e, node = %n.hostname, "failed to fetch telemetry");
-                    Vec::new()
-                }
-            }
-        };
+        let raw_points =
+            node_series_points(&telemetry, &n.id, &n.hostname, &metric, from_ms, to_ms, limit, rate, hourly)
+                .await;
         let points: Vec<SeriesPoint> = if rate {
             to_rate(&raw_points)
         } else {
@@ -1571,6 +1600,66 @@ async fn all_nodes_series_handler(
         "nodes": out,
     }))
     .into_response()
+}
+
+/// Fetch one node's `(ts_ms, value)` points for the cross-node series view, from either the
+/// hourly aggregate table (long windows) or raw telemetry.
+///
+/// Network metrics are counters; computing rates needs at least two samples. In the
+/// "downsample by window" raw path, the interval between adjacent points is determined by
+/// sampling density, so when converting to bytes/s we subtract the previous frame's cumulative
+/// value, then divide by dt.
+#[allow(clippy::too_many_arguments)] // the query window + flags are all needed; grouping would not aid readability
+async fn node_series_points(
+    telemetry: &zhiwei_storage::telemetry_repo::TelemetryRepo,
+    node_id: &str,
+    hostname: &str,
+    metric: &str,
+    from_ms: i64,
+    to_ms: i64,
+    limit: i64,
+    rate: bool,
+    hourly: bool,
+) -> Vec<(i64, f64)> {
+    if hourly {
+        return match telemetry
+            .hourly_range(node_id, metric, from_ms * 1_000_000, to_ms * 1_000_000, limit)
+            .await
+        {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|(ts, avg, _min, _max, first, last, _samples)| {
+                    // Within an hour it's already an average; in rate mode fall back to "(last-first) spread over 1h"
+                    let v = if rate {
+                        ((last - first) / 3600.0).max(0.0)
+                    } else {
+                        avg
+                    };
+                    (ts / 1_000_000, v)
+                })
+                .collect(),
+            Err(e) => {
+                warn!(error = %e, node = %hostname, "failed to fetch hourly aggregation");
+                Vec::new()
+            }
+        };
+    }
+    match telemetry
+        .range(node_id, from_ms * 1_000_000, to_ms * 1_000_000, limit)
+        .await
+    {
+        Ok(rows) => rows
+            .into_iter()
+            .filter_map(|(ts, _interval, payload)| {
+                let batch = TelemetryBatch::decode(&payload[..]).ok()?;
+                extract_metric(&batch, metric).map(|v| (ts / 1_000_000, v))
+            })
+            .collect(),
+        Err(e) => {
+            warn!(error = %e, node = %hostname, "failed to fetch telemetry");
+            Vec::new()
+        }
+    }
 }
 
 /// Long windows use the hourly aggregation table. One entry per bucket: non-rate uses
@@ -1632,13 +1721,13 @@ async fn hourly_series(
 ///   This used to be missing — the seeded rule "memory usage too high" uses this metric
 ///   name, but nodes never report it and evaluation only looks at `metrics[]`,
 ///   so **that rule would never fire**.
-pub(crate) fn extract_metric(batch: &TelemetryBatch, name: &str) -> Option<f64> {
+pub fn extract_metric(batch: &TelemetryBatch, name: &str) -> Option<f64> {
     if let Some(m) = batch.metrics.iter().find(|m| m.name == name) {
         return Some(m.value);
     }
     match name {
-        "host.net.rx_bytes" => sum_if_present(batch.network.iter().map(|n| n.rx_bytes as f64)),
-        "host.net.tx_bytes" => sum_if_present(batch.network.iter().map(|n| n.tx_bytes as f64)),
+        "host.net.rx_bytes" => sum_u64_to_f64(batch.network.iter().map(|n| n.rx_bytes)),
+        "host.net.tx_bytes" => sum_u64_to_f64(batch.network.iter().map(|n| n.tx_bytes)),
         "host.mem.usage" => {
             let get = |n: &str| batch.metrics.iter().find(|m| m.name == n).map(|m| m.value);
             match (get("host.mem.used_bytes"), get("host.mem.total_bytes")) {
@@ -1650,22 +1739,13 @@ pub(crate) fn extract_metric(batch: &TelemetryBatch, name: &str) -> Option<f64> 
     }
 }
 
-/// Empty set → None (the node didn't report NICs), with values → sum
-fn sum_if_present(it: impl Iterator<Item = f64>) -> Option<f64> {
-    let vals: Vec<f64> = it.collect();
-    if vals.is_empty() {
-        None
-    } else {
-        Some(vals.iter().sum())
-    }
-}
-
 /// Cumulative counter → per-second rate (bytes/s). Take the delta between adjacent
 /// points; negative increments are clamped to 0 (counter wrap or node restart).
 fn to_rate(raw: &[(i64, f64)]) -> Vec<SeriesPoint> {
     raw.windows(2)
         .map(|w| {
-            let dt_s = (w[1].0 - w[0].0) as f64 / 1000.0;
+            let elapsed_ms = w[1].0 - w[0].0;
+            let dt_s = f64::from(i32::try_from(elapsed_ms).unwrap_or(i32::MAX)) / 1000.0_f64;
             let delta = w[1].1 - w[0].1;
             let v = if dt_s > 0.0 {
                 (delta / dt_s).max(0.0)
@@ -1751,8 +1831,8 @@ fn host_info_view(info: &zhiwei_proto::telemetry::HostInfo) -> HostInfoView {
 /// `POST /v1/inventory`
 ///
 /// Low-frequency (default 5 minutes) "current state" report: host info is written back
-/// to nodes; containers and processes go into node_inventory (one latest snapshot per node).
-/// This kind of data doesn't go into telemetry_batches, avoiding repeated storage of static
+/// to nodes; containers and processes go into `node_inventory` (one latest snapshot per node).
+/// This kind of data doesn't go into `telemetry_batches`, avoiding repeated storage of static
 /// data every 30 seconds.
 async fn inventory_handler(
     State(state): State<AppState>,
@@ -1761,7 +1841,7 @@ async fn inventory_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    let pq = uri.path_and_query().map_or("/", hyper::http::uri::PathAndQuery::as_str);
     let (node_id, _node_pub) = match verify_node(&state, &headers, method.as_str(), pq, &body).await
     {
         Ok(id) => id,
@@ -1795,91 +1875,13 @@ async fn inventory_handler(
     // Certificate alerts need the hostname; save it first (host_info is Option, may be missing)
     let hostname = report
         .host_info
-        .as_ref()
-        .map(|i| i.hostname.clone())
-        .unwrap_or_else(|| node_id.as_str().to_string());
+        .as_ref().map_or_else(|| node_id.as_str().to_string(), |i| i.hostname.clone());
 
-    if let Some(info) = report.host_info.as_ref() {
-        match serde_json::to_string(&host_info_view(info)) {
-            Ok(json) => {
-                if let Err(e) = state
-                    .storage
-                    .nodes()
-                    .update_host_info(&node_id, &json)
-                    .await
-                {
-                    warn!(error = %e, "update_host_info failed");
-                }
-            }
-            Err(e) => warn!(error = %e, "serialize host_info failed"),
-        }
-        // Nodes can self-report a new name: what we got at enrollment may be just a placeholder
-        // like "bogon"; after switching to --node-name or LocalHostName no re-enrollment is needed
-        if let Err(e) = state
-            .storage
-            .nodes()
-            .update_hostname(&node_id, &info.hostname)
-            .await
-        {
-            warn!(error = %e, "update_hostname failed");
-        }
-    }
+    apply_host_info(&state, &node_id, &report).await;
 
-    let containers: Vec<ContainerView> = report
-        .containers
-        .iter()
-        .map(|c| ContainerView {
-            id: c.id.clone(),
-            name: c.name.clone(),
-            image: c.image.clone(),
-            state: c.state.clone(),
-            status: c.status.clone(),
-            runtime: c.runtime.clone(),
-            created_at_unix_nano: c.created_at_unix_nano,
-            started_at_unix_nano: c.started_at_unix_nano,
-            finished_at_unix_nano: c.finished_at_unix_nano,
-            compose_project: c.compose_project.clone(),
-            compose_service: c.compose_service.clone(),
-            mem_usage_bytes: c.mem_usage_bytes,
-            mem_limit_bytes: c.mem_limit_bytes,
-            cpu_percent: c.cpu_percent,
-            cpu_limit_nano: c.cpu_limit_nano,
-        })
-        .collect();
-
-    let processes: Vec<ProcessView> = report
-        .processes
-        .as_ref()
-        .map(|p| {
-            p.processes
-                .iter()
-                .map(|x| ProcessView {
-                    pid: x.pid,
-                    name: x.name.clone(),
-                    cmdline: x.cmdline.clone(),
-                    user: x.user.clone(),
-                    cpu_percent: x.cpu_percent,
-                    memory_bytes: x.memory_bytes,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let certificates: Vec<CertView> = report
-        .certificates
-        .iter()
-        .map(|c| CertView {
-            path: c.path.clone(),
-            subject: c.subject.clone(),
-            issuer: c.issuer.clone(),
-            not_after_unix_nano: c.not_after_unix_nano,
-            not_before_unix_nano: c.not_before_unix_nano,
-            domains: c.domains.clone(),
-            serial: c.serial.clone(),
-            parse_error: c.parse_error,
-            source_id: c.source_id.clone(),
-        })
-        .collect();
+    let containers = view_containers(&report);
+    let processes = view_processes(&report);
+    let certificates = view_certificates(&report);
 
     let containers_json = serde_json::to_string(&containers).unwrap_or_else(|_| "[]".into());
     let processes_json = serde_json::to_string(&processes).unwrap_or_else(|_| "[]".into());
@@ -1924,31 +1926,142 @@ async fn inventory_handler(
         "inventory stored"
     );
 
-    // Certificate expiry evaluation: same snapshot timing, so config changes / certificate
-    // renewals immediately reflect in alerts. Text uses display name (alias if set), same as metric alerts.
-    let display = state
-        .storage
-        .nodes()
-        .find_by_id(&node_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|n| node_display_name(&n.alias, &hostname))
-        .unwrap_or_else(|| hostname.clone());
-    crate::alerts::evaluate_cert_expiry(&state, node_id.as_str(), &display, &certificates_json)
-        .await;
-
-    // Container start/stop events: same snapshot timing (every 5 minutes); difference equals event.
-// Shares display name with certificate evaluation for consistent text.
-    crate::alerts::on_container_events(
+    evaluate_snapshot_alerts(
         &state,
         node_id.as_str(),
-        &display,
+        &hostname,
         previous_containers.as_deref(),
         &containers_json,
+        &certificates_json,
     )
     .await;
     (StatusCode::NO_CONTENT).into_response()
+}
+
+/// Write the node's self-reported host info back to `nodes` (serialized `host_info_json`
+/// plus the possibly-updated hostname).
+async fn apply_host_info(state: &AppState, node_id: &zhiwei_common::NodeId, report: &InventoryReport) {
+    let Some(info) = report.host_info.as_ref() else {
+        return;
+    };
+    persist_host_info(state, node_id, info).await;
+    // Nodes can self-report a new name: what we got at enrollment may be just a placeholder
+    // like "bogon"; after switching to --node-name or LocalHostName no re-enrollment is needed
+    if let Err(e) = state
+        .storage
+        .nodes()
+        .update_hostname(node_id, &info.hostname)
+        .await
+    {
+        warn!(error = %e, "update_hostname failed");
+    }
+}
+
+async fn persist_host_info(
+    state: &AppState,
+    node_id: &zhiwei_common::NodeId,
+    info: &zhiwei_proto::telemetry::HostInfo,
+) {
+    match serde_json::to_string(&host_info_view(info)) {
+        Ok(json) => {
+            if let Err(e) = state.storage.nodes().update_host_info(node_id, &json).await {
+                warn!(error = %e, "update_host_info failed");
+            }
+        }
+        Err(e) => warn!(error = %e, "serialize host_info failed"),
+    }
+}
+
+fn view_containers(report: &InventoryReport) -> Vec<ContainerView> {
+    report
+        .containers
+        .iter()
+        .map(|c| ContainerView {
+            id: c.id.clone(),
+            name: c.name.clone(),
+            image: c.image.clone(),
+            state: c.state.clone(),
+            status: c.status.clone(),
+            runtime: c.runtime.clone(),
+            created_at_unix_nano: c.created_at_unix_nano,
+            started_at_unix_nano: c.started_at_unix_nano,
+            finished_at_unix_nano: c.finished_at_unix_nano,
+            compose_project: c.compose_project.clone(),
+            compose_service: c.compose_service.clone(),
+            mem_usage_bytes: c.mem_usage_bytes,
+            mem_limit_bytes: c.mem_limit_bytes,
+            cpu_percent: c.cpu_percent,
+            cpu_limit_nano: c.cpu_limit_nano,
+        })
+        .collect()
+}
+
+fn view_processes(report: &InventoryReport) -> Vec<ProcessView> {
+    report
+        .processes
+        .as_ref()
+        .map(|p| {
+            p.processes
+                .iter()
+                .map(|x| ProcessView {
+                    pid: x.pid,
+                    name: x.name.clone(),
+                    cmdline: x.cmdline.clone(),
+                    user: x.user.clone(),
+                    cpu_percent: x.cpu_percent,
+                    memory_bytes: x.memory_bytes,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn view_certificates(report: &InventoryReport) -> Vec<CertView> {
+    report
+        .certificates
+        .iter()
+        .map(|c| CertView {
+            path: c.path.clone(),
+            subject: c.subject.clone(),
+            issuer: c.issuer.clone(),
+            not_after_unix_nano: c.not_after_unix_nano,
+            not_before_unix_nano: c.not_before_unix_nano,
+            domains: c.domains.clone(),
+            serial: c.serial.clone(),
+            parse_error: c.parse_error,
+            source_id: c.source_id.clone(),
+        })
+        .collect()
+}
+
+/// Certificate expiry + container start/stop evaluation, sharing one display name for
+/// consistent text. Same snapshot timing, so config changes / renewals immediately reflect.
+async fn evaluate_snapshot_alerts(
+    state: &AppState,
+    node_id: &str,
+    hostname: &str,
+    previous_containers: Option<&str>,
+    containers_json: &str,
+    certificates_json: &str,
+) {
+    // Text uses display name (alias if set), same as metric alerts.
+    let display = state
+        .storage
+        .nodes()
+        .find_by_id(&zhiwei_common::NodeId::from_string(node_id.to_string()))
+        .await
+        .ok()
+        .flatten()
+        .map_or_else(|| hostname.to_string(), |n| node_display_name(&n.alias, hostname));
+    crate::alerts::evaluate_cert_expiry(state, node_id, &display, certificates_json).await;
+    crate::alerts::on_container_events(
+        state,
+        node_id,
+        &display,
+        previous_containers,
+        containers_json,
+    )
+    .await;
 }
 
 #[derive(Serialize, Clone)]
@@ -2223,15 +2336,15 @@ async fn silence_alert_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    #[derive(serde::Deserialize)]
+    struct Body {
+        minutes: i64,
+    }
     if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
         );
-    }
-    #[derive(serde::Deserialize)]
-    struct Body {
-        minutes: i64,
     }
     let minutes = if body.is_empty() {
         60
@@ -2289,12 +2402,6 @@ async fn create_rule_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !read_auth_ok(&state, &headers).await {
-        return err(
-            StatusCode::UNAUTHORIZED,
-            "authentication required (Bearer admin token)",
-        );
-    }
     #[derive(serde::Deserialize)]
     struct Body {
         name: String,
@@ -2308,6 +2415,12 @@ async fn create_rule_handler(
     }
     fn default_severity() -> String {
         "warning".into()
+    }
+    if !read_auth_ok(&state, &headers).await {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "authentication required (Bearer admin token)",
+        );
     }
 
     let b: Body = match serde_json::from_slice(&body) {
@@ -2349,12 +2462,6 @@ async fn patch_rule_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !read_auth_ok(&state, &headers).await {
-        return err(
-            StatusCode::UNAUTHORIZED,
-            "authentication required (Bearer admin token)",
-        );
-    }
     #[derive(serde::Deserialize)]
     struct Body {
         name: Option<String>,
@@ -2364,6 +2471,12 @@ async fn patch_rule_handler(
         duration_seconds: Option<i64>,
         severity: Option<String>,
         enabled: Option<bool>,
+    }
+    if !read_auth_ok(&state, &headers).await {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "authentication required (Bearer admin token)",
+        );
     }
     let b: Body = match serde_json::from_slice(&body) {
         Ok(b) => b,
@@ -2452,24 +2565,24 @@ async fn list_builtin_alerts_handler(
 
 /// `PATCH /v1/builtin-alerts/:id`: update settings of a built-in alert rule
 ///
-/// `id` is a stable string (e.g. 'node_offline' / 'node_online'). Unknown id returns 404.
+/// `id` is a stable string (e.g. '`node_offline`' / '`node_online`'). Unknown id returns 404.
 async fn patch_builtin_alert_handler(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !read_auth_ok(&state, &headers).await {
-        return err(
-            StatusCode::UNAUTHORIZED,
-            "authentication required (Bearer admin token)",
-        );
-    }
     #[derive(serde::Deserialize)]
     struct Body {
         enabled: Option<bool>,
         threshold: Option<f64>,
         duration_seconds: Option<i64>,
+    }
+    if !read_auth_ok(&state, &headers).await {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "authentication required (Bearer admin token)",
+        );
     }
     let b: Body = match serde_json::from_slice(&body) {
         Ok(b) => b,
@@ -2568,7 +2681,7 @@ async fn ca_handler(State(state): State<AppState>, headers: HeaderMap) -> Respon
     let info = tokio::task::spawn_blocking(move || parse_ca(&pem))
         .await
         .ok()
-        .and_then(|r| r.ok());
+        .and_then(std::result::Result::ok);
     let Some((subject, nb, na, serial, fp)) = info else {
         return err(StatusCode::INTERNAL_SERVER_ERROR, "failed to parse CA certificate");
     };
@@ -2578,7 +2691,7 @@ async fn ca_handler(State(state): State<AppState>, headers: HeaderMap) -> Respon
         .nodes()
         .list_all()
         .await
-        .map(|v| v.len() as i64)
+        .map(|v| i64::try_from(v.len()).unwrap_or(i64::MAX))
         .unwrap_or(0);
 
     Json(CaView {
@@ -2596,12 +2709,12 @@ async fn ca_handler(State(state): State<AppState>, headers: HeaderMap) -> Respon
 /// Parse the local CA certificate (PEM) to extract subject / validity period / serial / fingerprint
 #[allow(clippy::type_complexity)]
 fn parse_ca(pem: &str) -> anyhow::Result<(String, i64, i64, String, String)> {
+    use base64::Engine;
     use x509_parser::prelude::FromDer;
     let der = pem
         .lines()
         .filter(|l| !l.trim_start().starts_with("-----"))
         .collect::<String>();
-    use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD.decode(der.trim())?;
     let (_, cert) = x509_parser::certificate::X509Certificate::from_der(&bytes)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -2630,12 +2743,6 @@ async fn create_channel_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !read_auth_ok(&state, &headers).await {
-        return err(
-            StatusCode::UNAUTHORIZED,
-            "authentication required (Bearer admin token)",
-        );
-    }
     #[derive(serde::Deserialize)]
     struct Body {
         name: String,
@@ -2659,6 +2766,12 @@ async fn create_channel_handler(
     }
     fn default_sev() -> String {
         "warning".into()
+    }
+    if !read_auth_ok(&state, &headers).await {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "authentication required (Bearer admin token)",
+        );
     }
 
     let b: Body = match serde_json::from_slice(&body) {
@@ -2689,7 +2802,7 @@ async fn create_channel_handler(
         );
     }
     let now = zhiwei_common::Timestamp::now().unix_nano();
-    let new = zhiwei_storage::alerts_repo::NewChannel {
+    let channel = zhiwei_storage::alerts_repo::NewChannel {
         name: b.name.trim(),
         kind: b.kind.trim(),
         url: b.url.trim(),
@@ -2699,7 +2812,7 @@ async fn create_channel_handler(
         receive_id_type: &rid_type,
         min_severity: &b.min_severity,
     };
-    match state.storage.alerts().create_channel(&new, now).await {
+    match state.storage.alerts().create_channel(&channel, now).await {
         Ok(id) => (StatusCode::CREATED, Json(serde_json::json!({ "id": id }))).into_response(),
         Err(e) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2722,16 +2835,10 @@ fn default_receive_id_type(raw: &str) -> String {
 ///
 /// Use params rather than a channel id: in the "create channel" dialog, "Test" must be clickable before saving.
 async fn test_channel_handler(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !read_auth_ok(&_state, &headers).await {
-        return err(
-            StatusCode::UNAUTHORIZED,
-            "authentication required (Bearer admin token)",
-        );
-    }
     #[derive(serde::Deserialize)]
     struct Body {
         kind: String,
@@ -2745,6 +2852,12 @@ async fn test_channel_handler(
         receive_id: String,
         #[serde(default)]
         receive_id_type: String,
+    }
+    if !read_auth_ok(&state, &headers).await {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "authentication required (Bearer admin token)",
+        );
     }
     let b: Body = match serde_json::from_slice(&body) {
         Ok(b) => b,
@@ -2811,7 +2924,7 @@ async fn change_admin_token_handler(
     };
 
     {
-        let current = state.admin_token.read().unwrap_or_else(|e| e.into_inner());
+        let current = state.admin_token.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         if !crate::admin::ct_eq(b.current.trim().as_bytes(), current.as_bytes()) {
             return err(StatusCode::UNAUTHORIZED, "current credential is incorrect");
         }
@@ -2828,7 +2941,7 @@ async fn change_admin_token_handler(
     }
     // Write to disk before changing memory: reversing the order would let a disk-write failure leave memory and file inconsistent
     {
-        let mut current = state.admin_token.write().unwrap_or_else(|e| e.into_inner());
+        let mut current = state.admin_token.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         *current = b.new.trim().to_string();
     }
     // The headers parameter is here only to match the shape of other handlers; we don't pre-check auth here —
@@ -2894,7 +3007,7 @@ fn merge_channel_patch(
         if !matches!(v.as_str(), "warning" | "critical") {
             return Err("min_severity must be warning or critical".into());
         }
-        ch.min_severity = v.clone();
+        ch.min_severity.clone_from(v);
     }
     if let Some(v) = b.enabled {
         ch.enabled = v;
@@ -3042,7 +3155,7 @@ async fn collect_pending(
         }
         tokio::select! {
             _ = rx.changed() => {}
-            _ = tokio::time::sleep(remaining.min(COMMAND_RECHECK)) => {}
+            () = tokio::time::sleep(remaining.min(COMMAND_RECHECK)) => {}
         }
     }
 }
@@ -3059,7 +3172,7 @@ async fn node_commands_handler(
     headers: HeaderMap,
     axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
 ) -> Response {
-    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    let pq = uri.path_and_query().map_or("/", hyper::http::uri::PathAndQuery::as_str);
     let (node_id, _node_pub) = match verify_node(&state, &headers, method.as_str(), pq, &[]).await {
         Ok(v) => v,
         Err((code, msg)) => return err(code, msg),
@@ -3119,7 +3232,7 @@ async fn command_result_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    let pq = uri.path_and_query().map_or("/", hyper::http::uri::PathAndQuery::as_str);
     let (node_id, node_pub) = match verify_node(&state, &headers, method.as_str(), pq, &body).await
     {
         Ok(v) => v,
@@ -3395,7 +3508,7 @@ async fn command_detail_handler(
 /// Two failure modes when forwarding the signing request: ops explicitly rejects (4xx,
 /// showable to user) and link problems (can't connect / timeout / 5xx, classified as
 /// "service unavailable").
-pub(crate) enum OpsSignError {
+pub enum OpsSignError {
     Rejected { status: u16, message: String },
     Unavailable(String),
 }
@@ -3404,8 +3517,8 @@ impl OpsSignError {
     /// Short description for logs only (user-facing text handled by the two branches above)
     pub(crate) fn message(&self) -> String {
         match self {
-            OpsSignError::Rejected { message, .. } => message.clone(),
-            OpsSignError::Unavailable(detail) => detail.clone(),
+            Self::Rejected { message, .. } => message.clone(),
+            Self::Unavailable(detail) => detail.clone(),
         }
     }
 }
@@ -3414,7 +3527,7 @@ impl OpsSignError {
 ///
 /// The mandatory entry for all write actions — bypassing it forces nodes to wait for the
 /// next fallback DB query before getting the command.
-pub(crate) async fn sign_command(
+pub async fn sign_command(
     state: &AppState,
     payload: &serde_json::Value,
 ) -> Result<String, OpsSignError> {
@@ -3423,17 +3536,17 @@ pub(crate) async fn sign_command(
     Ok(id)
 }
 
-pub(crate) async fn ops_sign(
+pub async fn ops_sign(
     endpoint: &str,
     payload: &serde_json::Value,
 ) -> Result<String, OpsSignError> {
+    use http_body_util::BodyExt;
     let authority = endpoint.strip_prefix("http://").ok_or_else(|| {
         OpsSignError::Unavailable("ops endpoint only supports http:// (loopback)".into())
     })?;
-    let (host_port, path) = match authority.find('/') {
-        Some(i) => (&authority[..i], &authority[i..]),
-        None => (authority, "/exec"),
-    };
+    let (host_port, path) = authority
+        .find('/')
+        .map_or((authority, "/exec"), |i| (&authority[..i], &authority[i..]));
     let (host, port) = match host_port.split_once(':') {
         Some((h, p)) => (h, p.parse::<u16>().unwrap_or(8444)),
         None => (host_port, 8444),
@@ -3469,13 +3582,12 @@ pub(crate) async fn ops_sign(
         .body(http_body_util::Full::new(bytes::Bytes::from(body)))
         .map_err(|e| OpsSignError::Unavailable(format!("failed to build request: {e}")))?;
 
-    let res = tokio::time::timeout(std::time::Duration::from_secs(3), sender.send_request(req))
+    let resp = tokio::time::timeout(std::time::Duration::from_secs(3), sender.send_request(req))
         .await
         .map_err(|_| OpsSignError::Unavailable("request timed out".into()))?
         .map_err(|e| OpsSignError::Unavailable(format!("request failed: {e}")))?;
-    let status = res.status();
-    use http_body_util::BodyExt;
-    let bytes = res
+    let status = resp.status();
+    let bytes = resp
         .into_body()
         .collect()
         .await
@@ -3500,12 +3612,17 @@ pub(crate) async fn ops_sign(
         .map_err(|e| OpsSignError::Unavailable(format!("response is not JSON: {e}")))?;
     v.get("command_id")
         .and_then(|x| x.as_str())
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .ok_or_else(|| OpsSignError::Unavailable("ops response missing command_id".into()))
 }
 
 #[cfg(test)]
 mod series_tests {
+    // Test asserts exact rate deltas (e.g. `(300 - 100) / (1 - 0) == 200.0`).
+    // Floating-point equality is intentional — inputs are integer-valued by
+    // construction, so the rate is exactly representable.
+    #![allow(clippy::float_cmp)]
+
     use super::*;
     use zhiwei_proto::telemetry::{Metric, NetworkInterface};
 
@@ -3519,7 +3636,7 @@ mod series_tests {
                 .map(|(name, value)| Metric {
                     name: name.into(),
                     value,
-                    labels: Default::default(),
+                    labels: std::collections::HashMap::default(),
                 })
                 .collect(),
             network: net
@@ -3640,7 +3757,7 @@ mod enroll_ca_tests {
     #[test]
     fn edge_terminated_tls_hands_nothing_so_the_node_uses_system_roots() {
         // Render / Railway: edge uses proper certificates, local CA is irrelevant.
-/// Issuing it would become "enroll succeeds, every subsequent request fails TLS validation".
+// Issuing it would become "enroll succeeds, every subsequent request fails TLS validation".
         assert_eq!(enroll_ca_pem(LOCAL_CA, false), "");
     }
 }
@@ -3667,16 +3784,16 @@ mod bootstrap_token_tests {
     async fn static_token_keeps_the_ephemeral_one_from_being_minted() {
         // With a fixed token set, no ephemeral one-shot token should be generated/printed at startup.
         let tokens = BootstrapTokens::default();
-        assert!(tokens.is_empty().await);
+        assert!(tokens.is_empty());
         tokens.add_static("zhi-bt-fixed-token-0123456789".into());
-        assert!(!tokens.is_empty().await);
+        assert!(!tokens.is_empty());
     }
 
     #[tokio::test]
     async fn one_shot_token_still_expires() {
         // Regression: the 10-minute TTL on one-shot tokens must not be lost by the changes above.
         let tokens = BootstrapTokens::default();
-        tokens.add("zhi-bt-short-lived".into(), 0).await; // expire immediately
+        tokens.add("zhi-bt-short-lived".into(), 0); // expire immediately
         assert!(!tokens.check("zhi-bt-short-lived"));
     }
 }
@@ -3825,15 +3942,16 @@ async fn create_ai_token_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    #[derive(Deserialize)]
+    struct Body {
+        name: String,
+    }
+    use base64::Engine;
     if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
             "authentication required (Bearer admin token)",
         );
-    }
-    #[derive(Deserialize)]
-    struct Body {
-        name: String,
     }
     let b: Body = match serde_json::from_slice(&body) {
         Ok(b) => b,
@@ -3848,12 +3966,10 @@ async fn create_ai_token_handler(
     }
 
     // Generate a 32-byte entropy plaintext token → base64url encoded.
-/// Prefix `ait_` distinguishes from the bootstrap token's `zhi-bt-`, easier to grep.
+// Prefix `ait_` distinguishes from the bootstrap token's `zhi-bt-`, easier to grep.
     let mut buf = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut buf);
-    use base64::Engine;
-    let token = format!(
-        "ait_{}",
+    let token = format!(        "ait_{}",
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
     );
     let id = format!("ait-{}", &hex_encode(&rand_bytes_3())[..6]);
@@ -3969,7 +4085,7 @@ fn is_connection_refused(e: &std::io::Error) -> bool {
 /// Used by alert text, notifications, todos — hostnames are often auto-generated
 /// names like `ip-10-0-0-5.ec2.internal` that don't tell the user which machine
 /// it is; aliases are user-chosen like "Beijing Edge".
-pub(crate) fn node_display_name(alias: &str, hostname: &str) -> String {
+pub fn node_display_name(alias: &str, hostname: &str) -> String {
     let alias = alias.trim();
     if alias.is_empty() {
         hostname.to_string()
@@ -4016,7 +4132,6 @@ fn enroll_url_scheme(headers: &HeaderMap, tls_terminated_locally: bool) -> &'sta
         if !first.is_empty() {
             return match first {
                 "http" => "http",
-                "https" => "https",
                 _ => "https",
             };
         }
@@ -4043,16 +4158,20 @@ fn host_is_local(host: &str) -> bool {
         _ => host,
     };
     let bare = bare.trim_start_matches('[').trim_end_matches(']');
-    if bare.eq_ignore_ascii_case("localhost") || bare.ends_with(".local") {
+    let is_mdns = bare
+        .rsplit_once('.')
+        .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("local"));
+    if bare.eq_ignore_ascii_case("localhost") || is_mdns {
         return true;
     }
-    match bare.parse::<std::net::IpAddr>() {
-        Ok(ip) => match ip {
-            std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
-            std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unique_local(),
-        },
-        Err(_) => false,
-    }
+    bare.parse::<std::net::IpAddr>().is_ok_and(|ip| match ip {
+        std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => {
+            // `is_unique_local` is stable since 1.84; project MSRV is 1.75, so inline the fc00::/7 check.
+            let octets = v6.octets();
+            v6.is_loopback() || (octets[0] & 0xfe) == 0xfc
+        }
+    })
 }
 
 /// `POST /v1/enroll-tokens` — create a temporary enrollment token and return the full enroll command.
@@ -4083,8 +4202,7 @@ async fn create_enroll_token_handler(
     let token = BootstrapTokens::mint();
     state
         .bootstrap_tokens
-        .add_with_label(token.clone(), ttl_secs, label.clone())
-        .await;
+        .add_with_label(token.clone(), ttl_secs, label.clone());
     let now_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -4092,17 +4210,18 @@ async fn create_enroll_token_handler(
     let expires_at_unix = now_unix + ttl_secs;
 
     // Infer the monitor's public URL from request headers:
-///   1) Prefer `X-Forwarded-Proto` + `Host` (managed platforms / nginx inject these)
-///   2) Fallback: see enroll_url_scheme
+// Infer the monitor's public URL from request headers:
+    //   1) Prefer `X-Forwarded-Proto` + `Host` (managed platforms / nginx inject these)
+    //   2) Fallback: see enroll_url_scheme
     let monitor_url = public_base_url(&headers, state.tls_terminated_locally);
 
     // When ZHIWEI_NODE_BASE_URL is set (domestic / isolated-network self-hosted distribution source),
 // the command automatically includes an extra line so the runner doesn't have to remember
 // to add it. If unset, leave as-is (go through GitHub Releases).
-    let base_url_line = match state.node_base_url.as_deref() {
-        Some(u) => format!("    ZHIWEI_BASE_URL={u} \\\n"),
-        None => String::new(),
-    };
+    let base_url_line = state
+        .node_base_url
+        .as_deref()
+        .map_or_else(String::new, |u| format!("    ZHIWEI_BASE_URL={u} \\\n"));
     let enroll_command = format!(
         "curl -sSL {monitor_url}/install-node.sh \\\n  | ZHIWEI_MONITOR_URL={monitor_url} \\\n    ZHIWEI_BOOTSTRAP_TOKEN={token} \\\n{base_url_line}    bash -s"
     );
@@ -4162,7 +4281,7 @@ async fn install_node_script_handler(State(state): State<AppState>) -> Response 
             axum::http::header::CONTENT_TYPE,
             "text/plain; charset=utf-8",
         )],
-        state.install_script.clone(),
+        state.install_script,
     )
         .into_response()
 }
@@ -4216,7 +4335,7 @@ mod node_meta_tests {
         let got = normalize_tags(&[
             " prod ".to_string(),
             "prod".to_string(),
-            "".to_string(),
+            String::new(),
             "bj".to_string(),
         ])
         .unwrap();
@@ -4238,8 +4357,7 @@ mod enroll_token_tests {
     async fn add_with_label_records_metadata() {
         let tokens = BootstrapTokens::default();
         tokens
-            .add_with_label("zhi-bt-labeled".into(), 3600, "prod-web".into())
-            .await;
+            .add_with_label("zhi-bt-labeled".into(), 3600, "prod-web".into());
         let metas = tokens.list_active();
         assert_eq!(metas.len(), 1);
         assert_eq!(metas[0].label, "prod-web");
@@ -4252,8 +4370,7 @@ mod enroll_token_tests {
     async fn expired_tokens_drop_out_of_list_active() {
         let tokens = BootstrapTokens::default();
         tokens
-            .add_with_label("zhi-bt-expired".into(), 0, String::new())
-            .await;
+            .add_with_label("zhi-bt-expired".into(), 0, String::new());
         // TTL=0 → expires_at == now, filter condition is `> now`, so immediately invisible
         assert!(tokens.list_active().is_empty());
         assert!(!tokens.check("zhi-bt-expired"));
@@ -4263,11 +4380,9 @@ mod enroll_token_tests {
     async fn revoke_by_id_removes_the_token() {
         let tokens = BootstrapTokens::default();
         tokens
-            .add_with_label("zhi-bt-a".into(), 3600, "a".into())
-            .await;
+            .add_with_label("zhi-bt-a".into(), 3600, "a".into());
         tokens
-            .add_with_label("zhi-bt-b".into(), 3600, "b".into())
-            .await;
+            .add_with_label("zhi-bt-b".into(), 3600, "b".into());
         let target_id = tokens
             .list_active()
             .into_iter()
@@ -4287,7 +4402,7 @@ mod enroll_token_tests {
     #[tokio::test]
     async fn revoke_unknown_id_is_a_noop() {
         let tokens = BootstrapTokens::default();
-        tokens.add("zhi-bt-x".into(), 3600).await;
+        tokens.add("zhi-bt-x".into(), 3600);
         assert!(!tokens.revoke_by_id("boot-does-not-exist"));
         assert!(tokens.check("zhi-bt-x"));
     }

@@ -67,7 +67,7 @@ pub fn scan_path(path: &str) -> (Vec<String>, Vec<ScanEntry>) {
 /// Same path deduplicated by "first wins" in `scan_entries`, so no deduplication here.
 /// Empty user input treated as "only scan default locations" -- not "scan nothing".
 pub fn merge_globs(user_csv: &str) -> Vec<String> {
-    let mut out: Vec<String> = DEFAULT_GLOBS.iter().map(|s| s.to_string()).collect();
+    let mut out: Vec<String> = DEFAULT_GLOBS.iter().map(|s| (*s).to_string()).collect();
     if !user_csv.trim().is_empty() {
         out.extend(
             user_csv
@@ -79,7 +79,7 @@ pub fn merge_globs(user_csv: &str) -> Vec<String> {
     out
 }
 
-/// Scan by (pattern, source_id), deduplicate by path; same path first match wins (source prioritized).
+/// Scan by (pattern, `source_id`), deduplicate by path; same path first match wins (source prioritized).
 fn scan_entries(patterns: &[(String, String)]) -> BTreeMap<String, ScanEntry> {
     let mut by_path: BTreeMap<String, ScanEntry> = BTreeMap::new();
 
@@ -96,44 +96,49 @@ fn scan_entries(patterns: &[(String, String)]) -> BTreeMap<String, ScanEntry> {
             if by_path.contains_key(&path) {
                 continue;
             }
-            match read_cert(&path) {
-                Ok(Some(mut info)) => {
-                    info.source_id = source_id.clone();
-                    by_path.insert(
-                        path,
-                        ScanEntry {
-                            info,
-                            error: String::new(),
-                        },
-                    );
-                }
-                // Private key / unrelated .pem files: not certs, skip directly.
-                // Otherwise nginx's `key.pem + cert.pem` side-by-side directories would be full of "parse failed",
-                // and "matched count" would be inflated.
-                Ok(None) => {
-                    tracing::debug!(path, "Not a cert file, skipping");
-                }
-                Err(e) => {
-                    let reason = format!("{e}");
-                    tracing::debug!(path, error = %reason, "Cert parsing failed");
-                    by_path.insert(
-                        path.clone(),
-                        ScanEntry {
-                            info: CertInfo {
-                                path,
-                                parse_error: true,
-                                source_id: source_id.clone(),
-                                ..Default::default()
-                            },
-                            error: reason,
-                        },
-                    );
-                }
-            }
+            record_cert(&mut by_path, &path, source_id);
         }
     }
 
     by_path
+}
+
+/// Parse one path and record it (success or parse failure) under `source_id`.
+fn record_cert(by_path: &mut BTreeMap<String, ScanEntry>, path: &str, source_id: &str) {
+    match read_cert(path) {
+        Ok(Some(mut info)) => {
+            source_id.clone_into(&mut info.source_id);
+            by_path.insert(
+                path.to_string(),
+                ScanEntry {
+                    info,
+                    error: String::new(),
+                },
+            );
+        }
+        // Private key / unrelated .pem files: not certs, skip directly.
+        // Otherwise nginx's `key.pem + cert.pem` side-by-side directories would be full of "parse failed",
+        // and "matched count" would be inflated.
+        Ok(None) => {
+            tracing::debug!(path, "Not a cert file, skipping");
+        }
+        Err(e) => {
+            let reason = format!("{e}");
+            tracing::debug!(path, error = %reason, "Cert parsing failed");
+            by_path.insert(
+                path.to_string(),
+                ScanEntry {
+                    info: CertInfo {
+                        path: path.to_string(),
+                        parse_error: true,
+                        source_id: source_id.to_string(),
+                        ..Default::default()
+                    },
+                    error: reason,
+                },
+            );
+        }
+    }
 }
 
 /// Baseline globs (no source attribution: local default locations and `--cert-globs`)
@@ -256,7 +261,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Server source takes priority: when same path matched by source and baseline, source_id is from source
+    /// Server source takes priority: when same path matched by source and baseline, `source_id` is from source
     #[test]
     fn source_id_wins_over_baseline() {
         let dir = tmpdir("src");

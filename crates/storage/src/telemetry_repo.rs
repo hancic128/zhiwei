@@ -7,10 +7,15 @@ pub struct TelemetryRepo {
 }
 
 impl TelemetryRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    #[must_use] pub const fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 
+    /// Insert a raw telemetry batch. Returns the row id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the insert fails.
     pub async fn insert(
         &self,
         node_id: &str,
@@ -20,10 +25,10 @@ impl TelemetryRepo {
     ) -> anyhow::Result<i64> {
         let now = Utc::now().timestamp_nanos_opt().unwrap_or(0);
         let result = sqlx::query(
-            r#"
+            r"
             INSERT INTO telemetry_batches (node_id, ts_unix_nano, interval_seconds, payload_protobuf, received_at_unix_nano)
             VALUES (?, ?, ?, ?, ?)
-            "#,
+            ",
         )
         .bind(node_id)
         .bind(ts_unix_nano)
@@ -35,6 +40,11 @@ impl TelemetryRepo {
         Ok(result.last_insert_rowid())
     }
 
+    /// Count of raw telemetry batches for a single node.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn count_by_node(&self, node_id: &str) -> anyhow::Result<i64> {
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM telemetry_batches WHERE node_id = ?")
@@ -44,6 +54,11 @@ impl TelemetryRepo {
         Ok(count)
     }
 
+    /// Total count of raw telemetry batches across all nodes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn count_all(&self) -> anyhow::Result<i64> {
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM telemetry_batches")
             .fetch_one(&self.pool)
@@ -52,17 +67,21 @@ impl TelemetryRepo {
     }
 
     /// Most recent batches for a node, newest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn recent(
         &self,
         node_id: &str,
         limit: i64,
     ) -> anyhow::Result<Vec<(i64, i32, Vec<u8>)>> {
         let rows: Vec<(i64, i32, Vec<u8>)> = sqlx::query_as(
-            r#"
+            r"
             SELECT ts_unix_nano, interval_seconds, payload_protobuf
             FROM telemetry_batches WHERE node_id = ?
             ORDER BY id DESC LIMIT ?
-            "#,
+            ",
         )
         .bind(node_id)
         .bind(limit.clamp(1, 500))
@@ -77,6 +96,10 @@ impl TelemetryRepo {
     /// fetching all is slow and hard to visualize. So we downsample in SQL: if fewer than
     /// `limit` rows in the window, fetch all; otherwise take one row per bucket at
     /// `ceil(total / limit)` stride, giving ~limit points covering the whole window.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn range(
         &self,
         node_id: &str,
@@ -86,7 +109,7 @@ impl TelemetryRepo {
     ) -> anyhow::Result<Vec<(i64, i32, Vec<u8>)>> {
         let limit = limit.clamp(2, 2000);
         let rows: Vec<(i64, i32, Vec<u8>)> = sqlx::query_as(
-            r#"
+            r"
             WITH win AS (
                 SELECT ts_unix_nano, interval_seconds, payload_protobuf,
                        ROW_NUMBER() OVER (ORDER BY ts_unix_nano) AS rn,
@@ -98,7 +121,7 @@ impl TelemetryRepo {
             FROM win
             WHERE total <= ? OR rn % ((total + ? - 1) / ?) = 1
             ORDER BY ts_unix_nano
-            "#,
+            ",
         )
         .bind(node_id)
         .bind(from_ns)
@@ -112,13 +135,17 @@ impl TelemetryRepo {
     }
 
     /// Latest frame per node (get all nodes at once, avoid N queries per node).
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn latest_per_node(&self) -> anyhow::Result<Vec<(String, i64, Vec<u8>)>> {
         let rows: Vec<(String, i64, Vec<u8>)> = sqlx::query_as(
-            r#"
+            r"
             SELECT node_id, ts_unix_nano, payload_protobuf
             FROM telemetry_batches
             WHERE id IN (SELECT MAX(id) FROM telemetry_batches GROUP BY node_id)
-            "#,
+            ",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -129,18 +156,22 @@ impl TelemetryRepo {
 
     /// Raw batches for all nodes within a time window -- retention task fetches all at once,
     /// avoids querying per node.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn batches_in_window(
         &self,
         from_ns: i64,
         to_ns: i64,
     ) -> anyhow::Result<Vec<(String, i64, Vec<u8>)>> {
         let rows: Vec<(String, i64, Vec<u8>)> = sqlx::query_as(
-            r#"
+            r"
             SELECT node_id, ts_unix_nano, payload_protobuf
             FROM telemetry_batches
             WHERE ts_unix_nano >= ? AND ts_unix_nano < ?
             ORDER BY node_id, ts_unix_nano
-            "#,
+            ",
         )
         .bind(from_ns)
         .bind(to_ns)
@@ -151,6 +182,10 @@ impl TelemetryRepo {
 
     /// Insert/overwrite an aggregated value for (node, hour, metric).
     /// Uses upsert rather than insert: re-running the same hour is idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     #[allow(clippy::too_many_arguments)]
     pub async fn upsert_hourly(
         &self,
@@ -165,14 +200,14 @@ impl TelemetryRepo {
         samples: i64,
     ) -> anyhow::Result<()> {
         sqlx::query(
-            r#"
+            r"
             INSERT INTO telemetry_hourly
                 (node_id, ts_hour_unix_nano, metric, avg, min, max, first, last, samples)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(node_id, ts_hour_unix_nano, metric) DO UPDATE SET
                 avg = excluded.avg, min = excluded.min, max = excluded.max,
                 first = excluded.first, last = excluded.last, samples = excluded.samples
-            "#,
+            ",
         )
         .bind(node_id)
         .bind(ts_hour_unix_nano)
@@ -190,6 +225,10 @@ impl TelemetryRepo {
 
     /// Which hour has been aggregated up to (watermark) -- retention task only moves forward,
     /// does not recalculate the past.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn max_hourly_ts(&self) -> anyhow::Result<Option<i64>> {
         let v: Option<i64> =
             sqlx::query_scalar("SELECT MAX(ts_hour_unix_nano) FROM telemetry_hourly")
@@ -200,6 +239,10 @@ impl TelemetryRepo {
 
     /// Long window query: downsample from hourly aggregation table by stride.
     /// Returns `(ts_nano, avg, min, max, first, last, samples)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn hourly_range(
         &self,
         node_id: &str,
@@ -210,7 +253,7 @@ impl TelemetryRepo {
     ) -> anyhow::Result<Vec<(i64, f64, f64, f64, f64, f64, i64)>> {
         let limit = limit.clamp(2, 2000);
         let rows: Vec<(i64, f64, f64, f64, f64, f64, i64)> = sqlx::query_as(
-            r#"
+            r"
             WITH win AS (
                 SELECT ts_hour_unix_nano, avg, min, max, first, last, samples,
                        ROW_NUMBER() OVER (ORDER BY ts_hour_unix_nano) AS rn,
@@ -223,7 +266,7 @@ impl TelemetryRepo {
             FROM win
             WHERE total <= ? OR rn % ((total + ? - 1) / ?) = 1
             ORDER BY ts_hour_unix_nano
-            "#,
+            ",
         )
         .bind(node_id)
         .bind(metric)
@@ -243,6 +286,10 @@ impl TelemetryRepo {
     /// retention data can be millions of rows; one `DELETE ... WHERE ts_unix_nano < ?`
     /// holds a write lock until the full scan is done, during which telemetry reports
     /// and command dispatch all queue up.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if any batch delete fails.
     pub async fn delete_raw_before(&self, cutoff_ns: i64) -> anyhow::Result<u64> {
         delete_in_batches(
             &self.pool,
@@ -256,6 +303,10 @@ impl TelemetryRepo {
     }
 
     /// Delete expired hourly aggregates, returns number of rows deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if any batch delete fails.
     pub async fn delete_hourly_before(&self, cutoff_ns: i64) -> anyhow::Result<u64> {
         delete_in_batches(
             &self.pool,
@@ -271,7 +322,7 @@ impl TelemetryRepo {
 
 /// Maximum rows per delete statement.
 ///
-/// Not arbitrary: SQLite's write lock is database-level; deleting 5000 rows on a typical VPS
+/// Not arbitrary: `SQLite`'s write lock is database-level; deleting 5000 rows on a typical VPS
 /// takes milliseconds -- short enough that other write transactions can still queue in time.
 /// Any larger and a single report gets dragged into a "slow statement".
 pub const DELETE_BATCH_ROWS: i64 = 5_000;
@@ -302,7 +353,13 @@ async fn delete_in_batches(
             .await?;
         let n = r.rows_affected();
         total += n;
-        if (n as i64) < batch_rows {
+        // `n` is the rows actually deleted this batch; `batch_rows` is the
+        // bound. Convert via `try_from` to honour the `cast_possible_wrap`
+        // lint: the caller already clamps `batch_rows` to `DELETE_BATCH_ROWS`
+        // (5_000), so the conversion cannot fail in practice, but the lint
+        // requires the explicit handling.
+        let n_i64 = i64::try_from(n).unwrap_or(i64::MAX);
+        if n_i64 < batch_rows {
             break;
         }
     }

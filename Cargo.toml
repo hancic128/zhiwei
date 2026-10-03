@@ -15,6 +15,9 @@ edition = "2021"
 rust-version = "1.75"
 license = "Apache-2.0"
 repository = "https://github.com/zhiwei/zhiwei"
+readme = "../README.md"
+keywords = ["monitoring", "alerting", "infrastructure", "observability", "telemetry"]
+categories = ["network-programming", "database", "cryptography"]
 
 [workspace.dependencies]
 # async

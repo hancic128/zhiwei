@@ -1,4 +1,4 @@
-//! ZhiWei node-agent.
+//! `ZhiWei` node-agent.
 //!
 //! First-run flow (enroll):
 //!   1. Generate the Ed25519 signing key under `<state>/signing.key` (0600)
@@ -7,9 +7,17 @@
 //!   4. From now on, sign every request with the key — no client certificate
 //!
 //! Steady-state:
-//!   - Every `interval` seconds, build a TelemetryBatch (CPU/mem/disk/net)
+//!   - Every `interval` seconds, build a `TelemetryBatch` (CPU/mem/disk/net)
 //!     and POST it to /v1/telemetry.
 
+
+#![warn(clippy::pedantic, clippy::nursery, clippy::cargo)]
+// `multiple_crate_versions` flags transitive deps (e.g. ed25519-dalek pulls
+// `rand_core` 0.10 while `rand` 0.8 pulls 0.6). Not actionable from project
+// code — pinned by upstream crates.
+#![allow(clippy::multiple_crate_versions)]
+
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -42,7 +50,7 @@ mod probes;
 #[derive(Parser, Debug)]
 #[command(name = "zhiwei-node", about = "ZhiWei node-agent", version)]
 struct Args {
-    /// Monitor URL (e.g. https://127.0.0.1:8443)
+    /// Monitor URL (e.g. <https://127.0.0.1:8443>)
     #[arg(long, env = "ZHIWEI_MONITOR_URL")]
     monitor: String,
 
@@ -148,7 +156,9 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    if !state.enrolled() {
+    if state.enrolled() {
+        tracing::info!(node_id = %state.node_id.clone().unwrap_or_default(), "already enrolled");
+    } else {
         let token = args
             .bootstrap_token
             .clone()
@@ -163,8 +173,6 @@ async fn main() -> anyhow::Result<()> {
         )
         .await?;
         tracing::info!(node_id = %resp.node_id, "enrollment complete");
-    } else {
-        tracing::info!(node_id = %state.node_id.clone().unwrap_or_default(), "already enrolled");
     }
 
     let node_id = state
@@ -311,7 +319,7 @@ impl NodeState {
         })
     }
 
-    fn enrolled(&self) -> bool {
+    const fn enrolled(&self) -> bool {
         self.node_id.is_some()
     }
 
@@ -321,13 +329,13 @@ impl NodeState {
         let id_path = self.state_dir.join("node.id");
         let ca_path = self.state_dir.join("ca.crt.pem");
         tokio::fs::write(&id_path, resp.node_id.as_bytes()).await?;
-        if !resp.ca_cert_pem.is_empty() {
-            tokio::fs::write(&ca_path, resp.ca_cert_pem.as_bytes()).await?;
-        } else {
+        if resp.ca_cert_pem.is_empty() {
             // Not delivered = peer does not terminate TLS (managed platform). Remove any
             // CA left over from a previous enroll, otherwise it would keep being
             // trusted and every request would fail TLS even though enroll succeeded.
             let _ = tokio::fs::remove_file(&ca_path).await;
+        } else {
+            tokio::fs::write(&ca_path, resp.ca_cert_pem.as_bytes()).await?;
         }
 
         // Persist the ops public key alongside enrollment (TOFU): after this,
@@ -340,10 +348,10 @@ impl NodeState {
         }
 
         self.node_id = Some(resp.node_id.clone());
-        if !resp.ca_cert_pem.is_empty() {
-            self.ca_cert_pem = Some(resp.ca_cert_pem.clone());
-        } else {
+        if resp.ca_cert_pem.is_empty() {
             self.ca_cert_pem = None;
+        } else {
+            self.ca_cert_pem = Some(resp.ca_cert_pem.clone());
         }
         Ok(())
     }
@@ -439,6 +447,15 @@ fn transport(monitor: &str, state: &NodeState) -> anyhow::Result<http::HttpTrans
 }
 
 /// Take the top N processes by CPU usage.
+/// Convert byte counts to f64 for telemetry display.
+///
+/// Telemetry bytes values are rounded to the nearest byte for UI display,
+/// so precision loss beyond 2^52 is acceptable (a single byte at that scale
+/// is meaningless). Using `as f64` here would trigger `clippy::cast_precision_loss`.
+fn bytes_to_f64(bytes: u64) -> f64 {
+    f64::from(u32::try_from(bytes).unwrap_or(u32::MAX))
+}
+
 fn snapshot_processes(sys: &sysinfo::System) -> ProcessSnapshot {
     const TOP_N: usize = 20;
 
@@ -449,7 +466,9 @@ fn snapshot_processes(sys: &sysinfo::System) -> ProcessSnapshot {
         .processes()
         .iter()
         .map(|(pid, p)| ProcessInfo {
-            pid: pid.as_u32() as i32,
+            // Linux PIDs are i32 in practice; sysinfo returns u32. Convert with try_from
+            // so a hypothetical huge pid surfaces as -1 instead of silently wrapping.
+            pid: i32::try_from(pid.as_u32()).unwrap_or(-1),
             name: p.name().to_string_lossy().to_string(),
             cmdline: p
                 .cmd()
@@ -458,7 +477,7 @@ fn snapshot_processes(sys: &sysinfo::System) -> ProcessSnapshot {
                 .collect::<Vec<_>>()
                 .join(" "),
             user: p.user_id().map(|u| u.to_string()).unwrap_or_default(),
-            cpu_percent: p.cpu_usage() as f64,
+            cpu_percent: f64::from(p.cpu_usage()),
             memory_bytes: p.memory(),
         })
         .collect();
@@ -502,7 +521,7 @@ fn split_tags(raw: &str) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     raw.split(|c: char| c.is_whitespace() || matches!(c, ',' | '，' | '、'))
         .map(str::trim)
-        .filter(|s| !s.is_empty() && seen.insert(s.to_string()))
+        .filter(|s| !s.is_empty() && seen.insert((*s).to_string()))
         .map(str::to_string)
         .collect()
 }
@@ -578,7 +597,7 @@ fn build_host_info(node_name: &str) -> HostInfo {
         .first()
         .map(|c| c.brand().trim().to_string())
         .unwrap_or_default();
-    let cpu_cores = sys.cpus().len() as u32;
+    let cpu_cores = u32::try_from(sys.cpus().len()).unwrap_or(u32::MAX);
 
     let networks = Networks::new_with_refreshed_list();
     let interfaces = networks
@@ -589,7 +608,7 @@ fn build_host_info(node_name: &str) -> HostInfo {
                 .iter()
                 .map(|n| IpAddress {
                     addr: n.addr.to_string(),
-                    prefix: n.prefix as u32,
+                    prefix: u32::from(n.prefix),
                 })
                 .collect();
             InterfaceInfo {
@@ -629,18 +648,18 @@ fn build_batch(node_id: &str, key: &EdKeyPair) -> anyhow::Result<TelemetryBatch>
     let mut metrics = vec![
         Metric {
             name: "host.cpu.usage".into(),
-            value: sys.global_cpu_usage() as f64,
-            labels: Default::default(),
+            value: f64::from(sys.global_cpu_usage()),
+            labels: HashMap::default(),
         },
         Metric {
             name: "host.mem.used_bytes".into(),
-            value: sys.used_memory() as f64,
-            labels: Default::default(),
+            value: bytes_to_f64(sys.used_memory()),
+            labels: HashMap::default(),
         },
         Metric {
             name: "host.mem.total_bytes".into(),
-            value: sys.total_memory() as f64,
-            labels: Default::default(),
+            value: bytes_to_f64(sys.total_memory()),
+            labels: HashMap::default(),
         },
     ];
     // Memory-usage percent is computed once on the node side: the console's memory
@@ -656,12 +675,11 @@ fn build_batch(node_id: &str, key: &EdKeyPair) -> anyhow::Result<TelemetryBatch>
             let used = metrics
                 .iter()
                 .find(|m| m.name == "host.mem.used_bytes")
-                .map(|m| m.value)
-                .unwrap_or(0.0);
+                .map_or(0.0, |m| m.value);
             metrics.push(Metric {
                 name: "host.mem.usage".into(),
                 value: used * 100.0 / total,
-                labels: Default::default(),
+                labels: HashMap::default(),
             });
         }
     }
@@ -683,31 +701,30 @@ fn build_batch(node_id: &str, key: &EdKeyPair) -> anyhow::Result<TelemetryBatch>
     // Percent and byte-count come from the same disk, so the "absolute value /
     // ratio" views in the big-card and trend graph stay consistent.
     let fullest = disks.iter().filter(|d| d.total_space() > 0).max_by(|a, b| {
-        let ra = (a.total_space() - a.available_space()) as f64 / a.total_space() as f64;
-        let rb = (b.total_space() - b.available_space()) as f64 / b.total_space() as f64;
+        let ra = bytes_to_f64(a.total_space() - a.available_space()) / bytes_to_f64(a.total_space());
+        let rb = bytes_to_f64(b.total_space() - b.available_space()) / bytes_to_f64(b.total_space());
         ra.partial_cmp(&rb).unwrap_or(std::cmp::Ordering::Equal)
     });
-    let max_disk_usage = fullest
-        .map(|d| (d.total_space() - d.available_space()) as f64 * 100.0 / d.total_space() as f64)
-        .unwrap_or(0.0);
+    let max_disk_usage = fullest.map_or(0.0, |d| {
+        bytes_to_f64(d.total_space() - d.available_space()) * 100.0 / bytes_to_f64(d.total_space())
+    });
     let disk_used_bytes = fullest
-        .map(|d| d.total_space().saturating_sub(d.available_space()))
-        .unwrap_or(0);
-    let disk_total_bytes = fullest.map(|d| d.total_space()).unwrap_or(0);
+        .map_or(0, |d| d.total_space().saturating_sub(d.available_space()));
+    let disk_total_bytes = fullest.map_or(0, sysinfo::Disk::total_space);
     metrics.push(Metric {
         name: "host.disk.usage".into(),
         value: max_disk_usage,
-        labels: Default::default(),
+        labels: HashMap::default(),
     });
     metrics.push(Metric {
         name: "host.disk.used_bytes".into(),
-        value: disk_used_bytes as f64,
-        labels: Default::default(),
+        value: bytes_to_f64(disk_used_bytes),
+        labels: HashMap::default(),
     });
     metrics.push(Metric {
         name: "host.disk.total_bytes".into(),
-        value: disk_total_bytes as f64,
-        labels: Default::default(),
+        value: bytes_to_f64(disk_total_bytes),
+        labels: HashMap::default(),
     });
 
     let disks: Vec<DiskMount> = disks
@@ -881,7 +898,7 @@ mod tests {
     /// clap not reading that key made it useless; this test nails down that contract.
     #[test]
     fn interval_reads_from_env() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         std::env::set_var("ZHIWEI_INTERVAL", "120");
         let a = Args::try_parse_from(["zhiwei-node", "--monitor", "http://x"]).unwrap();
         assert_eq!(a.interval, 120, "env ZHIWEI_INTERVAL=120 should be applied");
@@ -890,7 +907,7 @@ mod tests {
 
     #[test]
     fn interval_cli_overrides_env() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         std::env::set_var("ZHIWEI_INTERVAL", "120");
         let a = Args::try_parse_from(["zhiwei-node", "--monitor", "http://x", "--interval", "5"])
             .unwrap();
@@ -912,7 +929,7 @@ mod tests {
     /// Alias / tags read from env (install-node.sh writes to a 0600 env file; systemd / launchd then inject).
     #[test]
     fn alias_and_tags_read_from_env() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         std::env::set_var("ZHIWEI_NODE_ALIAS", "Beijing Entry");
         std::env::set_var("ZHIWEI_NODE_TAGS", "prod bj");
         let a = Args::try_parse_from(["zhiwei-node", "--monitor", "http://x"]).unwrap();

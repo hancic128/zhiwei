@@ -45,7 +45,7 @@ impl Outcome {
         }
     }
 
-    fn degraded(
+    const fn degraded(
         latency_ms: Option<f64>,
         status_code: Option<i64>,
         reason: &'static str,
@@ -60,7 +60,7 @@ impl Outcome {
         }
     }
 
-    fn down(reason: &'static str, args: Value) -> Self {
+    const fn down(reason: &'static str, args: Value) -> Self {
         Self {
             state: "down",
             latency_ms: None,
@@ -83,7 +83,7 @@ fn str_field(v: &Value, key: &str) -> String {
 fn latency_verdict(expect: &Value, latency_ms: f64, status_code: Option<i64>) -> Option<Outcome> {
     let max = expect
         .get("max_latency_ms")
-        .and_then(|v| v.as_f64())
+        .and_then(serde_json::Value::as_f64)
         .unwrap_or(f64::MAX);
     if latency_ms > max {
         return Some(Outcome::degraded(
@@ -97,7 +97,7 @@ fn latency_verdict(expect: &Value, latency_ms: f64, status_code: Option<i64>) ->
 }
 
 pub async fn run(kind: &str, target: &Value, expect: &Value, timeout_ms: i64) -> Outcome {
-    let timeout = Duration::from_millis(timeout_ms.clamp(100, 60_000) as u64);
+    let timeout = Duration::from_millis(u64::try_from(timeout_ms.clamp(100, 60_000)).unwrap_or(100));
     match kind {
         "http" => tokio::time::timeout(timeout, probe_http(target, expect))
             .await
@@ -129,7 +129,7 @@ async fn probe_http(target: &Value, expect: &Value) -> Outcome {
     };
     let tls_verify = expect
         .get("tls_verify")
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
 
     let builder = reqwest::Client::builder()
@@ -165,7 +165,7 @@ async fn probe_http(target: &Value, expect: &Value) -> Outcome {
     }
 
     let started = Instant::now();
-    let res = match req.send().await {
+    let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
             let reason = if e.is_timeout() { "timeout" } else { "connect" };
@@ -173,11 +173,11 @@ async fn probe_http(target: &Value, expect: &Value) -> Outcome {
             return Outcome::down(reason, json!({ "target": url, "detail": detail }));
         }
     };
-    let status = res.status().as_u16();
+    let status = resp.status().as_u16();
     let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
-    let status_code = Some(status as i64);
+    let status_code = Some(i64::from(status));
 
-    let body = match res.bytes().await {
+    let body = match resp.bytes().await {
         Ok(b) => String::from_utf8_lossy(&b[..b.len().min(MAX_BODY_BYTES)]).to_string(),
         Err(e) => {
             return Outcome::down(
@@ -190,12 +190,12 @@ async fn probe_http(target: &Value, expect: &Value) -> Outcome {
     let expected: Vec<i64> = expect
         .get("status")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_i64()).collect())
+        .map(|a| a.iter().filter_map(serde_json::Value::as_i64).collect())
         .unwrap_or_default();
     let status_ok = if expected.is_empty() {
         (200..400).contains(&status)
     } else {
-        expected.contains(&(status as i64))
+        expected.contains(&i64::from(status))
     };
     if !status_ok {
         return Outcome {
@@ -228,7 +228,7 @@ async fn probe_http(target: &Value, expect: &Value) -> Outcome {
 
 async fn probe_tcp(target: &Value, expect: &Value) -> Outcome {
     let host = str_field(target, "host");
-    let port = target.get("port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+    let port = u16::try_from(target.get("port").and_then(serde_json::Value::as_u64).unwrap_or(0)).unwrap_or(0);
     if host.is_empty() || port == 0 {
         return Outcome::down("bad_url", json!({}));
     }
@@ -249,7 +249,7 @@ async fn probe_tcp(target: &Value, expect: &Value) -> Outcome {
         let read = tokio::time::timeout(Duration::from_millis(500), stream.read(&mut buf))
             .await
             .ok()
-            .and_then(|r| r.ok())
+            .and_then(std::result::Result::ok)
             .unwrap_or(0);
         let banner = String::from_utf8_lossy(&buf[..read]).to_string();
         // No banner is not a failure (many services don't speak first)
@@ -272,7 +272,7 @@ async fn probe_tcp(target: &Value, expect: &Value) -> Outcome {
 
 async fn probe_tls(target: &Value, expect: &Value) -> Outcome {
     let host = str_field(target, "host");
-    let port = target.get("port").and_then(|v| v.as_u64()).unwrap_or(443) as u16;
+    let port = u16::try_from(target.get("port").and_then(serde_json::Value::as_u64).unwrap_or(443)).unwrap_or(0);
     if host.is_empty() || port == 0 {
         return Outcome::down("bad_url", json!({}));
     }
@@ -286,7 +286,7 @@ async fn probe_tls(target: &Value, expect: &Value) -> Outcome {
     };
     let verify = expect
         .get("verify")
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
 
     let started = Instant::now();
@@ -299,11 +299,7 @@ async fn probe_tls(target: &Value, expect: &Value) -> Outcome {
             )
         }
     };
-    let cfg = match client_config(!verify) {
-        Ok(c) => c,
-        Err(e) => return Outcome::down("tls", json!({ "detail": e.to_string() })),
-    };
-    let connector = tokio_rustls::TlsConnector::from(Arc::new(cfg));
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config(!verify)));
     let name = match rustls::pki_types::ServerName::try_from(sni.clone()) {
         Ok(n) => n,
         Err(e) => return Outcome::down("tls", json!({ "detail": format!("Invalid SNI {sni}: {e}") })),
@@ -340,7 +336,7 @@ async fn probe_tls(target: &Value, expect: &Value) -> Outcome {
         }
         let min_days = expect
             .get("min_days_valid")
-            .and_then(|v| v.as_i64())
+            .and_then(serde_json::Value::as_i64)
             .unwrap_or(30);
         if days < min_days {
             return Outcome::degraded(
@@ -355,18 +351,18 @@ async fn probe_tls(target: &Value, expect: &Value) -> Outcome {
     latency_verdict(expect, latency_ms, None).unwrap_or_else(|| Outcome::ok(latency_ms, None))
 }
 
-fn client_config(skip_verify: bool) -> anyhow::Result<rustls::ClientConfig> {
+fn client_config(skip_verify: bool) -> rustls::ClientConfig {
     if skip_verify {
-        return Ok(rustls::ClientConfig::builder()
+        return rustls::ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(NoVerify))
-            .with_no_client_auth());
+            .with_no_client_auth();
     }
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    Ok(rustls::ClientConfig::builder()
+    rustls::ClientConfig::builder()
         .with_root_certificates(roots)
-        .with_no_client_auth())
+        .with_no_client_auth()
 }
 
 /// "No verification" when `tls_verify = false`: testing only, affects this
@@ -416,7 +412,7 @@ impl rustls::client::danger::ServerCertVerifier for NoVerify {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
     async fn tcp_reports_down_for_closed_port() {
@@ -460,7 +456,6 @@ mod tests {
                 };
                 tokio::spawn(async move {
                     let mut buf = [0u8; 1024];
-                    use tokio::io::AsyncReadExt;
                     let _ = sock.read(&mut buf).await;
                     let _ = sock
                         .write_all(

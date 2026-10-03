@@ -39,7 +39,7 @@ pub async fn cert_config_handler(
     Query(q): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
-    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    let pq = uri.path_and_query().map_or("/", hyper::http::uri::PathAndQuery::as_str);
     let (node_id, _pub) = match verify_node(&state, &headers, method.as_str(), pq, &[]).await {
         Ok(id) => id,
         Err((code, msg)) => return err(code, msg),
@@ -76,7 +76,7 @@ pub async fn cert_config_handler(
 struct CertSourceView {
     id: String,
     node_id: String,
-    /// node_id is empty string when true: this source applies to all nodes
+    /// `node_id` is empty string when true: this source applies to all nodes
     all_nodes: bool,
     node_hostname: Option<String>,
     path: String,
@@ -123,13 +123,14 @@ fn source_stats(source: &CertSource, snapshots: &[String], now_ns: i64) -> (i64,
             }
             matched += 1;
             if c.get("parse_error")
-                .and_then(|v| v.as_bool())
+                .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false)
             {
                 continue;
             }
-            if let Some(exp) = c.get("not_after_unix_nano").and_then(|v| v.as_i64()) {
-                let days = (exp - now_ns) as f64 / 86_400_000_000_000.0;
+            if let Some(exp) = c.get("not_after_unix_nano").and_then(serde_json::Value::as_i64) {
+                let days_i64 = (exp - now_ns) / 86_400_000_000_000;
+                let days = f64::from(i32::try_from(days_i64).unwrap_or(i32::MAX));
                 nearest = Some(nearest.map_or(days, |cur: f64| cur.min(days)));
             }
         }
@@ -337,14 +338,14 @@ pub async fn patch_cert_source_handler(
         },
         None => None,
     };
-    let patch = CertSourcePatch {
+    let update = CertSourcePatch {
         node_id: b.node_id.as_ref().map(|n| n.trim().to_string()),
         path,
         enabled: b.enabled,
         notify_enabled: b.notify_enabled,
         notify_days_before: b.notify_days_before.map(|d| clamp_days(Some(d))),
     };
-    if let Some(node_id) = &patch.node_id {
+    if let Some(node_id) = &update.node_id {
         if !node_id.is_empty() {
             let node = zhiwei_common::NodeId::from_string(node_id.clone());
             match state.storage.nodes().find_by_id(&node).await {
@@ -355,7 +356,7 @@ pub async fn patch_cert_source_handler(
         }
     }
     let now = zhiwei_common::Timestamp::now().unix_nano();
-    if let Err(e) = state.storage.cert_sources().update(&id, &patch, now).await {
+    if let Err(e) = state.storage.cert_sources().update(&id, &update, now).await {
         let msg = e.to_string();
         return if msg.contains("UNIQUE") {
             err(StatusCode::CONFLICT, "A certificate source with this path already exists on this node")
@@ -374,11 +375,14 @@ pub async fn patch_cert_source_handler(
             .await;
     }
     // When the scope changes, both old and new nodes need to rescan.
-    let moved = patch
+    let moved = update
         .node_id
         .as_ref()
         .is_some_and(|n| *n != existing.node_id);
-    let target = patch.node_id.clone().unwrap_or(existing.node_id.clone());
+    let target = update
+        .node_id
+        .clone()
+        .unwrap_or_else(|| existing.node_id.clone());
     refresh_scope_inventory(&state, &target).await;
     if moved {
         refresh_scope_inventory(&state, &existing.node_id).await;
@@ -425,7 +429,7 @@ pub struct TestCertSourceBody {
 }
 
 /// `POST /v1/cert-sources/test`: have the node actually scan this path,
-/// returns command_id.
+/// returns `command_id`.
 ///
 /// Why not scan on the monitor side: the path lives on the **node's**
 /// filesystem, which the monitor can't see. Use the existing command channel
@@ -501,7 +505,7 @@ async fn refresh_node_inventory(state: &AppState, node_id: &str) {
     }
 }
 
-/// "All nodes" sources must notify per device (empty node_id). Node count
+/// "All nodes" sources must notify per device (empty `node_id`). Node count
 /// is well within design range (about 10 in the central cluster), so
 /// per-device commands are fine; at hundreds of devices, switch to the node
 /// pulling config by timestamp comparison.
@@ -560,7 +564,7 @@ mod tests {
         assert!((nearest.unwrap() - 3.0).abs() < 0.01);
     }
 
-    /// Old node versions without source_id: reverse-match by path rule
+    /// Old node versions without `source_id`: reverse-match by path rule
     #[test]
     fn falls_back_to_path_matching_without_source_id() {
         let now = 1_800_000_000_000_000_000i64;

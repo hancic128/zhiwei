@@ -16,6 +16,11 @@ pub const CERT_EXTENSIONS: &[&str] = &["pem", "crt", "cer", "cert"];
 pub const MAX_PATH_LEN: usize = 512;
 
 /// Validate user input path. Returns normalized form (trim whitespace, remove trailing `/`).
+///
+/// # Errors
+///
+/// Returns an error if the path is empty, too long, not absolute, contains control characters,
+/// or contains a `..` segment.
 pub fn normalize(raw: &str) -> Result<String, String> {
     let p = raw.trim();
     if p.is_empty() {
@@ -27,7 +32,7 @@ pub fn normalize(raw: &str) -> Result<String, String> {
     if !p.starts_with('/') {
         return Err("Path must be absolute (must start with /)".into());
     }
-    if p.chars().any(|c| c.is_control()) {
+    if p.chars().any(char::is_control) {
         return Err("Path cannot contain control characters".into());
     }
     if p.split('/').any(|seg| seg == "..") {
@@ -46,7 +51,7 @@ pub fn normalize(raw: &str) -> Result<String, String> {
 ///
 /// Input should already be normalized; here empty input returns empty list instead of error,
 /// caller (scan and match) safely handles empty list as "nothing matched".
-pub fn expand(raw: &str) -> Vec<String> {
+#[must_use] pub fn expand(raw: &str) -> Vec<String> {
     let p = raw.trim();
     if p.is_empty() {
         return Vec::new();
@@ -62,7 +67,7 @@ pub fn expand(raw: &str) -> Vec<String> {
 }
 
 /// Check if a reported cert path belongs to this source (path -> source lookup).
-pub fn matches(raw: &str, cert_path: &str) -> bool {
+#[must_use] pub fn matches(raw: &str, cert_path: &str) -> bool {
     // require_literal_separator: `*` doesn't cross directories, consistent with node side one-level expansion
     // (recursive glob with `**` is not affected)
     let opts = glob::MatchOptions {

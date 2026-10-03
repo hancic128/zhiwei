@@ -15,6 +15,7 @@
 //! 3. If neither is set, generate a random one, persist it, and print it
 //!    once in the startup log.
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 use rand::RngCore;
@@ -69,7 +70,10 @@ pub async fn load_or_init(data_dir: &Path) -> anyhow::Result<(String, TokenSourc
     // 3. Randomly generate and persist.
     let mut buf = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut buf);
-    let token: String = buf.iter().map(|b| format!("{b:02x}")).collect();
+    let token = buf.iter().fold(String::with_capacity(64), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    });
 
     tokio::fs::write(&path, token.as_bytes()).await?;
     #[cfg(unix)]

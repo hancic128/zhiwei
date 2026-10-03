@@ -1,8 +1,8 @@
-//! ZhiWei monitor-server (data plane).
+//! `ZhiWei` monitor-server (data plane).
 //!
 //! Endpoints:
-//!   POST /v1/enroll      — bootstrap token + node Ed25519 public key → node_id
-//!   POST /v1/telemetry   — signed request (Ed25519), protobuf TelemetryBatch
+//!   POST /v1/enroll      — bootstrap token + node Ed25519 public key → `node_id`
+//!   POST /v1/telemetry   — signed request (Ed25519), protobuf `TelemetryBatch`
 //!   GET  /healthz        — liveness
 //!
 //! Node identity is carried by request signatures (see `zhiwei_common::auth`),
@@ -13,6 +13,13 @@
 //! only; no client certificate required).
 //!
 //! hyper-util's auto builder negotiates HTTP/1.1 or HTTP/2 per connection.
+
+
+#![warn(clippy::pedantic, clippy::nursery, clippy::cargo)]
+// `multiple_crate_versions` flags transitive deps (e.g. ed25519-dalek pulls
+// `rand_core` 0.10 while `rand` 0.8 pulls 0.6; sqlx pulls `thiserror` 2 while
+// we pin 1). Not actionable from project code — pinned by upstream crates.
+#![allow(clippy::multiple_crate_versions)]
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -68,15 +75,15 @@ struct Args {
     #[arg(long, env = "ZHIWEI_UI_DIR", default_value = "ui/dist")]
     ui_dir: PathBuf,
 
-    /// Serve plain HTTP; TLS is terminated by the upstream edge (PaaS / reverse proxy).
+    /// Serve plain HTTP; TLS is terminated by the upstream edge (`PaaS` / reverse proxy).
     /// Node identity comes from request signatures, not the transport layer, so
     /// plain transport does not weaken authentication.
-    /// The env var accepts 1/0/true/false/yes/no/on/off (PaaS panels commonly use 1).
+    /// The env var accepts 1/0/true/false/yes/no/on/off (`PaaS` panels commonly use 1).
     ///
     /// Bare `--plain-http` (no value) is equivalent to `--plain-http 1` — when docs
     /// say "add --plain-http" this is what they mean. Pass 0/false to explicitly
     /// turn it off.
-    /// Only when not passed at all do we auto-detect from common PaaS env vars:
+    /// Only when not passed at all do we auto-detect from common `PaaS` env vars:
     /// `RENDER` / `RAILWAY_*` / `NORTHFLANK_*` / `DYNO` (Heroku) default to true.
     #[arg(
         long,
@@ -88,7 +95,7 @@ struct Args {
     plain_http: Option<bool>,
 }
 
-/// Whether we are running in a "PaaS that terminates TLS at the edge" environment:
+/// Whether we are running in a "`PaaS` that terminates TLS at the edge" environment:
 /// Render / Railway / Northflank / Heroku.
     /// Only used as a default when `--plain-http` is not explicitly configured;
     /// self-hosted hosts are not affected.
@@ -233,7 +240,7 @@ fn locate_ops_binary() -> Option<PathBuf> {
 /// - Port is already listening → external instance is up (entrypoint / dev.sh / self-hosted unit).
 /// - `zhiwei-ops` not found → print an actionable hint instead of pretending success.
 async fn ensure_ops_control_plane(data_dir: &Path, endpoint: &str) {
-    if std::env::var("ZHIWEI_OPS_DISABLE").ok().as_deref() == Some("1") {
+    if ops_disabled_by_env() {
         tracing::info!("ZHIWEI_OPS_DISABLE=1: not starting ops-server, command channel unavailable (data plane still running)");
         return;
     }
@@ -250,16 +257,36 @@ async fn ensure_ops_control_plane(data_dir: &Path, endpoint: &str) {
     }
 
     let Some(bin) = locate_ops_binary() else {
-        tracing::warn!(
-            %endpoint,
-            "Command channel unavailable: no process is listening at this address, and the zhiwei-ops binary was not found.\
-             Place zhiwei-ops in the same directory as zhiwei-monitor (or set ZHIWEI_OPS_BIN to its path) and retry;\
-             to run the data plane only, set ZHIWEI_OPS_DISABLE=1 explicitly."
-        );
+        warn_missing_ops_binary(endpoint);
         return;
     };
 
-    match tokio::process::Command::new(&bin)
+    spawn_ops_server(&bin, data_dir, &host, port, endpoint).await;
+}
+
+fn ops_disabled_by_env() -> bool {
+    std::env::var("ZHIWEI_OPS_DISABLE").ok().as_deref() == Some("1")
+}
+
+fn warn_missing_ops_binary(endpoint: &str) {
+    tracing::warn!(
+        %endpoint,
+        "Command channel unavailable: no process is listening at this address, and the zhiwei-ops binary was not found.\
+         Place zhiwei-ops in the same directory as zhiwei-monitor (or set ZHIWEI_OPS_BIN to its path) and retry;\
+         to run the data plane only, set ZHIWEI_OPS_DISABLE=1 explicitly."
+    );
+}
+
+/// Spawn the ops process and wait (briefly) for its port to accept connections, so the
+/// command channel is usable as soon as monitor is ready.
+async fn spawn_ops_server(
+    bin: &Path,
+    data_dir: &Path,
+    host: &str,
+    port: u16,
+    endpoint: &str,
+) {
+    let spawned = tokio::process::Command::new(bin)
         .env("ZHIWEI_DATA_DIR", data_dir)
         // Let the spawned ops listen on the address monitor actually connects to
         // (ops defaults to 8444; if ops_endpoint is overridden in config, don't gamble on the default).
@@ -267,29 +294,15 @@ async fn ensure_ops_control_plane(data_dir: &Path, endpoint: &str) {
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
-        .spawn()
-    {
+        .spawn();
+    match spawned {
         Ok(child) => {
             tracing::info!(
                 bin = %bin.display(),
                 pid = child.id().unwrap_or(0),
                 "Started ops-server (control plane); signing key only in its process"
             );
-            // Wait for it to become "ready" before proceeding — the test is that the port
-            // is connectable, not that ops.pub exists:
-            // ops opens the DB and runs migrations before binding, so the port being
-            // up simultaneously means:
-            //   ① ops.pub has been written to disk — monitor reads it once at startup
-            //      and caches it; reading too soon gives new nodes an empty public key
-            //      and the command channel silently fails.
-            //   ② Migrations have finished — two processes running `CREATE TABLE`
-            //      on the same SQLite will collide (verified in practice, monitor
-            //      fails to start: `table nodes already exists`).
-            if wait_for_port(&host, port, 60).await {
-                tracing::info!(%endpoint, "ops-server ready (command channel available)");
-            } else {
-                tracing::warn!(%endpoint, "ops-server did not start within 9 seconds, command channel may be unavailable");
-            }
+            await_ops_ready(host, port, endpoint).await;
             // Let tokio's SIGCHLD handler reap it; no wait() here (monitor runs forever).
             drop(child);
         }
@@ -297,19 +310,61 @@ async fn ensure_ops_control_plane(data_dir: &Path, endpoint: &str) {
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// Wait for the freshly-spawned ops to become "ready".
+///
+/// The test is that the port is connectable, not that `ops.pub` exists: ops opens the DB
+/// and runs migrations before binding, so the port being up simultaneously means:
+///   ① `ops.pub` has been written to disk — monitor reads it once at startup and caches
+///      it; reading too soon gives new nodes an empty public key and the command channel
+///      silently fails.
+///   ② Migrations have finished — two processes running `CREATE TABLE` on the same
+///      `SQLite` will collide (verified in practice, monitor fails to start: `table
+///      nodes already exists`).
+async fn await_ops_ready(host: &str, port: u16, endpoint: &str) {
+    if wait_for_port(host, port, 60).await {
+        tracing::info!(%endpoint, "ops-server ready (command channel available)");
+    } else {
+        tracing::warn!(%endpoint, "ops-server did not start within 9 seconds, command channel may be unavailable");
+    }
+}
+
+/// Values resolved from CLI args + config that are needed throughout startup.
+struct StartupContext {
+    args: Args,
+    cfg: config::MonitorConfig,
+    data_dir: PathBuf,
+    listen: String,
+    plain_http: bool,
+}
+
+/// External resources + credentials gathered before [`AppState`] is assembled.
+struct RuntimeResources {
+    storage: zhiwei_storage::Storage,
+    ca: ca::Ca,
+    server_cert: Option<tls::IssuedCert>,
+    admin_token: String,
+    bootstrap_tokens: Arc<routes::BootstrapTokens>,
+    ops_public_key: String,
+    ui_dir: Option<PathBuf>,
+    help: crate::state::HelpContent,
+    node_base_url: Option<String>,
+}
+
+fn init_tracing() {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| EnvFilter::new("info,zhiwei=debug")),
         )
         .init();
+}
 
+/// Parse args + config, ensure the data dir, and resolve the listen / plain-HTTP policy.
+async fn load_startup_context() -> anyhow::Result<StartupContext> {
     let args = Args::parse();
     let cfg = config::MonitorConfig::load(&args.config).context("loading config")?;
-    let data_dir = args.data_dir.unwrap_or(cfg.data_dir.clone());
-    let listen = args.listen.unwrap_or(cfg.listen.clone());
+    let data_dir = args.data_dir.clone().unwrap_or_else(|| cfg.data_dir.clone());
+    let listen = args.listen.clone().unwrap_or_else(|| cfg.listen.clone());
 
     tokio::fs::create_dir_all(&data_dir)
         .await
@@ -349,42 +404,59 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    Ok(StartupContext {
+        args,
+        cfg,
+        data_dir,
+        listen,
+        plain_http,
+    })
+}
+
+async fn init_storage_and_ca(data_dir: &Path) -> anyhow::Result<(zhiwei_storage::Storage, ca::Ca)> {
     let db_path = data_dir.join("monitor.db");
     let storage = zhiwei_storage::Storage::open(&db_path)
         .await
         .context("opening sqlite storage")?;
-
-    let ca = ca::Ca::load_or_init(&data_dir)
+    let ca = ca::Ca::load_or_init(data_dir)
         .await
         .context("initializing CA")?;
-    // In plain-HTTP mode TLS is terminated by the upstream edge; no local server cert needed
-    let server_cert = if plain_http {
-        None
-    } else {
-        Some(
-            tls::ensure_server_cert(&ca, &data_dir, &cfg.server_cert_cn)
-                .context("ensuring server cert")?,
-        )
-    };
+    Ok((storage, ca))
+}
 
-    // ops public key is written by ops-server on its first startup; without it enroll
-    // will return an empty string, and nodes will reject every command (security default).
+fn init_server_cert(
+    context: &StartupContext,
+    ca: &ca::Ca,
+) -> anyhow::Result<Option<tls::IssuedCert>> {
+    // In plain-HTTP mode TLS is terminated by the upstream edge; no local server cert needed
+    if context.plain_http {
+        return Ok(None);
+    }
+    Ok(Some(
+        tls::ensure_server_cert(ca, &context.data_dir, &context.cfg.server_cert_cn)
+            .context("ensuring server cert")?,
+    ))
+}
+
+/// ops public key is written by ops-server on its first startup; without it enroll
+/// will return an empty string, and nodes will reject every command (security default).
+async fn load_ops_public_key(data_dir: &Path) -> String {
     let ops_pub_path = data_dir.join("ops.pub");
-    let ops_public_key = tokio::fs::read_to_string(&ops_pub_path)
+    let key = tokio::fs::read_to_string(&ops_pub_path)
         .await
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
-    if ops_public_key.is_empty() {
+    if key.is_empty() {
         tracing::warn!(
             "{} not found; nodes will not be able to verify command signatures. Will be generated after starting zhiwei-ops.",
             ops_pub_path.display()
         );
     }
+    key
+}
 
-    let (admin_token, admin_token_source) = admin::load_or_init(&data_dir)
-        .await
-        .context("initializing admin token")?;
-    match admin_token_source {
+fn log_admin_token(data_dir: &Path, admin_token: &str, source: admin::TokenSource) {
+    match source {
         // Generated this time: printed once right here. On managed-platform free tiers
         // with no console shell access, this log line is the only way out (the log
         // viewer is free to read).
@@ -416,7 +488,10 @@ async fn main() -> anyhow::Result<()> {
             );
         }
     }
+}
 
+/// Fixed enrollment token takes priority; otherwise mint a random one-time token and print it.
+fn init_bootstrap_tokens() -> Arc<routes::BootstrapTokens> {
     let bootstrap_tokens = Arc::new(routes::BootstrapTokens::default());
     // Fixed enrollment token takes priority: managed platforms (free tiers have no
     // shell, no persistent volume) use it to replace the "grab a one-time 10-minute
@@ -449,22 +524,30 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     // Only when no fixed token is set do we mint a random one-time token and print it (self-hosted / local dev).
-    if bootstrap_tokens.is_empty().await {
+    if bootstrap_tokens.is_empty() {
         let token = routes::BootstrapTokens::mint();
-        bootstrap_tokens.add(token.clone(), 600).await;
+        bootstrap_tokens.add(token.clone(), 600);
         eprintln!("\n[BOOTSTRAP TOKEN] {token}   (valid 10 minutes)\n");
     }
+    bootstrap_tokens
+}
 
-    let ca_cert_pem = ca.cert_pem.clone();
-    let ui_dir = if args.ui_dir.join("index.html").exists() {
-        Some(args.ui_dir.clone())
+async fn init_runtime_resources(context: &StartupContext) -> anyhow::Result<RuntimeResources> {
+    let (storage, ca) = init_storage_and_ca(&context.data_dir).await?;
+    let server_cert = init_server_cert(context, &ca)?;
+    let ops_public_key = load_ops_public_key(&context.data_dir).await;
+
+    let (admin_token, admin_token_source) = admin::load_or_init(&context.data_dir)
+        .await
+        .context("initializing admin token")?;
+    log_admin_token(&context.data_dir, &admin_token, admin_token_source);
+    let bootstrap_tokens = init_bootstrap_tokens();
+
+    let ui_dir = if context.args.ui_dir.join("index.html").exists() {
+        Some(context.args.ui_dir.clone())
     } else {
         None
     };
-
-    // The help page and enrollment script are `include_str!`-embedded constants; here we just attach them to state.
-    let help = load_help_markdown();
-    let install_script = INSTALL_NODE_SH.to_string();
 
     // Self-hosted distribution base URL (optional): when set, console-generated
     // enrollment commands automatically include `ZHIWEI_BASE_URL`, so nodes no
@@ -476,34 +559,60 @@ async fn main() -> anyhow::Result<()> {
     if let Some(u) = &node_base_url {
         tracing::info!(%u, "Enrollment command will include ZHIWEI_BASE_URL (nodes use self-hosted distribution)");
     }
-    let state = AppState {
+
+    Ok(RuntimeResources {
         storage,
-        data_dir: data_dir.clone(),
-        ca: Arc::new(ca),
-        ca_cert_pem,
+        ca,
+        server_cert,
+        admin_token,
         bootstrap_tokens,
-        admin_token: Arc::new(std::sync::RwLock::new(admin_token)),
         ops_public_key,
-        ops_endpoint: cfg.ops_endpoint.clone(),
+        ui_dir,
+        // The help page and enrollment script are `include_str!`-embedded constants; here we just attach them to state.
+        help: load_help_markdown(),
+        node_base_url,
+    })
+}
+
+/// Assemble [`AppState`], returning the TLS cert alongside it (still needed to serve).
+fn build_app_state(
+    context: &StartupContext,
+    res: RuntimeResources,
+) -> (AppState, Option<tls::IssuedCert>) {
+    let ca_cert_pem = res.ca.cert_pem.clone();
+    let state = AppState {
+        storage: res.storage,
+        data_dir: context.data_dir.clone(),
+        ca: Arc::new(res.ca),
+        ca_cert_pem,
+        bootstrap_tokens: res.bootstrap_tokens,
+        admin_token: Arc::new(std::sync::RwLock::new(res.admin_token)),
+        ops_public_key: res.ops_public_key,
+        ops_endpoint: context.cfg.ops_endpoint.clone(),
         nonce_cache: Arc::new(zhiwei_common::NonceCache::default()),
-        server_cert_cn: cfg.server_cert_cn.clone(),
-        tls_terminated_locally: !plain_http,
-        ui_dir: ui_dir.clone(),
-        help,
+        server_cert_cn: context.cfg.server_cert_cn.clone(),
+        tls_terminated_locally: !context.plain_http,
+        ui_dir: res.ui_dir,
+        help: res.help,
         // Used by the MCP server to call its own REST. `listen` is host:port,
         // and internal traffic is forced to 127.0.0.1 (not reachable from outside).
         mcp_base_url: format!(
             "http://127.0.0.1:{}",
-            listen.rsplit(':').next().unwrap_or("8443")
+            context.listen.rsplit(':').next().unwrap_or("8443")
         ),
-        install_script,
-        node_base_url,
+        install_script: INSTALL_NODE_SH.to_string(),
+        node_base_url: res.node_base_url,
         command_signal: tokio::sync::watch::channel(0u64).0,
         control_polls: Arc::new(control_channel::ControlPolls::new()),
         started_at_ms: zhiwei_common::Timestamp::now().unix_nano() / 1_000_000,
     };
+    (state, res.server_cert)
+}
 
-    if let Err(e) = alerts::seed_default_rules(&state).await {
+/// Seed default rules, then spawn the recurring background tasks (probe-result cleanup,
+/// telemetry retention, node-offline watcher).
+async fn start_background_tasks(state: &AppState) {
+    if let Err(e) = alerts::seed_default_rules(state).await {
         tracing::warn!(error = %e, "Failed to write default alert rules");
     }
 
@@ -532,54 +641,45 @@ async fn main() -> anyhow::Result<()> {
     // report within 60s, the node is considered offline — write a real alert with
     // source='node_offline' and notify. See alerts::spawn_node_liveness_watcher.
     alerts::spawn_node_liveness_watcher(state.clone());
+}
 
-    let app = routes::router(state);
-
-    // Serve the console when a build is present; everything not under /v1 or
-    // /healthz falls through to index.html so client-side routing works.
-    if ui_dir.is_some() {
-        tracing::info!(ui_dir = ?args.ui_dir, "serving console");
-    } else {
-        tracing::warn!(ui_dir = ?args.ui_dir, "console build not found; UI disabled");
+/// Serve forever over plain HTTP; TLS is terminated by the upstream edge.
+async fn serve_plain_http(listener: tokio::net::TcpListener, app: axum::Router) -> anyhow::Result<()> {
+    // Node identity comes from request signatures, not the transport layer, so we do no
+    // extra authentication here — every request has to prove itself.
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        let app = app.clone();
+        tokio::spawn(async move {
+            let io = TokioIo::new(stream);
+            let svc = hyper::service::service_fn(
+                move |req: hyper::Request<hyper::body::Incoming>| {
+                    let app = app.clone();
+                    async move { app.oneshot(req).await }
+                },
+            );
+            if let Err(e) = AutoBuilder::new(TokioExecutor::new())
+                .serve_connection(io, svc)
+                .await
+            {
+                tracing::debug!(error = %e, %peer, "connection closed");
+            }
+        });
     }
-    let listener = tokio::net::TcpListener::bind(&listen)
-        .await
-        .with_context(|| format!("binding {listen}"))?;
+}
 
-    // Plain-HTTP mode: TLS is terminated by the upstream edge. Node identity comes
-    // from request signatures, not the transport layer, so we do no extra
-    // authentication here — every request has to prove itself.
-    if server_cert.is_none() {
-        tracing::info!(%listen, "zhiwei-monitor ready (plain HTTP, TLS terminated at edge)");
-        loop {
-            let (stream, peer) = listener.accept().await?;
-            let app = app.clone();
-            tokio::spawn(async move {
-                let io = TokioIo::new(stream);
-                let svc = hyper::service::service_fn(
-                    move |req: hyper::Request<hyper::body::Incoming>| {
-                        let app = app.clone();
-                        async move { app.oneshot(req).await }
-                    },
-                );
-                if let Err(e) = AutoBuilder::new(TokioExecutor::new())
-                    .serve_connection(io, svc)
-                    .await
-                {
-                    tracing::debug!(error = %e, %peer, "connection closed");
-                }
-            });
-        }
-    }
-
-    let server_cert = server_cert.expect("server cert already generated when plain-http is off");
+/// Serve forever over the built-in rustls TLS acceptor.
+async fn serve_tls(
+    listener: tokio::net::TcpListener,
+    app: axum::Router,
+    server_cert: tls::IssuedCert,
+) -> anyhow::Result<()> {
     let rustls_config = tls::build_server_config(
         &server_cert.cert_pem,
         &server_cert.key_pem,
         &server_cert.ca_cert_pem,
     )?;
     let acceptor = TlsAcceptor::from(Arc::new(rustls_config));
-    tracing::info!(%listen, "zhiwei-monitor ready (built-in TLS)");
 
     // One log line per similar failure within the window: managed-platform health
     // checks probe once per minute; logging the full message every time would
@@ -614,6 +714,38 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    init_tracing();
+    let context = load_startup_context().await?;
+    let resources = init_runtime_resources(&context).await?;
+    let (state, server_cert) = build_app_state(&context, resources);
+    start_background_tasks(&state).await;
+
+    let app = routes::router(state);
+
+    // Serve the console when a build is present; everything not under /v1 or
+    // /healthz falls through to index.html so client-side routing works.
+    if context.args.ui_dir.join("index.html").exists() {
+        tracing::info!(ui_dir = ?context.args.ui_dir, "serving console");
+    } else {
+        tracing::warn!(ui_dir = ?context.args.ui_dir, "console build not found; UI disabled");
+    }
+    let listener = tokio::net::TcpListener::bind(&context.listen)
+        .await
+        .with_context(|| format!("binding {}", context.listen))?;
+
+    // Plain-HTTP mode: TLS is terminated by the upstream edge.
+    if server_cert.is_none() {
+        tracing::info!(listen = %context.listen, "zhiwei-monitor ready (plain HTTP, TLS terminated at edge)");
+        return serve_plain_http(listener, app).await;
+    }
+
+    tracing::info!(listen = %context.listen, "zhiwei-monitor ready (built-in TLS)");
+    let server_cert = server_cert.expect("server cert already generated when plain-http is off");
+    serve_tls(listener, app, server_cert).await
 }
 
 /// Embedded node enrollment install script.

@@ -32,7 +32,7 @@ struct AlertRuleRow {
 
 impl From<AlertRuleRow> for AlertRule {
     fn from(r: AlertRuleRow) -> Self {
-        AlertRule {
+        Self {
             id: r.id,
             name: r.name,
             metric: r.metric,
@@ -65,7 +65,7 @@ pub struct Alert {
     pub silenced_until_unix_nano: Option<i64>,
     /// rule = metric rule alert; probe = service probe state alert; cert = cert expiry alert
     pub source: String,
-    /// when source = probe: probe_id; when source = cert: `{source_id}:{cert path}`
+    /// when source = probe: `probe_id`; when source = cert: `{source_id}:{cert path}`
     pub source_ref: String,
 }
 
@@ -83,23 +83,27 @@ pub struct NotifyChannel {
     pub name: String,
     /// `feishu` / `slack` / `bluebird` / `webhook`
     pub kind: String,
-    /// Slack/generic webhook delivery address; Feishu doesn't use this (address determined by receive_id)
+    /// Slack/generic webhook delivery address; Feishu doesn't use this (address determined by `receive_id`)
     pub url: String,
     /// Reused by type: Feishu = App Secret, generic webhook = delivery Token (Bearer)
     pub secret: String,
     /// Feishu app App ID
     pub app_id: String,
-    /// Feishu receive ID (group chat_id / user open_id, etc.)
+    /// Feishu receive ID (group `chat_id` / user `open_id`, etc.)
     pub receive_id: String,
-    /// Feishu's receive_id_type: chat_id / open_id / user_id / union_id / email
+    /// Feishu's `receive_id_type`: `chat_id` / `open_id` / `user_id` / `union_id` / email
     pub receive_id_type: String,
     pub enabled: bool,
     pub min_severity: String,
 }
 
-/// Input for creating a new channel. Many fields, most only apply to certain channel types;
-/// grouping into one struct is more readable than a long list of positional arguments
-/// (call sites don't need to count positions either).
+/// Input for creating a new channel.
+///
+/// # Detailed
+///
+/// Many fields, most only apply to certain channel types; grouping into one
+/// struct is more readable than a long list of positional arguments (call sites
+/// don't need to count positions either).
 pub struct NewChannel<'a> {
     pub name: &'a str,
     pub kind: &'a str,
@@ -111,12 +115,13 @@ pub struct NewChannel<'a> {
     pub min_severity: &'a str,
 }
 
-/// Bare form of alert_rules rows (matches SELECT column order)
+/// Bare form of `alert_rules` rows (matches SELECT column order)
 type RuleRow = (i64, String, String, String, f64, i64, String, i64, i64, i64);
 
 /// External form of builtin rules (node online/offline/service probes/containers/certs).
-/// id is a stable string ('node_offline' / 'node_online', etc.), frontend uses it as the toggle key.
-/// Supports editing threshold and duration_seconds.
+///
+/// id is a stable string ('`node_offline`' / '`node_online`', etc.), frontend uses it as the toggle key.
+/// Supports editing threshold and `duration_seconds`.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct BuiltinAlertRule {
     pub id: String,
@@ -127,7 +132,7 @@ pub struct BuiltinAlertRule {
     pub updated_at_unix_nano: i64,
 }
 
-/// Bare form of builtin_alert_rules rows (matches SELECT column order)
+/// Bare form of `builtin_alert_rules` rows (matches SELECT column order)
 type BuiltinRow = (String, String, i64, f64, i64, i64);
 
 fn builtin_from_row(r: BuiltinRow) -> BuiltinAlertRule {
@@ -141,7 +146,7 @@ fn builtin_from_row(r: BuiltinRow) -> BuiltinAlertRule {
     }
 }
 
-/// Bare form of notify_channels rows (matches SELECT column order)
+/// Bare form of `notify_channels` rows (matches SELECT column order)
 type ChannelRow = (
     i64,
     String,
@@ -222,17 +227,22 @@ pub struct AlertsRepo {
 }
 
 impl AlertsRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    #[must_use] pub const fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 
     // ---------- Rules ----------
 
+    /// List all alert rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the database query fails.
     pub async fn list_rules(&self) -> anyhow::Result<Vec<AlertRule>> {
         let rows: Vec<RuleRow> = sqlx::query_as(
-            r#"SELECT id, name, metric, op, threshold, duration_seconds, severity, enabled,
+            r"SELECT id, name, metric, op, threshold, duration_seconds, severity, enabled,
                           created_at_unix_nano, updated_at_unix_nano
-                   FROM alert_rules ORDER BY id"#,
+                   FROM alert_rules ORDER BY id",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -253,6 +263,11 @@ impl AlertsRepo {
             .collect())
     }
 
+    /// List enabled rule definitions for the evaluator.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the underlying query fails.
     pub async fn enabled_rules(&self) -> anyhow::Result<Vec<AlertRule>> {
         Ok(self
             .list_rules()
@@ -262,6 +277,11 @@ impl AlertsRepo {
             .collect())
     }
 
+    /// Total number of user-defined alert rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the count query fails.
     pub async fn count_rules(&self) -> anyhow::Result<i64> {
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM alert_rules")
             .fetch_one(&self.pool)
@@ -270,6 +290,11 @@ impl AlertsRepo {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Insert a new user-defined rule and return its id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the insert fails.
     pub async fn create_rule(
         &self,
         name: &str,
@@ -281,10 +306,10 @@ impl AlertsRepo {
         now: i64,
     ) -> anyhow::Result<i64> {
         let r = sqlx::query(
-            r#"INSERT INTO alert_rules
+            r"INSERT INTO alert_rules
                (name, metric, op, threshold, duration_seconds, severity, enabled,
                 created_at_unix_nano, updated_at_unix_nano)
-               VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)"#,
+               VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)",
         )
         .bind(name)
         .bind(metric)
@@ -299,9 +324,14 @@ impl AlertsRepo {
         Ok(r.last_insert_rowid())
     }
 
+    /// Toggle a rule. Disabling also closes any open alerts for it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update or alert-resolution query fails.
     pub async fn set_rule_enabled(&self, id: i64, enabled: bool, now: i64) -> anyhow::Result<()> {
         sqlx::query("UPDATE alert_rules SET enabled = ?, updated_at_unix_nano = ? WHERE id = ?")
-            .bind(if enabled { 1 } else { 0 })
+            .bind(i32::from(enabled))
             .bind(now)
             .bind(id)
             .execute(&self.pool)
@@ -314,6 +344,11 @@ impl AlertsRepo {
         Ok(())
     }
 
+    /// Look up a rule by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn get_rule(&self, id: i64) -> anyhow::Result<Option<AlertRule>> {
         let row = sqlx::query_as::<_, AlertRuleRow>(
             "SELECT id, name, metric, op, threshold, duration_seconds, severity, enabled, created_at_unix_nano, updated_at_unix_nano FROM alert_rules WHERE id = ?",
@@ -321,9 +356,14 @@ impl AlertsRepo {
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|r| r.into()))
+        Ok(row.map(std::convert::Into::into))
     }
 
+    /// Replace rule definition by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update fails.
     pub async fn update_rule(&self, id: i64, rule: &AlertRule) -> anyhow::Result<()> {
         sqlx::query(
             "UPDATE alert_rules SET name = ?, metric = ?, op = ?, threshold = ?, duration_seconds = ?, severity = ?, enabled = ?, updated_at_unix_nano = ? WHERE id = ?",
@@ -334,7 +374,7 @@ impl AlertsRepo {
         .bind(rule.threshold)
         .bind(rule.duration_seconds)
         .bind(&rule.severity)
-        .bind(if rule.enabled { 1 } else { 0 })
+        .bind(i32::from(rule.enabled))
         .bind(rule.updated_at_unix_nano)
         .bind(id)
         .execute(&self.pool)
@@ -343,6 +383,10 @@ impl AlertsRepo {
     }
 
     /// Close all unresolved alerts for a rule and clear its evaluation state
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update or delete query fails.
     pub async fn resolve_open_alerts_of_rule(&self, rule_id: i64, now: i64) -> anyhow::Result<()> {
         sqlx::query(
             "UPDATE alerts SET resolved_at_unix_nano = ?
@@ -359,6 +403,11 @@ impl AlertsRepo {
         Ok(())
     }
 
+    /// Delete a rule. Open alerts for the rule are closed first to avoid orphans.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the alert-resolution or delete query fails.
     pub async fn delete_rule(&self, id: i64, now: i64) -> anyhow::Result<()> {
         // First close unresolved alerts to avoid leaving behind forever-open historical alerts after deleting the rule
         self.resolve_open_alerts_of_rule(id, now).await?;
@@ -372,6 +421,10 @@ impl AlertsRepo {
     // ---------- Builtin rules (node online/offline) ----------
 
     /// List all builtin rules (ordered by id lexicographically, UI display order is stable)
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn list_builtin_rules(&self) -> anyhow::Result<Vec<BuiltinAlertRule>> {
         let rows: Vec<BuiltinRow> = sqlx::query_as(
             "SELECT id, name, enabled, COALESCE(threshold, 0) as threshold,
@@ -383,8 +436,12 @@ impl AlertsRepo {
         Ok(rows.into_iter().map(builtin_from_row).collect())
     }
 
-    /// List all enabled builtin metric rules (cpu_high, mem_high, disk_high, etc.)
-    /// These are returned as AlertRule struct for compatibility with evaluate().
+    /// List enabled builtin metric rules (`cpu_high`, `mem_high`, `disk_high`, etc.)
+    /// These are returned as `AlertRule` struct for compatibility with `evaluate()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn enabled_builtin_rules(&self) -> anyhow::Result<Vec<AlertRule>> {
         let rows: Vec<BuiltinRow> = sqlx::query_as(
             "SELECT id, name, enabled, COALESCE(threshold, 0) as threshold,
@@ -431,16 +488,24 @@ impl AlertsRepo {
 
     /// Current enabled state of a single builtin rule; if not exists (migration not run) defaults to true,
     /// so old databases (table not created yet) still send node offline alerts.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn builtin_rule_enabled(&self, id: &str) -> anyhow::Result<bool> {
         let row: Option<(i64,)> =
             sqlx::query_as("SELECT enabled FROM builtin_alert_rules WHERE id = ?")
                 .bind(id)
                 .fetch_optional(&self.pool)
                 .await?;
-        Ok(row.map(|(e,)| e != 0).unwrap_or(true))
+        Ok(row.map_or(true, |(e,)| e != 0))
     }
 
     /// Toggle builtin rule enabled state. Returns new value; if id doesn't exist returns None (UI should handle as 404).
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update or alert-resolution query fails.
     pub async fn set_builtin_rule_enabled(
         &self,
         id: &str,
@@ -452,7 +517,7 @@ impl AlertsRepo {
              SET enabled = ?, updated_at_unix_nano = ?
              WHERE id = ?",
         )
-        .bind(if enabled { 1 } else { 0 })
+        .bind(i32::from(enabled))
         .bind(now)
         .bind(id)
         .execute(&self.pool)
@@ -499,7 +564,11 @@ impl AlertsRepo {
         Ok(Some(enabled))
     }
 
-    /// Update builtin alert rule settings (threshold, duration_seconds, enabled).
+    /// Update builtin alert rule settings (threshold, `duration_seconds`, enabled).
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update or lookup query fails.
     pub async fn update_builtin_rule(
         &self,
         id: &str,
@@ -515,7 +584,7 @@ impl AlertsRepo {
         )
         .bind(threshold)
         .bind(duration_seconds)
-        .bind(if enabled { 1 } else { 0 })
+        .bind(i32::from(enabled))
         .bind(now)
         .bind(id)
         .execute(&self.pool)
@@ -536,6 +605,11 @@ impl AlertsRepo {
 
     // ---------- Evaluation state ----------
 
+    /// Load evaluation state for `(rule_id, node_id)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn get_state(&self, rule_id: i64, node_id: &str) -> anyhow::Result<EvalState> {
         let row: Option<(Option<i64>, i64, Option<i64>)> = sqlx::query_as(
             "SELECT breaching_since_unix_nano, firing, open_alert_id FROM alert_state WHERE rule_id = ? AND node_id = ?",
@@ -559,6 +633,11 @@ impl AlertsRepo {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Upsert evaluation state for `(rule_id, node_id)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn upsert_state(
         &self,
         rule_id: i64,
@@ -569,19 +648,19 @@ impl AlertsRepo {
         last_value: Option<f64>,
     ) -> anyhow::Result<()> {
         sqlx::query(
-            r#"INSERT INTO alert_state
+            r"INSERT INTO alert_state
                (rule_id, node_id, breaching_since_unix_nano, firing, open_alert_id, last_value)
                VALUES (?, ?, ?, ?, ?, ?)
                ON CONFLICT(rule_id, node_id) DO UPDATE SET
                  breaching_since_unix_nano = excluded.breaching_since_unix_nano,
                  firing = excluded.firing,
                  open_alert_id = excluded.open_alert_id,
-                 last_value = excluded.last_value"#,
+                 last_value = excluded.last_value",
         )
         .bind(rule_id)
         .bind(node_id)
         .bind(breaching_since)
-        .bind(if firing { 1 } else { 0 })
+        .bind(i32::from(firing))
         .bind(open_alert_id)
         .bind(last_value)
         .execute(&self.pool)
@@ -592,6 +671,11 @@ impl AlertsRepo {
     // ---------- Alert instances ----------
 
     #[allow(clippy::too_many_arguments)]
+    /// Insert a new alert row for a user-defined rule. Returns the alert id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the insert fails.
     pub async fn open_alert(
         &self,
         rule: &AlertRule,
@@ -602,10 +686,10 @@ impl AlertsRepo {
         now: i64,
     ) -> anyhow::Result<i64> {
         let r = sqlx::query(
-            r#"INSERT INTO alerts
+            r"INSERT INTO alerts
                (rule_id, rule_name, node_id, hostname, severity, metric, op, threshold, value,
                 message, started_at_unix_nano, source, source_ref)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'rule', '')"#,
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'rule', '')",
         )
         .bind(rule.id)
         .bind(&rule.name)
@@ -624,7 +708,11 @@ impl AlertsRepo {
     }
 
     /// Service probe state alert: source marked as probe, `source_ref = probe_id`.
-    /// rule_id uses 0 (probe alerts don't go through the metric rule table).
+    /// `rule_id` uses 0 (probe alerts don't go through the metric rule table).
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the insert fails.
     #[allow(clippy::too_many_arguments)]
     pub async fn open_probe_alert(
         &self,
@@ -637,10 +725,10 @@ impl AlertsRepo {
         now: i64,
     ) -> anyhow::Result<i64> {
         let r = sqlx::query(
-            r#"INSERT INTO alerts
+            r"INSERT INTO alerts
                (rule_id, rule_name, node_id, hostname, severity, metric, op, threshold, value,
                 message, started_at_unix_nano, source, source_ref)
-               VALUES (0, ?, ?, ?, ?, 'probe.state', 'eq', 0, 1, ?, ?, 'probe', ?)"#,
+               VALUES (0, ?, ?, ?, ?, 'probe.state', 'eq', 0, 1, ?, ?, 'probe', ?)",
         )
         .bind(rule_name)
         .bind(node_id)
@@ -655,6 +743,10 @@ impl AlertsRepo {
     }
 
     /// Close current unresolved alert for a probe, returns number of closed alerts
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update fails.
     pub async fn resolve_open_probe_alerts(&self, probe_id: &str, now: i64) -> anyhow::Result<u64> {
         let r = sqlx::query(
             "UPDATE alerts SET resolved_at_unix_nano = ?
@@ -669,11 +761,15 @@ impl AlertsRepo {
 
     // ---------- Platform self anomalies (source = platform) ----------
 
-    /// Open an alert for platform self anomalies (retention cleanup failures, etc.), node_id / hostname empty.
+    /// Open an alert for platform self anomalies (retention cleanup failures, etc.), `node_id` / hostname empty.
     ///
     /// These alerts should not stack on every failure: if the same `source_ref` already has an unresolved alert,
     /// just return it. See `docs/superpowers/specs/2026-09-19-product-structure-design.md` §8
     /// -- "retention task failure must appear in the todo list".
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn open_platform_alert(
         &self,
         source_ref: &str,
@@ -701,10 +797,10 @@ impl AlertsRepo {
         }
 
         let r = sqlx::query(
-            r#"INSERT INTO alerts
+            r"INSERT INTO alerts
                (rule_id, rule_name, node_id, hostname, severity, metric, op, threshold, value,
                 message, started_at_unix_nano, source, source_ref)
-               VALUES (0, ?, '', '', ?, 'platform.self', 'eq', 0, 1, ?, ?, 'platform', ?)"#,
+               VALUES (0, ?, '', '', ?, 'platform.self', 'eq', 0, 1, ?, ?, 'platform', ?)",
         )
         .bind(rule_name)
         .bind(severity)
@@ -717,6 +813,10 @@ impl AlertsRepo {
     }
 
     /// Close platform self anomalies of a given type, returns number closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update fails.
     pub async fn resolve_platform_alerts(&self, source_ref: &str, now: i64) -> anyhow::Result<u64> {
         let r = sqlx::query(
             "UPDATE alerts SET resolved_at_unix_nano = ?
@@ -731,8 +831,12 @@ impl AlertsRepo {
 
     // ---------- Certificate expiry alerts (source = cert) ----------
 
-    /// Open a new certificate expiry alert. rule_id uses 0 (not through metric rule table),
+    /// Open a new certificate expiry alert. `rule_id` uses 0 (not through metric rule table),
     /// `source_ref = {source_id}:{cert path}`, one alert per certificate.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the insert fails.
     #[allow(clippy::too_many_arguments)]
     pub async fn open_cert_alert(
         &self,
@@ -748,10 +852,10 @@ impl AlertsRepo {
         now: i64,
     ) -> anyhow::Result<i64> {
         let r = sqlx::query(
-            r#"INSERT INTO alerts
+            r"INSERT INTO alerts
                (rule_id, rule_name, node_id, hostname, severity, metric, op, threshold, value,
                 message, started_at_unix_nano, source, source_ref)
-               VALUES (0, ?, ?, ?, ?, 'cert.days_left', 'lte', ?, ?, ?, ?, 'cert', ?)"#,
+               VALUES (0, ?, ?, ?, ?, 'cert.days_left', 'lte', ?, ?, ?, ?, 'cert', ?)",
         )
         .bind(rule_name)
         .bind(node_id)
@@ -768,6 +872,10 @@ impl AlertsRepo {
     }
 
     /// Update severity and message of an existing alert (used when cert goes from "approaching" to "expired")
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update fails.
     pub async fn update_alert_message(
         &self,
         id: i64,
@@ -786,13 +894,17 @@ impl AlertsRepo {
     }
 
     /// Current unresolved cert alerts for a node (used during evaluation to check "has this already been opened")
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn open_cert_alerts_for_node(&self, node_id: &str) -> anyhow::Result<Vec<Alert>> {
-        let sql = r#"SELECT id, rule_id, rule_name, node_id, hostname, severity, metric, op, threshold,
+        let sql = r"SELECT id, rule_id, rule_name, node_id, hostname, severity, metric, op, threshold,
                             value, message, started_at_unix_nano, resolved_at_unix_nano,
                             silenced_until_unix_nano, source, source_ref
                      FROM alerts
                      WHERE source = 'cert' AND resolved_at_unix_nano IS NULL AND node_id = ?
-                     ORDER BY started_at_unix_nano DESC"#;
+                     ORDER BY started_at_unix_nano DESC";
         let rows: Vec<AlertRow> = sqlx::query_as(sql)
             .bind(node_id)
             .fetch_all(&self.pool)
@@ -802,6 +914,10 @@ impl AlertsRepo {
 
     /// Close unresolved cert alerts for a source (or a specific certificate under a source), returns count closed.
     /// `cert_path` empty means the entire source.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update fails.
     pub async fn resolve_open_cert_alerts(
         &self,
         source_id: &str,
@@ -816,10 +932,10 @@ impl AlertsRepo {
             "UPDATE alerts SET resolved_at_unix_nano = ?
              WHERE source = 'cert' AND instr(source_ref, ?) = 1 AND resolved_at_unix_nano IS NULL"
         };
-        let key = match cert_path {
-            Some(p) => format!("{source_id}:{p}"),
-            None => format!("{source_id}:"),
-        };
+        let key = cert_path.map_or_else(
+            || format!("{source_id}:"),
+            |p| format!("{source_id}:{p}"),
+        );
         let r = sqlx::query(sql)
             .bind(now)
             .bind(key)
@@ -832,6 +948,10 @@ impl AlertsRepo {
 
     /// Does this node currently have an unresolved offline alert?
     /// Uses `source_ref = node_id` as idempotency key -- only one offline alert allowed per node at a time.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn open_node_offline_alert_id(&self, node_id: &str) -> anyhow::Result<Option<i64>> {
         let id: Option<i64> = sqlx::query_scalar(
             "SELECT id FROM alerts
@@ -846,9 +966,13 @@ impl AlertsRepo {
 
     /// Open a "node offline" alert.
     ///
-    /// If the same node already has an unresolved alert, **reuse** it and refresh message / started_at_unix_nano,
+    /// If the same node already has an unresolved alert, **reuse** it and refresh message / `started_at_unix_nano`,
     /// don't stack new rows -- same pattern as `open_platform_alert`, avoid turning node flapping
     /// into noisy history. Returns the written/hit row id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update or insert query fails.
     #[allow(clippy::too_many_arguments)]
     pub async fn open_node_offline_alert(
         &self,
@@ -873,10 +997,10 @@ impl AlertsRepo {
             return Ok(existing);
         }
         let r = sqlx::query(
-            r#"INSERT INTO alerts
+            r"INSERT INTO alerts
                (rule_id, rule_name, node_id, hostname, severity, metric, op, threshold, value,
                 message, started_at_unix_nano, source, source_ref)
-               VALUES (0, 'Node Offline', ?, ?, ?, 'host.online', 'eq', 0, 0, ?, ?, 'node_offline', ?)"#,
+               VALUES (0, 'Node Offline', ?, ?, ?, 'host.online', 'eq', 0, 0, ?, ?, 'node_offline', ?)",
         )
         .bind(node_id)
         .bind(hostname)
@@ -891,6 +1015,10 @@ impl AlertsRepo {
 
     /// Close all unresolved offline alerts for a node (called when node resumes reporting).
     /// Returns number closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update fails.
     pub async fn resolve_node_offline_alerts(
         &self,
         node_id: &str,
@@ -911,6 +1039,10 @@ impl AlertsRepo {
 
     /// Does this container currently have an unresolved start/stop alert?
     /// Uses `source_ref = container_id` as idempotency key -- only one alert allowed per container at a time.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn open_container_alert_id(&self, container_id: &str) -> anyhow::Result<Option<i64>> {
         let id: Option<i64> = sqlx::query_scalar(
             "SELECT id FROM alerts
@@ -925,9 +1057,13 @@ impl AlertsRepo {
 
     /// Open a "container stopped" alert.
     ///
-    /// If the same container already has an unresolved alert, **reuse** it and refresh message / started_at_unix_nano,
+    /// If the same container already has an unresolved alert, **reuse** it and refresh message / `started_at_unix_nano`,
     /// don't stack new rows -- same idempotency pattern as `open_node_offline_alert`. When the container
     /// starts again, `resolve_open_container_alerts` closes it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update or insert query fails.
     #[allow(clippy::too_many_arguments)]
     pub async fn open_container_alert(
         &self,
@@ -954,10 +1090,10 @@ impl AlertsRepo {
             return Ok(existing);
         }
         let r = sqlx::query(
-            r#"INSERT INTO alerts
+            r"INSERT INTO alerts
                (rule_id, rule_name, node_id, hostname, severity, metric, op, threshold, value,
                 message, started_at_unix_nano, source, source_ref)
-               VALUES (0, ?, ?, ?, ?, 'container.state', 'eq', 1, 1, ?, ?, 'container', ?)"#,
+               VALUES (0, ?, ?, ?, ?, 'container.state', 'eq', 1, 1, ?, ?, 'container', ?)",
         )
         .bind(rule_name)
         .bind(node_id)
@@ -972,6 +1108,10 @@ impl AlertsRepo {
     }
 
     /// Close current unresolved start/stop alert for a container (called when container starts again), returns count closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update fails.
     pub async fn resolve_open_container_alerts(
         &self,
         container_id: &str,
@@ -988,6 +1128,11 @@ impl AlertsRepo {
         Ok(r.rows_affected())
     }
 
+    /// Resolve a single alert by id (no-op if already resolved).
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update fails.
     pub async fn resolve_alert(&self, alert_id: i64, now: i64) -> anyhow::Result<()> {
         sqlx::query("UPDATE alerts SET resolved_at_unix_nano = ? WHERE id = ? AND resolved_at_unix_nano IS NULL")
             .bind(now)
@@ -998,12 +1143,20 @@ impl AlertsRepo {
     }
 
     /// Unresolved alerts, newest first
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn open_alerts(&self) -> anyhow::Result<Vec<Alert>> {
         self.query_alerts("WHERE resolved_at_unix_nano IS NULL ORDER BY started_at_unix_nano DESC")
             .await
     }
 
     /// Resolved historical alerts
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn resolved_alerts(&self, limit: i64) -> anyhow::Result<Vec<Alert>> {
         self.query_alerts(&format!(
             "WHERE resolved_at_unix_nano IS NOT NULL ORDER BY resolved_at_unix_nano DESC LIMIT {}",
@@ -1014,15 +1167,20 @@ impl AlertsRepo {
 
     async fn query_alerts(&self, tail: &str) -> anyhow::Result<Vec<Alert>> {
         let sql = format!(
-            r#"SELECT id, rule_id, rule_name, node_id, hostname, severity, metric, op, threshold,
+            r"SELECT id, rule_id, rule_name, node_id, hostname, severity, metric, op, threshold,
                       value, message, started_at_unix_nano, resolved_at_unix_nano,
                       silenced_until_unix_nano, source, source_ref
-               FROM alerts {tail}"#
+               FROM alerts {tail}"
         );
         let rows: Vec<AlertRow> = sqlx::query_as(&sql).fetch_all(&self.pool).await?;
         Ok(rows.into_iter().map(alert_from_row).collect())
     }
 
+    /// Silence an alert until `until_unix_nano` (used for "I'm handling this").
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update fails.
     pub async fn silence_alert(&self, id: i64, until_unix_nano: i64) -> anyhow::Result<()> {
         sqlx::query("UPDATE alerts SET silenced_until_unix_nano = ? WHERE id = ?")
             .bind(until_unix_nano)
@@ -1034,10 +1192,15 @@ impl AlertsRepo {
 
     // ---------- Notify channels ----------
 
+    /// Insert a new notify channel. Returns the row id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the insert fails.
     pub async fn create_channel(&self, ch: &NewChannel<'_>, now: i64) -> anyhow::Result<i64> {
         let r = sqlx::query(
-            r#"INSERT INTO notify_channels (name, kind, url, secret, app_id, receive_id, receive_id_type, enabled, min_severity, created_at_unix_nano)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)"#,
+            r"INSERT INTO notify_channels (name, kind, url, secret, app_id, receive_id, receive_id_type, enabled, min_severity, created_at_unix_nano)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
         )
         .bind(ch.name)
         .bind(ch.kind)
@@ -1053,15 +1216,25 @@ impl AlertsRepo {
         Ok(r.last_insert_rowid())
     }
 
+    /// Enable / disable a notify channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update fails.
     pub async fn set_channel_enabled(&self, id: i64, enabled: bool) -> anyhow::Result<()> {
         sqlx::query("UPDATE notify_channels SET enabled = ? WHERE id = ?")
-            .bind(if enabled { 1 } else { 0 })
+            .bind(i32::from(enabled))
             .bind(id)
             .execute(&self.pool)
             .await?;
         Ok(())
     }
 
+    /// Delete a notify channel by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the delete fails.
     pub async fn delete_channel(&self, id: i64) -> anyhow::Result<()> {
         sqlx::query("DELETE FROM notify_channels WHERE id = ?")
             .bind(id)
@@ -1070,6 +1243,11 @@ impl AlertsRepo {
         Ok(())
     }
 
+    /// Look up a channel by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn find_channel(&self, id: i64) -> anyhow::Result<Option<NotifyChannel>> {
         let row: Option<ChannelRow> = sqlx::query_as(&format!(
             "SELECT {CHANNEL_COLS} FROM notify_channels WHERE id = ?"
@@ -1082,6 +1260,10 @@ impl AlertsRepo {
 
     /// Full-field channel update (kind cannot be changed: if type changes, required fields change;
     /// delete and recreate is clearer). Returns whether row existed (not exists = caller handles as 404).
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update fails.
     pub async fn update_channel(
         &self,
         id: i64,
@@ -1100,7 +1282,7 @@ impl AlertsRepo {
         .bind(ch.app_id)
         .bind(ch.receive_id)
         .bind(ch.receive_id_type)
-        .bind(if enabled { 1 } else { 0 })
+        .bind(i32::from(enabled))
         .bind(ch.min_severity)
         .bind(id)
         .execute(&self.pool)
@@ -1109,6 +1291,11 @@ impl AlertsRepo {
         Ok(n > 0)
     }
 
+    /// List all notify channels.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn list_channels(&self) -> anyhow::Result<Vec<NotifyChannel>> {
         let rows: Vec<ChannelRow> = sqlx::query_as(&format!(
             "SELECT {CHANNEL_COLS} FROM notify_channels ORDER BY id"
@@ -1121,7 +1308,7 @@ impl AlertsRepo {
 
 #[cfg(test)]
 mod node_offline_tests {
-    //! Offline alert tests. Shares alerts_repo fields (rule_id, source, source_ref),
+    //! Offline alert tests. Shares `alerts_repo` fields (`rule_id`, source, `source_ref`),
     //! but these are NOT metric rule alerts -- so `rule_id = 0`, borrowing from `rule_id NOT NULL`
     //! constraint a special value that is never referenced.
     //!
@@ -1193,11 +1380,11 @@ mod node_offline_tests {
             .await
             .unwrap();
         sqlx::query(
-            r#"INSERT INTO alerts
+            r"INSERT INTO alerts
                (rule_id, rule_name, node_id, hostname, severity, metric, op, threshold, value,
                 message, started_at_unix_nano, source, source_ref)
                VALUES (0, 'probe probe', 'n1', 'host-a', 'warning', 'probe.state', 'eq', 0, 1,
-                       'should not be touched', 100, 'probe', 'probe-1')"#,
+                       'should not be touched', 100, 'probe', 'probe-1')",
         )
         .execute(&pool)
         .await
@@ -1257,9 +1444,9 @@ mod container_builtin_channel_tests {
     //! Key invariants:
     //!   1. Migration 019 seeds all new builtin alerts, enabled by default;
     //!   2. Only one unresolved start/stop alert per container; resolve only closes its own;
-    //!   3. Disabling a builtin toggle closes its corresponding unresolved alerts (service_offline -> probe,
-    //!      container_stopped -> container);
-    //!   4. update_channel overwrites all fields, unknown id returns false.
+    //!   3. Disabling a builtin toggle closes its corresponding unresolved alerts (`service_offline` -> probe,
+    //!      `container_stopped` -> container);
+    //!   4. `update_channel` overwrites all fields, unknown id returns false.
 
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;
@@ -1455,7 +1642,7 @@ mod container_builtin_channel_tests {
             .await
             .unwrap();
 
-        let new = NewChannel {
+        let update = NewChannel {
             name: "b",
             kind: "webhook",
             url: "http://y",
@@ -1465,7 +1652,7 @@ mod container_builtin_channel_tests {
             receive_id_type: "chat_id",
             min_severity: "critical",
         };
-        assert!(repo.update_channel(id, &new, false).await.unwrap());
+        assert!(repo.update_channel(id, &update, false).await.unwrap());
 
         let got = repo.find_channel(id).await.unwrap().unwrap();
         assert_eq!(got.name, "b");
@@ -1474,7 +1661,7 @@ mod container_builtin_channel_tests {
         assert_eq!(got.min_severity, "critical");
         assert!(!got.enabled);
 
-        assert!(!repo.update_channel(9999, &new, true).await.unwrap());
+        assert!(!repo.update_channel(9999, &update, true).await.unwrap());
         assert!(repo.find_channel(9999).await.unwrap().is_none());
     }
 }

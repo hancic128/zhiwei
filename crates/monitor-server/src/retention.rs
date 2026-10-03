@@ -28,7 +28,7 @@ const INITIAL_LOOKBACK_HOURS: i64 = 24;
 pub const NANOS_PER_HOUR: i64 = 3_600_000_000_000;
 
 /// Floor down to the start of an hour.
-pub fn hour_start(ts_ns: i64) -> i64 {
+pub const fn hour_start(ts_ns: i64) -> i64 {
     ts_ns.div_euclid(NANOS_PER_HOUR) * NANOS_PER_HOUR
 }
 
@@ -56,33 +56,30 @@ pub fn aggregate(samples: &[(String, f64)]) -> Vec<MetricAgg> {
     let mut sums: Vec<f64> = Vec::new();
 
     for (metric, value) in samples {
-        match index.get(metric.as_str()) {
-            Some(&i) => {
-                let a: &mut MetricAgg = &mut out[i];
-                a.min = a.min.min(*value);
-                a.max = a.max.max(*value);
-                a.last = *value;
-                a.samples += 1;
-                sums[i] += *value;
-            }
-            None => {
-                index.insert(metric.as_str(), out.len());
-                sums.push(*value);
-                out.push(MetricAgg {
-                    metric: metric.clone(),
-                    avg: 0.0, // computed once at the end
-                    min: *value,
-                    max: *value,
-                    first: *value,
-                    last: *value,
-                    samples: 1,
-                });
-            }
+        if let Some(&i) = index.get(metric.as_str()) {
+            let a: &mut MetricAgg = &mut out[i];
+            a.min = a.min.min(*value);
+            a.max = a.max.max(*value);
+            a.last = *value;
+            a.samples += 1;
+            sums[i] += *value;
+        } else {
+            index.insert(metric.as_str(), out.len());
+            sums.push(*value);
+            out.push(MetricAgg {
+                metric: metric.clone(),
+                avg: 0.0, // computed once at the end
+                min: *value,
+                max: *value,
+                first: *value,
+                last: *value,
+                samples: 1,
+            });
         }
     }
 
     for (i, a) in out.iter_mut().enumerate() {
-        a.avg = sums[i] / a.samples as f64;
+        a.avg = sums[i] / f64::from(i32::try_from(a.samples).unwrap_or(1));
     }
     out
 }
@@ -178,15 +175,14 @@ pub async fn run_once(state: &AppState, now_ns: i64) -> anyhow::Result<Stats> {
     let now_hour = hour_start(now_ns);
     let watermark = telemetry.max_hourly_ts().await?;
     let aggregated_through = watermark
-        .map(|w| w + NANOS_PER_HOUR)
-        .unwrap_or(now_hour - INITIAL_LOOKBACK_HOURS * NANOS_PER_HOUR);
+        .map_or(now_hour - INITIAL_LOOKBACK_HOURS * NANOS_PER_HOUR, |w| w + NANOS_PER_HOUR);
 
     // Only process already-sealed hours (excluding the current hour),
     // max 48 at a time
     let start = aggregated_through.max(now_hour - MAX_HOURS_PER_RUN * NANOS_PER_HOUR);
     let end = now_hour;
 
-    let mut stats = Stats::default();
+    let mut totals = Stats::default();
     if start < end {
         let rows = telemetry.batches_in_window(start, end).await?;
         let mut buckets: BTreeMap<(String, i64), Vec<(String, f64)>> = BTreeMap::new();
@@ -204,9 +200,9 @@ pub async fn run_once(state: &AppState, now_ns: i64) -> anyhow::Result<Stats> {
                         &node_id, hour, &a.metric, a.avg, a.min, a.max, a.first, a.last, a.samples,
                     )
                     .await?;
-                stats.rows += 1;
+                totals.rows += 1;
             }
-            stats.buckets += 1;
+            totals.buckets += 1;
         }
     }
 
@@ -214,11 +210,11 @@ pub async fn run_once(state: &AppState, now_ns: i64) -> anyhow::Result<Stats> {
     let hourly_cutoff = now_ns - HOURLY_RETENTION_DAYS * NANOS_PER_DAY;
     // Deletion line doesn't cross "how far aggregation got" — otherwise raw
     // data that hasn't been aggregated yet would be discarded.
-    stats.raw_deleted = telemetry
+    totals.raw_deleted = telemetry
         .delete_raw_before(raw_cutoff.min(aggregated_through))
         .await?;
-    stats.hourly_deleted = telemetry.delete_hourly_before(hourly_cutoff).await?;
-    Ok(stats)
+    totals.hourly_deleted = telemetry.delete_hourly_before(hourly_cutoff).await?;
+    Ok(totals)
 }
 
 /// Background loop. On failure, open a platform alert (which shows up in the
@@ -230,13 +226,13 @@ pub fn spawn(state: AppState) {
         loop {
             let now_ns = zhiwei_common::Timestamp::now().unix_nano();
             match run_once(&state, now_ns).await {
-                Ok(stats) => {
-                    if stats.rows > 0 || stats.raw_deleted > 0 || stats.hourly_deleted > 0 {
+                Ok(totals) => {
+                    if totals.rows > 0 || totals.raw_deleted > 0 || totals.hourly_deleted > 0 {
                         info!(
-                            buckets = stats.buckets,
-                            rows = stats.rows,
-                            raw_deleted = stats.raw_deleted,
-                            hourly_deleted = stats.hourly_deleted,
+                            buckets = totals.buckets,
+                            rows = totals.rows,
+                            raw_deleted = totals.raw_deleted,
+                            hourly_deleted = totals.hourly_deleted,
                             "Retention done"
                         );
                     }
@@ -272,6 +268,11 @@ pub fn spawn(state: AppState) {
 
 #[cfg(test)]
 mod tests {
+    // Tests assert exact computed averages (e.g. `(10+20+30)/3 == 20.0`,
+    // counter deltas `4_600 - 1_000 == 3_600`). Floating-point equality is
+    // intentional — values are integer-valued by construction.
+    #![allow(clippy::float_cmp)]
+
     use super::*;
 
     #[test]
@@ -359,7 +360,7 @@ mod tests {
             metrics: vec![Metric {
                 name: "host.cpu.usage".into(),
                 value: 12.0,
-                labels: Default::default(),
+                labels: std::collections::HashMap::default(),
             }],
             network: vec![
                 NetworkInterface {

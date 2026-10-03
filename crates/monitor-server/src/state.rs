@@ -14,7 +14,7 @@ pub struct AppState {
     pub ca_cert_pem: String,
     pub bootstrap_tokens: Arc<BootstrapTokens>,
     /// Browser-facing credential for the read API (nodes use request signing, not this).
-    /// Console credentials. Can be changed (settings page "change password"), so in RwLock.
+    /// Console credentials. Can be changed (settings page "change password"), so in `RwLock`.
     pub admin_token: Arc<std::sync::RwLock<String>>,
     /// ops control plane public key (base64). Distributed to nodes during enroll for TOFU;
     /// ops private key only exists within ops-server process, monitor doesn't hold it,
@@ -56,7 +56,7 @@ pub struct AppState {
     ///
     /// Commands are always forwarded by this process to ops for signing, so persistence timing
     /// is observable within the process; the long-poll still has periodic DB polling as
-    /// fallback for edge cases like multi-instance (see routes::collect_pending).
+    /// fallback for edge cases like multi-instance (see `routes::collect_pending`).
     pub command_signal: tokio::sync::watch::Sender<u64>,
     /// Last time each node pulled commands -- sole evidence of "is the command channel still alive?" See
     /// [`crate::control_channel`].
@@ -98,7 +98,7 @@ impl HelpContent {
         let mut default_locale = String::new();
         for (i, (locale, body)) in entries.into_iter().enumerate() {
             if i == 0 {
-                default_locale = locale.clone();
+                default_locale.clone_from(&locale);
             }
             by_locale.insert(locale, body);
         }
@@ -111,23 +111,16 @@ impl HelpContent {
     /// to the default; an entirely empty map yields empty body so the UI
     /// can render its "not loaded" placeholder.
     pub fn snapshot_for(&self, locale: Option<&str>) -> HelpSnapshot {
-        let g = self.0.read().unwrap_or_else(|e| e.into_inner());
+        let g = self.0.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         let resolved = locale
             .and_then(|l| g.by_locale.get_key_value(l))
-            .map(|(l, _)| l.clone())
-            .unwrap_or_else(|| {
-                if g.by_locale.contains_key(&g.default_locale) {
-                    g.default_locale.clone()
-                } else {
-                    // empty map — synthesize locale string so UI still knows
-                    g.default_locale.clone()
-                }
-            });
+            .map_or_else(|| g.default_locale.clone(), |(l, _)| l.clone());
         let body = g
             .by_locale
             .get(&resolved)
             .cloned()
             .unwrap_or_default();
+        drop(g);
         HelpSnapshot {
             locale: resolved,
             body,

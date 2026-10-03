@@ -18,7 +18,7 @@ use std::sync::Arc;
 use crate::docker;
 use crate::NodeState;
 
-/// ACTION_FETCH_LOGS parameters (JSON, matches proto's FetchLogsParams fields)
+/// `ACTION_FETCH_LOGS` parameters (JSON, matches proto's `FetchLogsParams` fields)
 #[derive(Debug, serde::Deserialize)]
 struct FetchLogsArgs {
     #[serde(default)]
@@ -33,7 +33,7 @@ struct FetchLogsArgs {
     timestamps: bool,
 }
 
-/// ACTION_KILL_PROCESS parameters (JSON, matches proto's KillProcessParams fields)
+/// `ACTION_KILL_PROCESS` parameters (JSON, matches proto's `KillProcessParams` fields)
 #[derive(Debug, serde::Deserialize)]
 struct KillProcessArgs {
     #[serde(default)]
@@ -42,17 +42,17 @@ struct KillProcessArgs {
     signal: String,
 }
 
-/// ACTION_CONTAINER_* parameters (JSON, matches proto's ContainerActionParams)
+/// `ACTION_CONTAINER`_* parameters (JSON, matches proto's `ContainerActionParams`)
 #[derive(Debug, serde::Deserialize)]
 struct ContainerActionArgs {
     #[serde(default)]
     container: String,
-    /// Only for container_remove: whether to force-delete running containers. Default false.
+    /// Only for `container_remove`: whether to force-delete running containers. Default false.
     #[serde(default)]
     force: bool,
 }
 
-/// ACTION_SCAN_CERTS parameters (JSON, matches proto's ScanCertsParams)
+/// `ACTION_SCAN_CERTS` parameters (JSON, matches proto's `ScanCertsParams`)
 #[derive(Debug, serde::Deserialize)]
 struct ScanCertsArgs {
     #[serde(default)]
@@ -70,7 +70,7 @@ const POLL_WAIT_SECS: u64 = 25;
 const POLL_INTERVAL: u64 = 10;
 
 /// Allowlist of executable actions. Node capabilities (P2-3 later) will further constrain on this base.
-fn action_allowed(action: Action) -> bool {
+const fn action_allowed(action: Action) -> bool {
     matches!(
         action,
         Action::Noop
@@ -139,39 +139,72 @@ async fn poll_once(monitor: &str, state: &NodeState, node_id: &str) -> anyhow::R
 
     let mut got = false;
     for b64 in list.iter().filter_map(|x| x.as_str()) {
-        let bytes = base64::engine::general_purpose::STANDARD.decode(b64)?;
-        let cmd = match Command::decode(&bytes[..]) {
-            Ok(c) => c,
-            Err(e) => {
-                warn!(error = %e, "Failed to decode command");
-                continue;
-            }
-        };
-        got = true;
-
-        match verify(&cmd, state) {
-            Ok(()) => {
-                info!(command_id = %cmd.id, action = ?cmd.action, "Executing command");
-                let result = execute(&cmd, state).await;
-                if let Err(e) = submit_result(monitor, state, node_id, &cmd.id, result).await {
-                    warn!(error = %e, "Failed to submit receipt");
-                }
-            }
-            Err(e) => {
-                // Signature verification failure must leave a trace: may indicate monitor is compromised forging commands
-                warn!(command_id = %cmd.id, error = %e, "Command signature verification failed, rejected");
-                let _ = submit_result(
-                    monitor,
-                    state,
-                    node_id,
-                    &cmd.id,
-                    Err(anyhow::anyhow!("signature verification failed: {e}")),
-                )
-                .await;
-            }
-        }
+        got |= handle_command(b64, monitor, state, node_id).await?;
     }
     Ok(got)
+}
+
+/// Decode one command, verify it, run it and submit the receipt.
+///
+/// Returns `false` when the payload could not be decoded (bad base64), so it
+/// does not count as "fetched a command"; a decode failure on a later entry
+/// still propagates as an error.
+async fn handle_command(
+    b64: &str,
+    monitor: &str,
+    state: &NodeState,
+    node_id: &str,
+) -> anyhow::Result<bool> {
+    let Some(cmd) = decode_command(b64)? else {
+        return Ok(false);
+    };
+
+    match verify(&cmd, state) {
+        Ok(()) => accept_command(&cmd, monitor, state, node_id).await,
+        Err(e) => reject_command(&cmd, monitor, state, node_id, e).await,
+    }
+    Ok(true)
+}
+
+/// Decode a base64 command payload; `Ok(None)` = decode failure for this entry.
+fn decode_command(b64: &str) -> anyhow::Result<Option<Command>> {
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64)?;
+    match Command::decode(&bytes[..]) {
+        Ok(c) => Ok(Some(c)),
+        Err(e) => {
+            warn!(error = %e, "Failed to decode command");
+            Ok(None)
+        }
+    }
+}
+
+/// Verified command: execute it, then submit the signed receipt.
+async fn accept_command(cmd: &Command, monitor: &str, state: &NodeState, node_id: &str) {
+    info!(command_id = %cmd.id, action = ?cmd.action, "Executing command");
+    let result = execute(cmd, state).await;
+    if let Err(e) = submit_result(monitor, state, node_id, &cmd.id, result).await {
+        warn!(error = %e, "Failed to submit receipt");
+    }
+}
+
+/// Signature verification failure must leave a trace: may indicate monitor is
+/// compromised and forging commands.
+async fn reject_command(
+    cmd: &Command,
+    monitor: &str,
+    state: &NodeState,
+    node_id: &str,
+    e: anyhow::Error,
+) {
+    warn!(command_id = %cmd.id, error = %e, "Command signature verification failed, rejected");
+    let _ = submit_result(
+        monitor,
+        state,
+        node_id,
+        &cmd.id,
+        Err(anyhow::anyhow!("signature verification failed: {e}")),
+    )
+    .await;
 }
 
 /// Verify ops signature + TTL. Nonce deduplication covered by TTL (TTL ≤ 60s).
@@ -213,66 +246,9 @@ async fn execute(cmd: &Command, state: &NodeState) -> anyhow::Result<Vec<u8>> {
     match action {
         Action::Noop => Ok(format!("noop ok at {}", Timestamp::now().unix_nano()).into_bytes()),
 
-        Action::FetchLogs => {
-            let p: FetchLogsArgs =
-                serde_json::from_str(&cmd.params_json).context("failed to parse fetch_logs params")?;
-            let tail = if p.tail == 0 { 200 } else { p.tail };
+        Action::FetchLogs => execute_fetch_logs(cmd).await,
 
-            let text = match p.source.as_str() {
-                "container" => {
-                    if p.container.is_empty() {
-                        bail!("source=container requires container");
-                    }
-                    docker::container_logs(&p.container, tail, p.timestamps).await?
-                }
-                "file" => {
-                    if p.path.is_empty() {
-                        bail!("source=file requires path");
-                    }
-                    docker::read_file_tail(&p.path, tail)?
-                }
-                other => bail!("unknown source: {other}"),
-            };
-            Ok(text.into_bytes())
-        }
-
-        Action::KillProcess => {
-            let p: KillProcessArgs =
-                serde_json::from_str(&cmd.params_json).context("failed to parse kill_process params")?;
-            // pid 1 is init, killing it cuts off the whole machine; 0 / negative also rejected
-            if p.pid <= 1 {
-                bail!("invalid pid (must be greater than 1)");
-            }
-            let flag = match p.signal.as_str() {
-                "" | "term" => "-TERM",
-                "kill" => "-KILL",
-                other => bail!("unknown signal {other} (only term / kill supported)"),
-            };
-            let out = tokio::process::Command::new("kill")
-                .arg(flag)
-                .arg(p.pid.to_string())
-                .output()
-                .await
-                .context("kill failed")?;
-            if !out.status.success() {
-                bail!(
-                    "kill {flag} {} failed: {}",
-                    p.pid,
-                    String::from_utf8_lossy(&out.stderr).trim()
-                );
-            }
-            Ok(format!(
-                "sent {}{} to pid {}",
-                p.pid,
-                flag,
-                if flag == "-TERM" {
-                    " (graceful)"
-                } else {
-                    " (force)"
-                }
-            )
-            .into_bytes())
-        }
+        Action::KillProcess => execute_kill_process(cmd).await,
 
         // Restart/shutdown always use `+1` (1 minute later) instead of `now`:
         // ① command can return normally, receipt and audit are persisted before power cut; ② one-minute cancellation window.
@@ -280,33 +256,12 @@ async fn execute(cmd: &Command, state: &NodeState) -> anyhow::Result<Vec<u8>> {
         Action::ShutdownHost => run_shutdown(&["-h", "+1"]).await,
 
         Action::ContainerStart | Action::ContainerStop | Action::ContainerRestart => {
-            let p: ContainerActionArgs =
-                serde_json::from_str(&cmd.params_json).context("failed to parse container params")?;
-            let name = p.container.trim();
-            if name.is_empty() {
-                bail!("missing container (name or ID)");
-            }
-            let op = match action {
-                Action::ContainerStart => "start",
-                Action::ContainerStop => "stop",
-                _ => "restart",
-            };
-            let out = docker::container_action(name, op).await?;
-            Ok(out.into_bytes())
+            execute_container_lifecycle(cmd, action).await
         }
 
         // Remove container: force not passed by default, running containers are rejected by docker with
         // "stop it first" message -- not making the "force delete for you" decision for the user
-        Action::ContainerRemove => {
-            let p: ContainerActionArgs =
-                serde_json::from_str(&cmd.params_json).context("failed to parse container params")?;
-            let name = p.container.trim();
-            if name.is_empty() {
-                bail!("missing container (name or ID)");
-            }
-            let out = docker::container_remove(name, p.force).await?;
-            Ok(out.into_bytes())
-        }
+        Action::ContainerRemove => execute_container_remove(cmd).await,
 
         // Console clicked "rescan snapshot now": set flag, main loop sends inventory on next iteration,
         // don't wait for 5-minute cycle (needed after container start/stop for container list)
@@ -314,42 +269,131 @@ async fn execute(cmd: &Command, state: &NodeState) -> anyhow::Result<Vec<u8>> {
             state
                 .inventory_due
                 .store(true, std::sync::atomic::Ordering::Relaxed);
-            Ok("snapshot rescan triggered".as_bytes().to_vec())
+            Ok(b"snapshot rescan triggered".to_vec())
         }
 
         // Console "test" button: expand user's path with same rules, actually scan once,
         // results returned as JSON receipt, UI directly lists matched certs or failure reasons
-        Action::ScanCerts => {
-            let p: ScanCertsArgs =
-                serde_json::from_str(&cmd.params_json).context("failed to parse scan_certs params")?;
-            let path =
-                zhiwei_common::certpath::normalize(&p.path).map_err(|e| anyhow::anyhow!(e))?;
-            let (patterns, entries) = crate::certs::scan_path(&path);
-            let certs: Vec<serde_json::Value> = entries
-                .iter()
-                .map(|e| {
-                    serde_json::json!({
-                        "path": e.info.path,
-                        "subject": e.info.subject,
-                        "issuer": e.info.issuer,
-                        "domains": e.info.domains,
-                        "not_after_unix_nano": e.info.not_after_unix_nano,
-                        "parse_error": e.info.parse_error,
-                        "error": e.error,
-                    })
-                })
-                .collect();
-            let out = serde_json::json!({
-                "path": path,
-                "patterns": patterns,
-                "matched": certs.len(),
-                "certs": certs,
-            });
-            Ok(out.to_string().into_bytes())
-        }
+        Action::ScanCerts => execute_scan_certs(cmd),
 
-        _ => bail!("unimplemented action"),
+        Action::Unspecified => bail!("unimplemented action"),
     }
+}
+
+async fn execute_fetch_logs(cmd: &Command) -> anyhow::Result<Vec<u8>> {
+    let p: FetchLogsArgs =
+        serde_json::from_str(&cmd.params_json).context("failed to parse fetch_logs params")?;
+    let tail = if p.tail == 0 { 200 } else { p.tail };
+
+    let text = match p.source.as_str() {
+        "container" => {
+            if p.container.is_empty() {
+                bail!("source=container requires container");
+            }
+            docker::container_logs(&p.container, tail, p.timestamps).await?
+        }
+        "file" => {
+            if p.path.is_empty() {
+                bail!("source=file requires path");
+            }
+            docker::read_file_tail(&p.path, tail)?
+        }
+        other => bail!("unknown source: {other}"),
+    };
+    Ok(text.into_bytes())
+}
+
+async fn execute_kill_process(cmd: &Command) -> anyhow::Result<Vec<u8>> {
+    let p: KillProcessArgs =
+        serde_json::from_str(&cmd.params_json).context("failed to parse kill_process params")?;
+    // pid 1 is init, killing it cuts off the whole machine; 0 / negative also rejected
+    if p.pid <= 1 {
+        bail!("invalid pid (must be greater than 1)");
+    }
+    let flag = match p.signal.as_str() {
+        "" | "term" => "-TERM",
+        "kill" => "-KILL",
+        other => bail!("unknown signal {other} (only term / kill supported)"),
+    };
+    let out = tokio::process::Command::new("kill")
+        .arg(flag)
+        .arg(p.pid.to_string())
+        .output()
+        .await
+        .context("kill failed")?;
+    if !out.status.success() {
+        bail!(
+            "kill {flag} {} failed: {}",
+            p.pid,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(format!(
+        "sent {}{} to pid {}",
+        p.pid,
+        flag,
+        if flag == "-TERM" {
+            " (graceful)"
+        } else {
+            " (force)"
+        }
+    )
+    .into_bytes())
+}
+
+async fn execute_container_lifecycle(cmd: &Command, action: Action) -> anyhow::Result<Vec<u8>> {
+    let p: ContainerActionArgs =
+        serde_json::from_str(&cmd.params_json).context("failed to parse container params")?;
+    let name = p.container.trim();
+    if name.is_empty() {
+        bail!("missing container (name or ID)");
+    }
+    let op = match action {
+        Action::ContainerStart => "start",
+        Action::ContainerStop => "stop",
+        _ => "restart",
+    };
+    let out = docker::container_action(name, op).await?;
+    Ok(out.into_bytes())
+}
+
+async fn execute_container_remove(cmd: &Command) -> anyhow::Result<Vec<u8>> {
+    let p: ContainerActionArgs =
+        serde_json::from_str(&cmd.params_json).context("failed to parse container params")?;
+    let name = p.container.trim();
+    if name.is_empty() {
+        bail!("missing container (name or ID)");
+    }
+    let out = docker::container_remove(name, p.force).await?;
+    Ok(out.into_bytes())
+}
+
+fn execute_scan_certs(cmd: &Command) -> anyhow::Result<Vec<u8>> {
+    let p: ScanCertsArgs =
+        serde_json::from_str(&cmd.params_json).context("failed to parse scan_certs params")?;
+    let path = zhiwei_common::certpath::normalize(&p.path).map_err(|e| anyhow::anyhow!(e))?;
+    let (patterns, entries) = crate::certs::scan_path(&path);
+    let certs: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "path": e.info.path,
+                "subject": e.info.subject,
+                "issuer": e.info.issuer,
+                "domains": e.info.domains,
+                "not_after_unix_nano": e.info.not_after_unix_nano,
+                "parse_error": e.info.parse_error,
+                "error": e.error,
+            })
+        })
+        .collect();
+    let out = serde_json::json!({
+        "path": path,
+        "patterns": patterns,
+        "matched": certs.len(),
+        "certs": certs,
+    });
+    Ok(out.to_string().into_bytes())
 }
 
 /// Shutdown/reboot: prefer `shutdown`, fall back to `systemctl` (may not exist in containers or minimal systems).

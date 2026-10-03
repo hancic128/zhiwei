@@ -76,11 +76,11 @@ impl Ca {
         })
     }
 
-    pub fn cert(&self) -> &Certificate {
+    pub const fn cert(&self) -> &Certificate {
         &self.cert
     }
 
-    pub fn key(&self) -> &KeyPair {
+    pub const fn key(&self) -> &KeyPair {
         &self.key
     }
 }

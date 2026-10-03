@@ -13,14 +13,16 @@ use axum::{
     Json,
 };
 use serde::Serialize;
+use zhiwei_storage::alerts_repo::Alert;
+use zhiwei_storage::node_repo::NodeRecord;
 
 use crate::routes::{err, read_auth_ok};
 use crate::state::AppState;
 
 /// How long a node can go silent before considered offline — shares the same
-/// constant with the background liveness check (see alerts::NODE_OFFLINE_AFTER_MS),
+/// constant with the background liveness check (see `alerts::NODE_OFFLINE_AFTER_MS`),
 /// avoiding "console shows online / background already alerts" inconsistency.
-pub(crate) use crate::alerts::NODE_OFFLINE_AFTER_MS;
+pub use crate::alerts::NODE_OFFLINE_AFTER_MS;
 
 /// Number of recovered-history entries kept — history is for trust, doesn't
 /// need to be long
@@ -89,7 +91,7 @@ pub fn hint_key(source: &str, metric: &str) -> &'static str {
 /// Silence = "don't tell me about it for this period". Alerts within the
 /// silence window don't enter the todo; they auto-return when the window ends.
 /// Boundary: `until == now` is already expired, should return to the todo.
-pub fn is_silenced(silenced_until_unix_nano: Option<i64>, now_ns: i64) -> bool {
+pub const fn is_silenced(silenced_until_unix_nano: Option<i64>, now_ns: i64) -> bool {
     matches!(silenced_until_unix_nano, Some(until) if until > now_ns)
 }
 
@@ -99,7 +101,7 @@ pub fn is_silenced(silenced_until_unix_nano: Option<i64>, now_ns: i64) -> bool {
 #[derive(Debug, Serialize)]
 pub struct TodoItem {
     pub id: String,
-    /// rule | probe | cert | node_offline | command_channel
+    /// rule | probe | cert | `node_offline` | `command_channel`
     pub source: String,
     pub severity: String,
     pub title: String,
@@ -138,12 +140,7 @@ pub async fn todo_handler(State(state): State<AppState>, headers: HeaderMap) -> 
     }
 
     let now_ns = zhiwei_common::Timestamp::now().unix_nano();
-    let now_ms = now_ns / 1_000_000;
-    let is_online = |last_seen: Option<i64>| {
-        last_seen
-            .map(|ts| now_ms - ts / 1_000_000 < NODE_OFFLINE_AFTER_MS)
-            .unwrap_or(false)
-    };
+    let now_epoch_ms = now_ns / 1_000_000;
 
     let nodes = match state.storage.nodes().list_all().await {
         Ok(n) => n,
@@ -155,56 +152,14 @@ pub async fn todo_handler(State(state): State<AppState>, headers: HeaderMap) -> 
         }
     };
 
-    // Node names in the todo always use the "display name" (alias if set) —
-    // hostnames tend to look like auto-generated cloud names and you can't tell
-    // which machine it is; aliases are user-chosen names. When a node is deleted,
-    // fall back to the hostname recorded when the alert was stored.
-    let display_of = |id: &str, fallback: &str| -> String {
-        nodes
-            .iter()
-            .find(|n| n.id == id)
-            .map(|n| crate::routes::node_display_name(&n.alias, &n.hostname))
-            .unwrap_or_else(|| fallback.to_string())
-    };
-
     let (services_healthy, services_total) = state
         .storage
         .probes()
         .probe_counts()
         .await
         .unwrap_or((0, 0));
-
-    // Certificates and containers come from each node's latest snapshot
-    let mut certs_total = 0i64;
-    let mut containers_total = 0i64;
-    let mut containers_failed = 0i64;
-    for n in &nodes {
-        let id = zhiwei_common::NodeId::from_string(n.id.clone());
-        let row = match state.storage.inventory().find(&id).await {
-            Ok(Some(r)) => r,
-            _ => continue,
-        };
-        let certs: Vec<serde_json::Value> =
-            serde_json::from_str(&row.certificates_json).unwrap_or_default();
-        certs_total += certs
-            .iter()
-            .filter(|c| {
-                !c.get("parse_error")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-            })
-            .count() as i64;
-        let containers: Vec<serde_json::Value> =
-            serde_json::from_str(&row.containers_json).unwrap_or_default();
-        for c in &containers {
-            containers_total += 1;
-            let st = c.get("state").and_then(|v| v.as_str()).unwrap_or("");
-            let status = c.get("status").and_then(|v| v.as_str()).unwrap_or("");
-            if crate::probes_api::container_is_failed(st, status) {
-                containers_failed += 1;
-            }
-        }
-    }
+    let (certs_total, containers_total, containers_failed) =
+        inventory_counters(&state, &nodes).await;
 
     let open_alerts = state
         .storage
@@ -219,116 +174,24 @@ pub async fn todo_handler(State(state): State<AppState>, headers: HeaderMap) -> 
         .await
         .unwrap_or_default();
 
-    let mut now_items: Vec<TodoItem> = Vec::new();
-    let mut watch_items: Vec<TodoItem> = Vec::new();
-    let mut silenced = 0i64;
-
-    for a in &open_alerts {
-        // Within the silence window → don't enter the todo — silence means
-        // "don't tell me about it for this period"
-        if is_silenced(a.silenced_until_unix_nano, now_ns) {
-            silenced += 1;
-            continue;
-        }
-        let item = TodoItem {
-            id: format!("alert-{}", a.id),
-            source: a.source.clone(),
-            severity: a.severity.clone(),
-            title: a.rule_name.clone(),
-            detail: a.message.clone(),
-            hint_key: hint_key(&a.source, &a.metric),
-            node_id: a.node_id.clone(),
-            hostname: display_of(&a.node_id, &a.hostname),
-            since_unix_nano: a.started_at_unix_nano,
-            resolved_at_unix_nano: None,
-            link: format!("/nodes/{}", a.node_id),
-        };
-        match bucket_of(&a.source, &a.severity) {
-            Bucket::Now => now_items.push(item),
-            _ => watch_items.push(item),
-        }
-    }
-
-    // Node-offline: comes from real alerts in the alerts table (see
-    // `alerts::on_node_liveness_change`). We do not synthesize a duplicate here —
-    // real alerts flow through the notify channel, can be silenced by ID, and
-    // show up under "recovered".
-
-    // Command channel: node appears online but never polls for commands — start
-    // / stop / logs buttons in the console do nothing while the Nodes page looks
-    // normal. This is the hardest class of failure to spot in this project
-    // (an old node without the ops pub key never sends a single request; the
-    // log only has one warn line).
-    // The "node offline" case is not raised here: it's already raised above;
-    // reporting the same root cause twice would be noise.
-    for n in &nodes {
-        let last_poll_ms = state.control_polls.last(&n.id);
-        let channel = crate::control_channel::channel_state(
-            n.last_seen_unix_nano.map(|ns| ns / 1_000_000),
-            last_poll_ms,
-            now_ms - state.started_at_ms,
-            now_ms,
-        );
-        if channel != crate::control_channel::Channel::Down {
-            continue;
-        }
-        // "How long has it been broken": the last successful poll is the last
-        // time the channel worked. Nodes that never polled (enrolled before
-        // ops pub key distribution) use the enrollment timestamp — for them
-        // the channel has never worked.
-        let since_ms = last_poll_ms.unwrap_or(n.enrolled_at_unix_nano / 1_000_000);
-        now_items.push(TodoItem {
-            id: format!("command-channel-{}", n.id),
-            source: "command_channel".into(),
-            severity: "critical".into(),
-            title: display_of(&n.id, &n.hostname),
-            // The wording is composed by the frontend via hint_key, so both
-            // en-US and zh-CN are covered.
-            detail: String::new(),
-            hint_key: "commandChannel",
-            node_id: n.id.clone(),
-            hostname: display_of(&n.id, &n.hostname),
-            since_unix_nano: since_ms * 1_000_000,
-            resolved_at_unix_nano: None,
-            link: format!("/nodes/{}", n.id),
-        });
-    }
+    let (mut now_items, mut watch_items, silenced) =
+        bucket_open_alerts(&open_alerts, &nodes, now_ns);
+    now_items.extend(command_channel_items(&state, &nodes, now_epoch_ms));
 
     // Urgent first; within the same bucket, longer-standing items come first
-    let sort_items = |items: &mut Vec<TodoItem>| {
-        items.sort_by(|a, b| {
-            let rank = |s: &str| if s == "critical" { 0 } else { 1 };
-            rank(&a.severity)
-                .cmp(&rank(&b.severity))
-                .then(a.since_unix_nano.cmp(&b.since_unix_nano))
-        });
-    };
     sort_items(&mut now_items);
     sort_items(&mut watch_items);
 
-    let recovered: Vec<TodoItem> = resolved_alerts
-        .iter()
-        .map(|a| TodoItem {
-            id: format!("alert-{}", a.id),
-            source: a.source.clone(),
-            severity: a.severity.clone(),
-            title: a.rule_name.clone(),
-            detail: a.message.clone(),
-            hint_key: hint_key(&a.source, &a.metric),
-            node_id: a.node_id.clone(),
-            hostname: display_of(&a.node_id, &a.hostname),
-            since_unix_nano: a.started_at_unix_nano,
-            resolved_at_unix_nano: a.resolved_at_unix_nano,
-            link: format!("/nodes/{}", a.node_id),
-        })
-        .collect();
+    let recovered = recovered_items(&resolved_alerts, &nodes);
 
     let summary = Summary {
         nodes_online: nodes
             .iter()
-            .filter(|n| is_online(n.last_seen_unix_nano))
-            .count() as i64,
-        nodes_total: nodes.len() as i64,
+            .filter(|n| is_online(n.last_seen_unix_nano, now_epoch_ms))
+            .count()
+            .try_into()
+            .unwrap_or(i64::MAX),
+        nodes_total: i64::try_from(nodes.len()).unwrap_or(i64::MAX),
         probes_healthy: services_healthy,
         probes_total: services_total,
         certs_total,
@@ -350,6 +213,174 @@ pub async fn todo_handler(State(state): State<AppState>, headers: HeaderMap) -> 
         "recovered": recovered,
     }))
     .into_response()
+}
+
+/// Whether a node last seen at `last_seen_unix_nano` is considered online at `now_epoch_ms`.
+fn is_online(last_seen_unix_nano: Option<i64>, now_epoch_ms: i64) -> bool {
+    last_seen_unix_nano
+        .is_some_and(|ts| now_epoch_ms - ts / 1_000_000 < NODE_OFFLINE_AFTER_MS)
+}
+
+/// Node names in the todo always use the "display name" (alias if set) —
+/// hostnames tend to look like auto-generated cloud names and you can't tell
+/// which machine it is; aliases are user-chosen names. When a node is deleted,
+/// fall back to the hostname recorded when the alert was stored.
+fn node_display(nodes: &[NodeRecord], id: &str, fallback: &str) -> String {
+    nodes.iter().find(|n| n.id == id).map_or_else(
+        || fallback.to_string(),
+        |n| crate::routes::node_display_name(&n.alias, &n.hostname),
+    )
+}
+
+/// Map a stored alert row into a todo item. `resolved` selects whether the
+/// resolved timestamp is carried (open alerts have none).
+fn alert_item(a: &Alert, nodes: &[NodeRecord], resolved: bool) -> TodoItem {
+    TodoItem {
+        id: format!("alert-{}", a.id),
+        source: a.source.clone(),
+        severity: a.severity.clone(),
+        title: a.rule_name.clone(),
+        detail: a.message.clone(),
+        hint_key: hint_key(&a.source, &a.metric),
+        node_id: a.node_id.clone(),
+        hostname: node_display(nodes, &a.node_id, &a.hostname),
+        since_unix_nano: a.started_at_unix_nano,
+        resolved_at_unix_nano: if resolved {
+            a.resolved_at_unix_nano
+        } else {
+            None
+        },
+        link: format!("/nodes/{}", a.node_id),
+    }
+}
+
+/// Split open alerts into `now` / `watch` buckets, skipping silenced ones.
+/// Returns the two item lists plus the silenced count.
+fn bucket_open_alerts(
+    open_alerts: &[Alert],
+    nodes: &[NodeRecord],
+    now_ns: i64,
+) -> (Vec<TodoItem>, Vec<TodoItem>, i64) {
+    let mut now_items = Vec::new();
+    let mut watch_items = Vec::new();
+    let mut silenced = 0i64;
+    for a in open_alerts {
+        // Within the silence window → don't enter the todo — silence means
+        // "don't tell me about it for this period"
+        if is_silenced(a.silenced_until_unix_nano, now_ns) {
+            silenced += 1;
+            continue;
+        }
+        let item = alert_item(a, nodes, false);
+        match bucket_of(&a.source, &a.severity) {
+            Bucket::Now => now_items.push(item),
+            Bucket::Watch => watch_items.push(item),
+        }
+    }
+    (now_items, watch_items, silenced)
+}
+
+/// Certificates and containers come from each node's latest snapshot.
+async fn inventory_counters(state: &AppState, nodes: &[NodeRecord]) -> (i64, i64, i64) {
+    let mut certs_total = 0i64;
+    let mut containers_total = 0i64;
+    let mut containers_failed = 0i64;
+    for n in nodes {
+        let id = zhiwei_common::NodeId::from_string(n.id.clone());
+        let Ok(Some(row)) = state.storage.inventory().find(&id).await else {
+            continue;
+        };
+        let certs: Vec<serde_json::Value> =
+            serde_json::from_str(&row.certificates_json).unwrap_or_default();
+        certs_total += i64::try_from(
+            certs
+                .iter()
+                .filter(|c| {
+                    !c.get("parse_error")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                })
+                .count(),
+        )
+        .unwrap_or(i64::MAX);
+        let containers: Vec<serde_json::Value> =
+            serde_json::from_str(&row.containers_json).unwrap_or_default();
+        for c in &containers {
+            containers_total += 1;
+            let st = c.get("state").and_then(|v| v.as_str()).unwrap_or("");
+            let status = c.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            if crate::probes_api::container_is_failed(st, status) {
+                containers_failed += 1;
+            }
+        }
+    }
+    (certs_total, containers_total, containers_failed)
+}
+
+/// Command channel: node appears online but never polls for commands — start
+/// / stop / logs buttons in the console do nothing while the Nodes page looks
+/// normal. This is the hardest class of failure to spot in this project
+/// (an old node without the ops pub key never sends a single request; the
+/// log only has one warn line).
+///
+/// The "node offline" case is not raised here: it's already raised in
+/// [`bucket_open_alerts`]; reporting the same root cause twice would be noise.
+fn command_channel_items(
+    state: &AppState,
+    nodes: &[NodeRecord],
+    now_epoch_ms: i64,
+) -> Vec<TodoItem> {
+    let mut items = Vec::new();
+    for n in nodes {
+        let last_poll_ms = state.control_polls.last(&n.id);
+        let channel = crate::control_channel::channel_state(
+            n.last_seen_unix_nano.map(|ns| ns / 1_000_000),
+            last_poll_ms,
+            now_epoch_ms - state.started_at_ms,
+            now_epoch_ms,
+        );
+        if channel != crate::control_channel::Channel::Down {
+            continue;
+        }
+        // "How long has it been broken": the last successful poll is the last
+        // time the channel worked. Nodes that never polled (enrolled before
+        // ops pub key distribution) use the enrollment timestamp — for them
+        // the channel has never worked.
+        let since_ms = last_poll_ms.unwrap_or(n.enrolled_at_unix_nano / 1_000_000);
+        items.push(TodoItem {
+            id: format!("command-channel-{}", n.id),
+            source: "command_channel".into(),
+            severity: "critical".into(),
+            title: node_display(nodes, &n.id, &n.hostname),
+            // The wording is composed by the frontend via hint_key, so both
+            // en-US and zh-CN are covered.
+            detail: String::new(),
+            hint_key: "commandChannel",
+            node_id: n.id.clone(),
+            hostname: node_display(nodes, &n.id, &n.hostname),
+            since_unix_nano: since_ms * 1_000_000,
+            resolved_at_unix_nano: None,
+            link: format!("/nodes/{}", n.id),
+        });
+    }
+    items
+}
+
+/// Urgent first; within the same bucket, longer-standing items come first.
+fn sort_items(items: &mut [TodoItem]) {
+    items.sort_by(|a, b| {
+        let rank = |s: &str| i32::from(s != "critical");
+        rank(&a.severity)
+            .cmp(&rank(&b.severity))
+            .then(a.since_unix_nano.cmp(&b.since_unix_nano))
+    });
+}
+
+fn recovered_items(resolved_alerts: &[Alert], nodes: &[NodeRecord]) -> Vec<TodoItem> {
+    resolved_alerts
+        .iter()
+        .map(|a| alert_item(a, nodes, true))
+        .collect()
 }
 
 #[cfg(test)]

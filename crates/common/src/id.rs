@@ -9,7 +9,7 @@ use std::fmt;
 pub struct NodeId(String);
 
 impl NodeId {
-    pub fn new() -> Self {
+    #[must_use] pub fn new() -> Self {
         Self(uuid::Uuid::new_v4().to_string())
     }
 
@@ -17,7 +17,7 @@ impl NodeId {
         Self(s.into())
     }
 
-    pub fn as_str(&self) -> &str {
+    #[must_use] pub fn as_str(&self) -> &str {
         &self.0
     }
 }

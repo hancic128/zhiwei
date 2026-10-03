@@ -24,7 +24,7 @@ pub struct CertSource {
 
 impl CertSource {
     /// Whether this applies to all nodes (`node_id` is empty string)
-    pub fn is_all_nodes(&self) -> bool {
+    #[must_use] pub fn is_all_nodes(&self) -> bool {
         self.node_id.is_empty()
     }
 }
@@ -76,10 +76,15 @@ pub struct CertSourcesRepo {
 }
 
 impl CertSourcesRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    #[must_use] pub const fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 
+    /// List all certificate scan sources.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn list_all(&self) -> anyhow::Result<Vec<CertSource>> {
         let rows: Vec<SourceRow> = sqlx::query_as(&format!(
             "SELECT {COLS} FROM cert_sources ORDER BY created_at_unix_nano"
@@ -91,6 +96,10 @@ impl CertSourcesRepo {
 
     /// Sources that a specific node should scan. When `enabled_only` is true, only returns enabled ones (used by node side).
     /// Includes sources with `node_id = ''` (all nodes).
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn list_for_node(
         &self,
         node_id: &str,
@@ -109,6 +118,11 @@ impl CertSourcesRepo {
         Ok(rows.into_iter().map(CertSource::from).collect())
     }
 
+    /// Look up a source by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn find(&self, id: &str) -> anyhow::Result<Option<CertSource>> {
         let row: Option<SourceRow> =
             sqlx::query_as(&format!("SELECT {COLS} FROM cert_sources WHERE id = ?"))
@@ -118,6 +132,12 @@ impl CertSourcesRepo {
         Ok(row.map(CertSource::from))
     }
 
+    /// Insert a new certificate scan source and return the resulting row.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the insert or follow-up lookup fails, or
+    /// `anyhow::Error` if the row is missing after a successful insert.
     pub async fn create(
         &self,
         node_id: &str,
@@ -136,7 +156,7 @@ impl CertSourcesRepo {
         .bind(&id)
         .bind(node_id)
         .bind(path)
-        .bind(notify_enabled as i64)
+        .bind(i64::from(notify_enabled))
         .bind(notify_days_before)
         .bind(now)
         .bind(now)
@@ -147,6 +167,12 @@ impl CertSourcesRepo {
             .ok_or_else(|| anyhow::anyhow!("cert_source not found after creation"))
     }
 
+    /// Apply a patch (PATCH semantics) to an existing source.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the lookup or update fails, or `anyhow::Error`
+    /// if no source matches the given id.
     pub async fn update(
         &self,
         id: &str,
@@ -158,10 +184,10 @@ impl CertSourcesRepo {
             .await?
             .ok_or_else(|| anyhow::anyhow!("certificate source not found"))?;
         if let Some(v) = &patch.node_id {
-            cur.node_id = v.clone();
+            cur.node_id.clone_from(v);
         }
         if let Some(v) = &patch.path {
-            cur.path = v.clone();
+            cur.path.clone_from(v);
         }
         if let Some(v) = patch.enabled {
             cur.enabled = v;
@@ -178,8 +204,8 @@ impl CertSourcesRepo {
         )
         .bind(&cur.node_id)
         .bind(&cur.path)
-        .bind(cur.enabled as i64)
-        .bind(cur.notify_enabled as i64)
+        .bind(i64::from(cur.enabled))
+        .bind(i64::from(cur.notify_enabled))
         .bind(cur.notify_days_before)
         .bind(now)
         .bind(id)
@@ -188,6 +214,11 @@ impl CertSourcesRepo {
         Ok(cur)
     }
 
+    /// Delete a source by id. Returns whether a row was actually removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the delete fails.
     pub async fn delete(&self, id: &str) -> anyhow::Result<bool> {
         let r = sqlx::query("DELETE FROM cert_sources WHERE id = ?")
             .bind(id)

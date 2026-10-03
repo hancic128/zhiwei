@@ -3,9 +3,9 @@
 
 msrv = "1.75"
 
-type-complexity = false
-cognitive-complexity = false
+# Function-arg count threshold for `too_many_arguments`.
 too-many-arguments-threshold = 10
-field-init-shorthand = "warn"
-single-char-binding-names-threshold = 4
-unnested-or-patterns = "warn"
+
+# `cognitive_complexity` / `too_many_lines` and `type_complexity` use their
+# upstream defaults here; individual offenders are refactored or annotated in
+# source rather than masked with a global threshold bump.

@@ -1,4 +1,4 @@
-//! ZhiWei ops-server -- control plane.
+//! `ZhiWei` ops-server -- control plane.
 //!
 //! Design D7 requires monitor (data plane) and ops (control plane) to be separate processes.
 //! The purpose is specific: **signing private key only exists within ops process**. Commands are
@@ -6,6 +6,13 @@
 //! verify each one -- so even if monitor is compromised, it cannot forge a command that nodes will execute.
 //!
 //! Ops only listens on loopback address, for monitor to forward commands initiated by the console.
+
+
+#![warn(clippy::pedantic, clippy::nursery, clippy::cargo)]
+// `multiple_crate_versions` flags transitive deps (e.g. ed25519-dalek pulls
+// `rand_core` 0.10 while `rand` 0.8 pulls 0.6). Not actionable from project
+// code — pinned by upstream crates.
+#![allow(clippy::multiple_crate_versions)]
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -150,7 +157,7 @@ fn parse_action(s: &str) -> Option<Action> {
 fn validate_params(action: Action, params: &serde_json::Value) -> Result<(), String> {
     match action {
         Action::KillProcess => {
-            let pid = params.get("pid").and_then(|v| v.as_i64()).unwrap_or(0);
+            let pid = params.get("pid").and_then(serde_json::Value::as_i64).unwrap_or(0);
             if pid <= 1 {
                 return Err("kill_process requires pid (positive integer, 1 not allowed)".into());
             }

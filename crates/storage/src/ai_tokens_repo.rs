@@ -2,9 +2,9 @@
 //!
 //! Design notes:
 //! - Does not store plaintext tokens, only SHA-256 hashes. Verification compares hashes.
-//! - Multi-value, named, individually revocable (revoked_at non-null means invalid).
+//! - Multi-value, named, individually revocable (`revoked_at` non-null means invalid).
 //! - No expiration - revocation is the only way to invalidate. Add an expiry column if needed.
-//! - last_used_at is for auditing "who called when", updated asynchronously after read_auth_ok_v2 hits.
+//! - `last_used_at` is for auditing "who called when", updated asynchronously after `read_auth_ok_v2` hits.
 
 use sqlx::SqlitePool;
 
@@ -31,7 +31,7 @@ pub struct AiToken {
 }
 
 impl AiToken {
-    pub fn is_active(&self) -> bool {
+    #[must_use] pub const fn is_active(&self) -> bool {
         self.revoked_at_unix_nano.is_none()
     }
 }
@@ -54,11 +54,15 @@ pub struct AiTokensRepo {
 }
 
 impl AiTokensRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    #[must_use] pub const fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 
     /// List all tokens (includes revoked ones, UI filters itself).
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the database query fails.
     pub async fn list_all(&self) -> anyhow::Result<Vec<AiToken>> {
         let rows: Vec<AiTokenRow> = sqlx::query_as(
             "SELECT id, token_hash, name, created_at_unix_nano,
@@ -71,6 +75,10 @@ impl AiTokensRepo {
     }
 
     /// Look up active row by plaintext token (auth path, only looks at non-revoked).
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the database query fails.
     pub async fn find_active_by_hash(&self, token_hash: &str) -> anyhow::Result<Option<AiToken>> {
         let row: Option<AiTokenRow> = sqlx::query_as(
             "SELECT id, token_hash, name, created_at_unix_nano,
@@ -85,6 +93,10 @@ impl AiTokensRepo {
     }
 
     /// Look up by id (for deletion/UI details).
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the database query fails.
     pub async fn find(&self, id: &str) -> anyhow::Result<Option<AiToken>> {
         let row: Option<AiTokenRow> = sqlx::query_as(
             "SELECT id, token_hash, name, created_at_unix_nano,
@@ -98,6 +110,10 @@ impl AiTokensRepo {
     }
 
     /// Insert a new token. `id` format: `ait_<12 hex>`, `token_hash` is SHA-256(token) hex.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the insert fails (e.g. duplicate `id` or `token_hash`).
     pub async fn create(
         &self,
         id: &str,
@@ -128,6 +144,10 @@ impl AiTokensRepo {
     }
 
     /// Revoke: no-op if already revoked. Returns whether state actually changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update query fails.
     pub async fn revoke(&self, id: &str, now_unix_nano: i64) -> anyhow::Result<bool> {
         let r = sqlx::query(
             "UPDATE ai_tokens SET revoked_at_unix_nano = ?
@@ -141,6 +161,10 @@ impl AiTokensRepo {
     }
 
     /// Update last used timestamp. Best-effort, failures don't propagate (doesn't affect main request).
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update query fails.
     pub async fn touch_last_used(&self, id: &str, now_unix_nano: i64) -> anyhow::Result<()> {
         sqlx::query(
             "UPDATE ai_tokens SET last_used_at_unix_nano = ?

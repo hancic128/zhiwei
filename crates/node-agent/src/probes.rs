@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use http_body_util::BodyExt;
 use serde_json::Value;
 use tokio::io::AsyncReadExt;
 
@@ -48,7 +49,7 @@ struct Outcome {
 }
 
 impl Outcome {
-    fn ok(latency_ms: f64, status_code: Option<i64>) -> Self {
+    const fn ok(latency_ms: f64, status_code: Option<i64>) -> Self {
         Self {
             state: "ok",
             latency_ms: Some(latency_ms),
@@ -88,73 +89,116 @@ pub async fn run_loop(monitor: String, state: Arc<NodeState>, node_id: String) {
     let mut logged_empty = false;
 
     loop {
-        if last_fetch
-            .map(|t| t.elapsed() >= CONFIG_REFRESH)
-            .unwrap_or(true)
-        {
-            match fetch_specs(&monitor, &state, &node_id).await {
-                Ok(list) => {
-                    if list.is_empty() && !logged_empty {
-                        tracing::debug!("No probes assigned to this node");
-                        logged_empty = true;
-                    } else if !list.is_empty() {
-                        logged_empty = false;
-                    }
-                    specs = list;
-                    last_fetch = Some(Instant::now());
-                }
-                Err(e) => tracing::warn!(error = %e, "Failed to fetch probe config"),
-            }
+        if needs_refresh(last_fetch) {
+            refresh_specs(
+                &monitor,
+                &state,
+                &node_id,
+                &mut specs,
+                &mut last_fetch,
+                &mut logged_empty,
+            )
+            .await;
         }
 
-        let now = Instant::now();
-        let mut results: Vec<Value> = Vec::new();
-        for spec in &specs {
-            if next_due.get(&spec.id).map(|t| *t > now).unwrap_or(false) {
-                continue;
-            }
-            next_due.insert(
-                spec.id.clone(),
-                now + Duration::from_secs(spec.interval_seconds.clamp(10, 86_400)),
-            );
-
-            let outcome = execute(spec).await;
-            tracing::debug!(
-                service = %spec.service,
-                probe = %spec.name,
-                state = outcome.state,
-                latency_ms = outcome.latency_ms,
-                error = %outcome.error,
-                "Probe execution completed"
-            );
-            results.push(serde_json::json!({
-                "probe_id": spec.id,
-                "ts_unix_nano": zhiwei_common::Timestamp::now().unix_nano(),
-                "state": outcome.state,
-                "latency_ms": outcome.latency_ms,
-                "status_code": outcome.status_code,
-                "error": outcome.error,
-            }));
-        }
-
-        if !results.is_empty() {
-            if let Err(e) = post_results(&monitor, &state, &node_id, &results).await {
-                tracing::warn!(error = %e, "Failed to report probe results, will retry next round");
-                // Failed reporting does not lose the result semantics — retry
-                // immediately (the next tick will rerun the probe).
-                for r in &results {
-                    if let Some(id) = r.get("probe_id").and_then(|v| v.as_str()) {
-                        next_due.insert(id.to_string(), Instant::now());
-                    }
-                }
-            }
-        }
+        let results = run_due_probes(&specs, &mut next_due).await;
+        report_results(&monitor, &state, &node_id, &results, &mut next_due).await;
 
         // Probes that have been deleted from the spec no longer keep their
         // schedule entries.
         next_due.retain(|id, _| specs.iter().any(|s| &s.id == id));
 
         tokio::time::sleep(TICK).await;
+    }
+}
+
+fn needs_refresh(last_fetch: Option<Instant>) -> bool {
+    last_fetch.map_or(true, |t| t.elapsed() >= CONFIG_REFRESH)
+}
+
+/// Re-fetch probe specs when the refresh interval has elapsed, logging once
+/// when the assignment is (or becomes) empty.
+async fn refresh_specs(
+    monitor: &str,
+    state: &Arc<NodeState>,
+    node_id: &str,
+    specs: &mut Vec<ProbeSpec>,
+    last_fetch: &mut Option<Instant>,
+    logged_empty: &mut bool,
+) {
+    match fetch_specs(monitor, state, node_id).await {
+        Ok(list) => {
+            if list.is_empty() && !*logged_empty {
+                tracing::debug!("No probes assigned to this node");
+                *logged_empty = true;
+            } else if !list.is_empty() {
+                *logged_empty = false;
+            }
+            *specs = list;
+            *last_fetch = Some(Instant::now());
+        }
+        Err(e) => tracing::warn!(error = %e, "Failed to fetch probe config"),
+    }
+}
+
+/// Execute every spec whose schedule is due, returning their serialized results.
+async fn run_due_probes(
+    specs: &[ProbeSpec],
+    next_due: &mut HashMap<String, Instant>,
+) -> Vec<Value> {
+    let now = Instant::now();
+    let mut results: Vec<Value> = Vec::new();
+    for spec in specs {
+        if next_due.get(&spec.id).is_some_and(|t| *t > now) {
+            continue;
+        }
+        next_due.insert(
+            spec.id.clone(),
+            now + Duration::from_secs(spec.interval_seconds.clamp(10, 86_400)),
+        );
+
+        let outcome = execute(spec).await;
+        tracing::debug!(
+            service = %spec.service,
+            probe = %spec.name,
+            state = outcome.state,
+            latency_ms = outcome.latency_ms,
+            error = %outcome.error,
+            "Probe execution completed"
+        );
+        results.push(serde_json::json!({
+            "probe_id": spec.id,
+            "ts_unix_nano": zhiwei_common::Timestamp::now().unix_nano(),
+            "state": outcome.state,
+            "latency_ms": outcome.latency_ms,
+            "status_code": outcome.status_code,
+            "error": outcome.error,
+        }));
+    }
+    results
+}
+
+/// Post probe results; on failure, reschedule every result's probe immediately
+/// so the retry happens on the next tick rather than the next interval.
+async fn report_results(
+    monitor: &str,
+    state: &Arc<NodeState>,
+    node_id: &str,
+    results: &[Value],
+    next_due: &mut HashMap<String, Instant>,
+) {
+    if results.is_empty() {
+        return;
+    }
+    if let Err(e) = post_results(monitor, state, node_id, results).await {
+        tracing::warn!(error = %e, "Failed to report probe results, will retry next round");
+        // Failed reporting does not lose the result semantics — retry
+        // immediately (the next tick will rerun the probe).
+        for r in results {
+            if let Some(id) = r.get("probe_id").and_then(|v| v.as_str()) {
+                next_due.insert(id.to_string(), Instant::now());
+            }
+        }
     }
 }
 
@@ -202,9 +246,9 @@ async fn fetch_specs(
                 expect: p.get("expect").cloned().unwrap_or(Value::Null),
                 interval_seconds: p
                     .get("interval_seconds")
-                    .and_then(|v| v.as_u64())
+                    .and_then(serde_json::Value::as_u64)
                     .unwrap_or(60),
-                timeout_ms: p.get("timeout_ms").and_then(|v| v.as_u64()).unwrap_or(5000),
+                timeout_ms: p.get("timeout_ms").and_then(serde_json::Value::as_u64).unwrap_or(5000),
             })
         })
         .collect())
@@ -264,7 +308,7 @@ fn latency_verdict(spec: &ProbeSpec, latency_ms: f64, status_code: Option<i64>) 
     let max = spec
         .expect
         .get("max_latency_ms")
-        .and_then(|v| v.as_f64())
+        .and_then(serde_json::Value::as_f64)
         .unwrap_or(f64::MAX);
     if latency_ms > max {
         return Some(Outcome::degraded(
@@ -292,7 +336,7 @@ async fn probe_http(spec: &ProbeSpec) -> Outcome {
     let tls_verify = spec
         .expect
         .get("tls_verify")
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
 
     let started = Instant::now();
@@ -301,19 +345,19 @@ async fn probe_http(spec: &ProbeSpec) -> Outcome {
         Err(e) => return Outcome::down(format!("{e:#}")),
     };
     let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
-    let status_code = Some(status as i64);
+    let status_code = Some(i64::from(status));
 
     // Expected status code: when unset, 2xx/3xx is treated as healthy.
     let expected: Vec<i64> = spec
         .expect
         .get("status")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_i64()).collect())
+        .map(|a| a.iter().filter_map(serde_json::Value::as_i64).collect())
         .unwrap_or_default();
     let status_ok = if expected.is_empty() {
         (200..400).contains(&status)
     } else {
-        expected.contains(&(status as i64))
+        expected.contains(&i64::from(status))
     };
     if !status_ok {
         return Outcome {
@@ -355,10 +399,9 @@ async fn fetch_http(
     } else {
         anyhow::bail!("URL must start with http:// or https://");
     };
-    let (authority, path) = match rest.find('/') {
-        Some(i) => (&rest[..i], &rest[i..]),
-        None => (rest, "/"),
-    };
+    let (authority, path) = rest
+        .find('/')
+        .map_or((rest, "/"), |i| (&rest[..i], &rest[i..]));
     let (host, port) = match authority.rsplit_once(':') {
         Some((h, p)) if !h.contains(']') && p.chars().all(|c| c.is_ascii_digit()) => (
             h.to_string(),
@@ -403,10 +446,9 @@ async fn fetch_http(
         body.to_string(),
     )))?;
 
-    let res = sender.send_request(req).await?;
-    let status = res.status().as_u16();
-    use http_body_util::BodyExt;
-    let bytes = res.into_body().collect().await?.to_bytes();
+    let response = sender.send_request(req).await?;
+    let status = response.status().as_u16();
+    let bytes = response.into_body().collect().await?.to_bytes();
     let text = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_BODY_BYTES)]).to_string();
     Ok((status, text))
 }
@@ -415,11 +457,14 @@ async fn fetch_http(
 
 async fn probe_tcp(spec: &ProbeSpec) -> Outcome {
     let host = str_field(&spec.target, "host");
+    // u16::try_from: JSON config can carry any u64; clamp invalid ports to 0 so the
+    // connect attempt fails fast with "invalid argument" rather than silently truncating.
     let port = spec
         .target
         .get("port")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u16;
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|p| u16::try_from(p).ok())
+        .unwrap_or(0);
 
     let started = Instant::now();
     let mut stream = match tokio::net::TcpStream::connect((host.as_str(), port)).await {
@@ -433,7 +478,7 @@ async fn probe_tcp(spec: &ProbeSpec) -> Outcome {
         let read = tokio::time::timeout(Duration::from_millis(500), stream.read(&mut buf))
             .await
             .ok()
-            .and_then(|r| r.ok())
+            .and_then(std::result::Result::ok)
             .unwrap_or(0);
         let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
         let banner = String::from_utf8_lossy(&buf[..read]).to_string();
@@ -450,11 +495,14 @@ async fn probe_tcp(spec: &ProbeSpec) -> Outcome {
 
 async fn probe_tls(spec: &ProbeSpec) -> Outcome {
     let host = str_field(&spec.target, "host");
+    // u16::try_from: JSON config can carry any u64; clamp invalid ports to 443 default so the
+    // probe still runs against a sensible port rather than silently truncating.
     let port = spec
         .target
         .get("port")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(443) as u16;
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|p| u16::try_from(p).ok())
+        .unwrap_or(443);
     let sni = {
         let s = str_field(&spec.target, "sni");
         if s.is_empty() {
@@ -466,7 +514,7 @@ async fn probe_tls(spec: &ProbeSpec) -> Outcome {
     let verify = spec
         .expect
         .get("verify")
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
 
     let started = Instant::now();
@@ -515,7 +563,7 @@ async fn probe_tls(spec: &ProbeSpec) -> Outcome {
         let min_days = spec
             .expect
             .get("min_days_valid")
-            .and_then(|v| v.as_i64())
+            .and_then(serde_json::Value::as_i64)
             .unwrap_or(30);
         if days < min_days {
             return Outcome::degraded(

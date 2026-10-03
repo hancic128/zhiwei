@@ -32,7 +32,7 @@ struct DockerContainer {
 }
 
 /// Runtime state of a single container (from `/containers/{id}/json`).
-/// List endpoint doesn't return StartedAt / FinishedAt, only inspect has them --
+/// List endpoint doesn't return `StartedAt` / `FinishedAt`, only inspect has them --
 /// both "uptime" and "last updated" columns depend on it.
 #[derive(Debug, Clone, Default)]
 pub struct ContainerRuntime {
@@ -60,7 +60,7 @@ struct InspectResponse {
     host_config: Option<InspectHostConfig>,
 }
 
-/// Only the HostConfig parts we need: limits.
+/// Only the `HostConfig` parts we need: limits.
 #[derive(Debug, Default, Deserialize)]
 struct InspectHostConfig {
     #[serde(rename = "Memory", default)]
@@ -112,7 +112,13 @@ fn runtime_from_inspect(parsed: InspectResponse) -> ContainerRuntime {
     let host = parsed.host_config.unwrap_or_default();
     // Legacy `--cpu-quota` syntax: use quota/period conversion when NanoCpus is empty (1e9 = 1 core)
     let quota_period = match (host.cpu_quota, host.cpu_period) {
-        (q, p) if q > 0 && p > 0 => (q as u64).saturating_mul(1_000_000_000) / p as u64,
+        (q, p) if q > 0 && p > 0 => {
+            // The `q > 0 && p > 0` guard above guarantees these i64 values are positive,
+            // so `try_from` cannot fail here; `unwrap_or(0)` keeps the type uniform.
+            let quota = u64::try_from(q).unwrap_or(0);
+            let period = u64::try_from(p).unwrap_or(0);
+            quota.saturating_mul(1_000_000_000) / period
+        }
         _ => 0,
     };
     ContainerRuntime {
@@ -153,13 +159,13 @@ pub fn docker_error_message(status: u16, body: &str) -> String {
         .and_then(|v| {
             v.get("message")
                 .and_then(|m| m.as_str())
-                .map(|s| s.to_string())
+                .map(std::string::ToString::to_string)
         })
         .filter(|s| !s.trim().is_empty());
-    match msg {
-        Some(m) => format!("docker rejected this operation: {m}"),
-        None => format!("docker API returned {status}"),
-    }
+    msg.map_or_else(
+        || format!("docker API returned {status}"),
+        |m| format!("docker rejected this operation: {m}"),
+    )
 }
 
 /// Container lifecycle actions: start / stop / restart
@@ -223,6 +229,26 @@ pub async fn container_remove(container: &str, force: bool) -> anyhow::Result<St
 /// When Docker is not installed / socket unavailable, returns `Ok(None)`, caller decides whether to report empty list --
 /// this is not an error, just means this machine has no Docker.
 pub async fn list_containers() -> anyhow::Result<Option<Vec<Container>>> {
+    let Some(raw) = fetch_container_list().await? else {
+        return Ok(None);
+    };
+
+    let mut containers = Vec::with_capacity(raw.len());
+    for c in raw {
+        containers.push(build_container(c).await);
+    }
+
+    let usage = collect_usage(&containers).await;
+    apply_usage(&mut containers, usage);
+
+    Ok(Some(containers))
+}
+
+/// Connect to the Docker socket and fetch `/containers/json`.
+///
+/// `Ok(None)` means Docker is unavailable (absent socket or permission denied)
+/// rather than an error.
+async fn fetch_container_list() -> anyhow::Result<Option<Vec<DockerContainer>>> {
     if !std::path::Path::new(SOCKET).exists() {
         return Ok(None);
     }
@@ -244,20 +270,20 @@ pub async fn list_containers() -> anyhow::Result<Option<Vec<Container>>> {
         let _ = conn.await;
     });
 
-    let req = Request::builder()
+    let request = Request::builder()
         .method("GET")
         .uri("http://localhost/containers/json?all=1")
         .header("Host", "localhost")
         .body(Empty::<Bytes>::new())
         .context("failed to construct docker request")?;
 
-    let res = sender.send_request(req).await.context("docker request failed")?;
+    let response = sender.send_request(request).await.context("docker request failed")?;
 
-    if !res.status().is_success() {
-        anyhow::bail!("docker API returned {}", res.status());
+    if !response.status().is_success() {
+        anyhow::bail!("docker API returned {}", response.status());
     }
 
-    let body = res
+    let body = response
         .into_body()
         .collect()
         .await
@@ -266,57 +292,59 @@ pub async fn list_containers() -> anyhow::Result<Option<Vec<Container>>> {
 
     let raw: Vec<DockerContainer> =
         serde_json::from_slice(&body).context("failed to parse docker container list")?;
+    Ok(Some(raw))
+}
 
-    let mut containers = Vec::with_capacity(raw.len());
-    for c in raw {
-        // Docker returns names with leading slash, e.g. "/nginx"
-        let name = c
-            .names
-            .first()
-            .map(|n| n.trim_start_matches('/').to_string())
-            .unwrap_or_default();
-        // Inspect each one for StartedAt / FinishedAt (local socket, tens of containers ~tens of ms)
-        let rt = match inspect_container(&c.id).await {
-            Ok(rt) => rt,
-            Err(e) => {
-                tracing::debug!(container = %c.id, error = %e, "Failed to inspect container, leaving uptime empty");
-                ContainerRuntime::default()
-            }
-        };
-        containers.push(Container {
-            id: c.id,
-            name,
-            image: c.image,
-            state: if rt.state.is_empty() {
-                c.state
-            } else {
-                rt.state
-            },
-            created_at_unix_nano: c.created.saturating_mul(1_000_000_000),
-            status: c.status,
-            runtime: "docker".into(),
-            started_at_unix_nano: rt.started_at_unix_nano,
-            finished_at_unix_nano: rt.finished_at_unix_nano,
-            compose_project: rt.compose_project,
-            compose_service: rt.compose_service,
-            mem_limit_bytes: rt.mem_limit_bytes,
-            cpu_limit_nano: rt.cpu_limit_nano,
-            // Usage filled in concurrently below
-            mem_usage_bytes: 0,
-            cpu_percent: 0.0,
-        });
+/// Inspect one listed container and merge runtime details into a `Container`.
+async fn build_container(c: DockerContainer) -> Container {
+    // Docker returns names with leading slash, e.g. "/nginx"
+    let name = c
+        .names
+        .first()
+        .map(|n| n.trim_start_matches('/').to_string())
+        .unwrap_or_default();
+    // Inspect each one for StartedAt / FinishedAt (local socket, tens of containers ~tens of ms)
+    let rt = match inspect_container(&c.id).await {
+        Ok(rt) => rt,
+        Err(e) => {
+            tracing::debug!(container = %c.id, error = %e, "Failed to inspect container, leaving uptime empty");
+            ContainerRuntime::default()
+        }
+    };
+    Container {
+        id: c.id,
+        name,
+        image: c.image,
+        state: if rt.state.is_empty() {
+            c.state
+        } else {
+            rt.state
+        },
+        created_at_unix_nano: c.created.saturating_mul(1_000_000_000),
+        status: c.status,
+        runtime: "docker".into(),
+        started_at_unix_nano: rt.started_at_unix_nano,
+        finished_at_unix_nano: rt.finished_at_unix_nano,
+        compose_project: rt.compose_project,
+        compose_service: rt.compose_service,
+        mem_limit_bytes: rt.mem_limit_bytes,
+        cpu_limit_nano: rt.cpu_limit_nano,
+        // Usage filled in concurrently below
+        mem_usage_bytes: 0,
+        cpu_percent: 0.0,
     }
+}
 
-    // Usage: `stats` needs an interval per sample (one-shot can return immediately), so only
-    // get running containers, and run concurrently with 12 connection limit -- tens of containers
-    // should be sampled within one second. Single container failure means this slot shows "--",
-    // shouldn't affect entire snapshot.
-    let usage: Vec<(String, ContainerUsage)> = futures::stream::iter(
+/// Usage: `stats` needs an interval per sample (one-shot can return immediately), so only
+/// get running containers, and run concurrently with 12 connection limit -- tens of containers
+/// should be sampled within one second. Single container failure means this slot shows "--",
+/// shouldn't affect entire snapshot.
+async fn collect_usage(containers: &[Container]) -> Vec<(String, ContainerUsage)> {
+    futures::stream::iter(
         containers
             .iter()
             .filter(|c| c.state == "running")
-            .map(|c| c.id.clone())
-            .collect::<Vec<_>>(),
+            .map(|c| c.id.clone()),
     )
     .map(|id| async move {
         let got = tokio::time::timeout(CONTAINER_STATS_TIMEOUT, container_usage(&id))
@@ -328,15 +356,16 @@ pub async fn list_containers() -> anyhow::Result<Option<Vec<Container>>> {
     })
     .buffer_unordered(12)
     .collect()
-    .await;
+    .await
+}
+
+fn apply_usage(containers: &mut [Container], usage: Vec<(String, ContainerUsage)>) {
     for (id, u) in usage {
         if let Some(c) = containers.iter_mut().find(|c| c.id == id) {
             c.mem_usage_bytes = u.mem_usage_bytes;
             c.cpu_percent = u.cpu_percent;
         }
     }
-
-    Ok(Some(containers))
 }
 
 /// Single-sample usage.
@@ -353,19 +382,19 @@ const CONTAINER_STATS_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 
 #[derive(Debug, Default, Deserialize)]
 struct StatsResponse {
-    #[serde(default)]
-    memory_stats: Option<StatsMemory>,
-    #[serde(default)]
-    cpu_stats: Option<StatsCpu>,
-    #[serde(default)]
-    precpu_stats: Option<StatsCpu>,
+    #[serde(rename = "memory_stats", default)]
+    memory: Option<StatsMemory>,
+    #[serde(rename = "cpu_stats", default)]
+    cpu: Option<StatsCpu>,
+    #[serde(rename = "precpu_stats", default)]
+    precpu: Option<StatsCpu>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct StatsMemory {
     #[serde(default)]
     usage: u64,
-    /// cgroup details: v1 is cache / total_inactive_file, v2 is inactive_file
+    /// cgroup details: v1 is cache / `total_inactive_file`, v2 is `inactive_file`
     #[serde(default)]
     stats: Option<std::collections::BTreeMap<String, u64>>,
 }
@@ -391,51 +420,45 @@ struct StatsCpuUsage {
 /// stats response -> usage (pure function, easy to unit test).
 ///
 /// CPU percentage uses docker CLI algorithm: delta of two samples / delta * cores.
-/// For single sample (stream=false), `cpu_stats` and `precpu_stats` are exactly two consecutive ticks.
+/// For single sample (stream=false), `cpu` and `precpu` are exactly two consecutive ticks.
 fn usage_from_stats(s: &StatsResponse) -> ContainerUsage {
-    let mem = s.memory_stats.as_ref();
+    let mem = s.memory.as_ref();
     let cache = mem
         .and_then(|m| m.stats.as_ref())
-        .map(|st| {
+        .map_or(0, |st| {
             ["inactive_file", "cache", "total_inactive_file"]
                 .iter()
                 .find_map(|k| st.get(*k).copied())
                 .unwrap_or(0)
-        })
-        .unwrap_or(0);
-    let mem_usage_bytes = mem.map(|m| m.usage.saturating_sub(cache)).unwrap_or(0);
+        });
+    let mem_usage_bytes = mem.map_or(0, |m| m.usage.saturating_sub(cache));
 
-    let cpu = s.cpu_stats.as_ref().and_then(|c| c.cpu_usage.as_ref());
-    let pre = s.precpu_stats.as_ref().and_then(|c| c.cpu_usage.as_ref());
+    let cpu = s.cpu.as_ref().and_then(|c| c.cpu_usage.as_ref());
+    let pre = s.precpu.as_ref().and_then(|c| c.cpu_usage.as_ref());
     let system_delta = s
-        .cpu_stats
+        .cpu
         .as_ref()
-        .map(|c| c.system_cpu_usage)
-        .unwrap_or(0)
-        .saturating_sub(
-            s.precpu_stats
-                .as_ref()
-                .map(|c| c.system_cpu_usage)
-                .unwrap_or(0),
-        );
+        .map_or(0, |c| c.system_cpu_usage)
+        .saturating_sub(s.precpu.as_ref().map_or(0, |c| c.system_cpu_usage));
     let cpu_delta = cpu
-        .map(|c| c.total_usage)
-        .unwrap_or(0)
-        .saturating_sub(pre.map(|c| c.total_usage).unwrap_or(0));
+        .map_or(0, |c| c.total_usage)
+        .saturating_sub(pre.map_or(0, |c| c.total_usage));
     let cores = s
-        .cpu_stats
+        .cpu
         .as_ref()
-        .map(|c| {
+        .map_or(0_u64, |c| {
             if c.online_cpus > 0 {
                 c.online_cpus
             } else {
                 c.cpu_usage
                     .as_ref()
-                    .map(|u| u.percpu_usage.as_ref().map(|v| v.len()).unwrap_or(0) as u64)
-                    .unwrap_or(0)
+                    .map_or(0, |u| u.percpu_usage.as_ref().map_or(0, std::vec::Vec::len) as u64)
             }
-        })
-        .unwrap_or(0);
+        });
+    // CPU deltas are nanosecond counters (system-wide over a sampling interval).
+    // At typical sampling rates these fit comfortably in f64's 52-bit mantissa
+    // (~16 weeks of nanoseconds before precision loss); the ratio is what matters.
+    #[allow(clippy::cast_precision_loss)]
     let cpu_percent = if system_delta == 0 || cores == 0 {
         0.0
     } else {
@@ -472,7 +495,7 @@ pub async fn container_logs(
     let path = format!(
         "/containers/{container}/logs?stdout=1&stderr=1&tail={}&timestamps={}",
         tail.clamp(1, 5000),
-        if timestamps { 1 } else { 0 }
+        i32::from(timestamps)
     );
     let body = docker_get(&path).await?;
     Ok(demux_log_stream(&body))
@@ -512,7 +535,7 @@ pub fn read_file_tail(path: &str, tail: u32) -> anyhow::Result<String> {
     let mut f = std::fs::File::open(path)?;
     let size = f.metadata()?.len();
     // Roughly estimate lines from 200 bytes per line, read at most 1 MiB
-    let want = (tail.clamp(1, 5000) as u64)
+    let want = u64::from(tail.clamp(1, 5000))
         .saturating_mul(200)
         .min(1 << 20);
     let start = size.saturating_sub(want);
@@ -538,14 +561,14 @@ async fn docker_get(path: &str) -> anyhow::Result<Vec<u8>> {
         let _ = conn.await;
     });
 
-    let req = Request::builder()
+    let request = Request::builder()
         .method("GET")
         .uri(format!("http://localhost{path}"))
         .header("Host", "localhost")
         .body(Empty::<Bytes>::new())?;
-    let res = sender.send_request(req).await?;
-    let status = res.status();
-    let body = res.into_body().collect().await?.to_bytes();
+    let response = sender.send_request(request).await?;
+    let status = response.status();
+    let body = response.into_body().collect().await?.to_bytes();
     if !status.is_success() {
         // Docker's error response has its own message ("No such container: xxx", etc.).
         // Just returning "docker API returned 404" makes it impossible to tell why the container
@@ -573,14 +596,14 @@ async fn docker_write(method: &str, path: &str) -> anyhow::Result<(u16, String)>
         let _ = conn.await;
     });
 
-    let req = Request::builder()
+    let request = Request::builder()
         .method(method)
         .uri(format!("http://localhost{path}"))
         .header("Host", "localhost")
         .body(Empty::<Bytes>::new())?;
-    let res = sender.send_request(req).await?;
-    let status = res.status().as_u16();
-    let body = res
+    let response = sender.send_request(request).await?;
+    let status = response.status().as_u16();
+    let body = response
         .into_body()
         .collect()
         .await
@@ -591,6 +614,10 @@ async fn docker_write(method: &str, path: &str) -> anyhow::Result<(u16, String)>
 
 #[cfg(test)]
 mod tests {
+    // Tests assert exact zero values (cpu_percent when no online CPUs reported,
+    // mem_usage_bytes for empty stats). Integer-valued by construction.
+    #![allow(clippy::float_cmp)]
+
     use super::*;
 
     /// Real `docker inspect` skeleton: containers started by compose have com.docker.compose.* labels
@@ -625,7 +652,7 @@ mod tests {
         "State": { "Status": "running", "StartedAt": "0001-01-01T00:00:00Z", "FinishedAt": "0001-01-01T00:00:00Z" }
     }"#;
 
-    /// Real `docker stats?stream=false` skeleton (cgroup v2: inactive_file)
+    /// Real `docker stats?stream=false` skeleton (cgroup v2: `inactive_file`)
     const STATS_CGROUP_V2: &str = r#"{
         "read": "2026-09-23T10:00:00.000000000Z",
         "memory_stats": {
@@ -718,7 +745,7 @@ mod tests {
                 "HostConfig": { "Memory": 536870912, "NanoCpus": 2000000000 }
             }"#,
         );
-        assert_eq!(rt.mem_limit_bytes, 536870912);
+        assert_eq!(rt.mem_limit_bytes, 536_870_912);
         assert_eq!(rt.cpu_limit_nano, 2_000_000_000);
     }
 
@@ -766,7 +793,7 @@ mod tests {
             serde_json::from_str(STATS_CGROUP_V2).expect("stats JSON should parse");
         let u = usage_from_stats(&parsed);
         // 100 MiB - 20 MiB inactive_file
-        assert_eq!(u.mem_usage_bytes, 83886080);
+        assert_eq!(u.mem_usage_bytes, 83_886_080);
         // (300e6-200e6)/(2000e6-1000e6) * 4 cores * 100 = 40%
         assert!((u.cpu_percent - 40.0).abs() < 1e-9);
     }
@@ -783,7 +810,7 @@ mod tests {
         .expect("stats JSON should parse");
         let u = usage_from_stats(&parsed);
         // v1 uses cache (same as docker CLI), only falls back to total_inactive_file if missing
-        assert_eq!(u.mem_usage_bytes, 104857600 - 41943040);
+        assert_eq!(u.mem_usage_bytes, 104_857_600 - 41_943_040);
         // online_cpus missing -> use percpu_usage length; neither here -> can't compute percentage, don't lie
         assert_eq!(u.cpu_percent, 0.0);
     }

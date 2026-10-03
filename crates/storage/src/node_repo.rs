@@ -11,7 +11,7 @@ pub struct NodeRecord {
     pub client_cert_pem: String,
     pub enrolled_at_unix_nano: i64,
     pub last_seen_unix_nano: Option<i64>,
-    /// Basic host info (JSON, from telemetry's HostInfo)
+    /// Basic host info (JSON, from telemetry's `HostInfo`)
     pub host_info_json: String,
     /// Node Ed25519 public key (base64). Used for request signature verification, replacing the original mTLS client cert.
     pub public_key: String,
@@ -21,7 +21,7 @@ pub struct NodeRecord {
     pub tags_json: String,
 }
 
-/// Bare form of SQLite row: one-to-one correspondence with SELECT column order.
+/// Bare form of `SQLite` row: one-to-one correspondence with SELECT column order.
 type NodeRow = (
     String,      // id
     String,      // hostname
@@ -41,16 +41,21 @@ pub struct NodeRepo {
 }
 
 impl NodeRepo {
-    pub fn new(pool: SqlitePool) -> Self {
+    #[must_use] pub const fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 
+    /// Insert a new node record.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the insert fails (e.g. duplicate `id`).
     pub async fn insert(&self, record: &NodeRecord) -> anyhow::Result<()> {
         sqlx::query(
-            r#"
+            r"
             INSERT INTO nodes (id, hostname, labels_json, client_cert_pem, enrolled_at_unix_nano, last_seen_unix_nano, public_key, alias, tags_json)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            "#,
+            ",
         )
         .bind(&record.id)
         .bind(&record.hostname)
@@ -66,13 +71,18 @@ impl NodeRepo {
         Ok(())
     }
 
+    /// Look up a node by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn find_by_id(&self, id: &NodeId) -> anyhow::Result<Option<NodeRecord>> {
         let row: Option<NodeRow> =
             sqlx::query_as(
-                r#"
+                r"
             SELECT id, hostname, labels_json, client_cert_pem, enrolled_at_unix_nano, last_seen_unix_nano, host_info_json, public_key, alias, tags_json
             FROM nodes WHERE id = ?
-            "#,
+            ",
             )
         .bind(id.as_str())
         .fetch_optional(&self.pool)
@@ -105,6 +115,11 @@ impl NodeRepo {
         ))
     }
 
+    /// Stamp `last_seen_unix_nano = now` for a node.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update fails.
     pub async fn touch_last_seen(&self, id: &NodeId) -> anyhow::Result<()> {
         let now = Utc::now().timestamp_nanos_opt().unwrap_or(0);
         sqlx::query("UPDATE nodes SET last_seen_unix_nano = ? WHERE id = ?")
@@ -116,7 +131,11 @@ impl NodeRepo {
     }
 
     /// Allow node to report a new hostname (e.g., first report had system hostname as "bogon",
-    /// later uses LocalHostName or --node-name). Only updates if name is non-empty and actually different.
+    /// later uses `LocalHostName` or --node-name). Only updates if name is non-empty and actually different.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update fails.
     pub async fn update_hostname(&self, id: &NodeId, hostname: &str) -> anyhow::Result<()> {
         if hostname.trim().is_empty() {
             return Ok(());
@@ -130,7 +149,11 @@ impl NodeRepo {
         Ok(())
     }
 
-    /// Overwrite node basic info with the latest reported HostInfo.
+    /// Overwrite node basic info with the latest reported `HostInfo`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update fails.
     pub async fn update_host_info(&self, id: &NodeId, host_info_json: &str) -> anyhow::Result<()> {
         sqlx::query("UPDATE nodes SET host_info_json = ? WHERE id = ?")
             .bind(host_info_json)
@@ -141,6 +164,10 @@ impl NodeRepo {
     }
 
     /// Overwrite admin-maintained alias and tags (node reporting doesn't touch these columns).
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the update fails.
     pub async fn update_meta(
         &self,
         id: &NodeId,
@@ -156,13 +183,18 @@ impl NodeRepo {
         Ok(())
     }
 
+    /// List all enrolled nodes, newest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
     pub async fn list_all(&self) -> anyhow::Result<Vec<NodeRecord>> {
         let rows: Vec<NodeRow> =
             sqlx::query_as(
-                r#"
+                r"
             SELECT id, hostname, labels_json, client_cert_pem, enrolled_at_unix_nano, last_seen_unix_nano, host_info_json, public_key, alias, tags_json
             FROM nodes ORDER BY enrolled_at_unix_nano DESC
-            "#,
+            ",
             )
         .fetch_all(&self.pool)
         .await?;
@@ -200,19 +232,23 @@ impl NodeRepo {
     /// Delete a node: clean up this row along with all its referencing data.
     ///
     /// Design choices:
-    ///   - **Direct SQL, not wrapped in transactions**: SQLite uses file-level locking, there's no
+    ///   - **Direct SQL, not wrapped in transactions**: `SQLite` uses file-level locking, there's no
     ///     real concurrent transaction boundary. Adding BEGIN/COMMIT just makes people think there's
     ///     rollback capability. Failures bubble up directly to callers.
-    ///   - **Synchronously delete strong references**: telemetry_batches / node_inventory have FKs,
-    ///     must be deleted first. telemetry_hourly / probe_results / cert_sources / alerts /
-    ///     alert_state have no FKs, but must also be cleared when node is deleted -- without the
+    ///   - **Synchronously delete strong references**: `telemetry_batches` / `node_inventory` have FKs,
+    ///     must be deleted first. `telemetry_hourly` / `probe_results` / `cert_sources` / alerts /
+    ///     `alert_state` have no FKs, but must also be cleared when node is deleted -- without the
     ///     node, historical metrics and "auto-close alerts" make no sense.
-    ///   - **probes.node_ids_json is a string array**: need to remove this node's id from all probes,
+    ///   - **`probes.node_ids_json` is a string array**: need to remove this node's id from all probes,
     ///     can't just DELETE directly, otherwise remaining probes will keep treating it as a bound node.
     ///     Here we modify the JSON array in the database with a SQL expression, a single UPDATE
     ///     removes all references.
     ///   - **commands deleted together**: issued commands are all "targeting this node", meaningless
-    ///     without the node. The only thing to preserve is `audit_log`, but audit_log has no node_id column.
+    ///     without the node. The only thing to preserve is `audit_log`, but `audit_log` has no `node_id` column.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if any of the queries or transaction operations fail.
     pub async fn delete(&self, id: &str) -> anyhow::Result<bool> {
         let mut tx = self.pool.begin().await?;
 
@@ -290,9 +326,9 @@ mod delete_tests {
     //!
     //! Key invariants:
     //!   1. Node row is actually deleted;
-    //!   2. All tables referencing node_id are cleaned up;
-    //!   3. The node id is removed from probes' node_ids_json array, other nodes' bindings unaffected;
-    //!   4. audit_log is preserved -- it's an audit requirement, shouldn't be wiped with the node;
+    //!   2. All tables referencing `node_id` are cleaned up;
+    //!   3. The node id is removed from probes' `node_ids_json` array, other nodes' bindings unaffected;
+    //!   4. `audit_log` is preserved -- it's an audit requirement, shouldn't be wiped with the node;
     //!   5. Deleting a non-existent node returns false (and doesn't error).
 
     use super::*;
@@ -323,50 +359,48 @@ mod delete_tests {
         }
     }
 
-    #[tokio::test]
-    async fn delete_cascades_to_all_referencing_tables() {
-        let pool = fresh_pool().await;
-        let repo = NodeRepo::new(pool.clone());
-
-        // Enroll + insert one row in each related table
-        repo.insert(&make_record("n1", "host-a")).await.unwrap();
+    async fn seed_node_references(pool: &sqlx::SqlitePool) {
+        // One row per related table referencing node 'n1'.
         sqlx::query(
             "INSERT INTO telemetry_batches (node_id, ts_unix_nano, interval_seconds, payload_protobuf, received_at_unix_nano)
              VALUES ('n1', 0, 10, x'', 0)",
         )
-        .execute(&pool)
+        .execute(pool)
         .await
         .unwrap();
         sqlx::query(
             "INSERT INTO telemetry_hourly (node_id, ts_hour_unix_nano, metric, avg, min, max, first, last, samples)
              VALUES ('n1', 0, 'host.cpu.usage', 0, 0, 0, 0, 0, 1)",
         )
-        .execute(&pool)
+        .execute(pool)
         .await
         .unwrap();
         sqlx::query(
             "INSERT INTO node_inventory (node_id, ts_unix_nano, containers_json, processes_json)
              VALUES ('n1', 0, '[]', '[]')",
         )
-        .execute(&pool)
+        .execute(pool)
         .await
         .unwrap();
-        sqlx::query("INSERT INTO probe_results (probe_id, node_id, ts_unix_nano, state, latency_ms) VALUES ('p1', 'n1', 0, 'ok', 0)")
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO probe_results (probe_id, node_id, ts_unix_nano, state, latency_ms)
+             VALUES ('p1', 'n1', 0, 'ok', 0)",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
         sqlx::query(
             "INSERT INTO cert_sources (id, node_id, path, enabled, notify_enabled, notify_days_before, created_at_unix_nano, updated_at_unix_nano)
              VALUES ('cs1', 'n1', '/etc/ssl', 1, 1, 30, 0, 0)",
         )
-        .execute(&pool)
+        .execute(pool)
         .await
         .unwrap();
         sqlx::query(
             "INSERT INTO commands (id, node_id, action, params_json, payload_protobuf, issued_at_unix_nano, ttl_seconds, state)
              VALUES ('c1', 'n1', 'restart', '{}', x'', 0, 60, 'delivered')",
         )
-        .execute(&pool)
+        .execute(pool)
         .await
         .unwrap();
         sqlx::query(
@@ -375,34 +409,42 @@ mod delete_tests {
              VALUES (0, 'node offline', 'n1', 'host-a', 'critical', 'host.online', 'eq', 0, 0,
                      'offline', 0, 'node_offline', 'n1')",
         )
-        .execute(&pool)
+        .execute(pool)
         .await
         .unwrap();
         sqlx::query(
             "INSERT INTO alert_state (rule_id, node_id, breaching_since_unix_nano, firing, open_alert_id, last_value)
              VALUES (0, 'n1', 0, 1, 1, 0)",
         )
-        .execute(&pool)
+        .execute(pool)
         .await
         .unwrap();
-
         // Also insert one in audit_log -- must remain after node deletion
         sqlx::query(
             "INSERT INTO audit_log (at_unix_nano, actor, node_id, command_id, action, params_json, outcome)
              VALUES (0, 'admin', 'n1', 'c1', 'restart', '{}', 'issued')",
         )
-        .execute(&pool)
+        .execute(pool)
         .await
         .unwrap();
-
         // Probe binds two nodes: n1 (to be deleted) + n2 (to keep)
         sqlx::query(
             "INSERT INTO probes (id, service_id, name, kind, target_json, expect_json, interval_seconds, timeout_ms, failure_threshold, node_ids_json, location, enabled, created_at_unix_nano, updated_at_unix_nano)
              VALUES ('pr1', 'svc1', 'http', 'http', '{}', '{}', 60, 5000, 3, '[\"n1\",\"n2\"]', '', 1, 0, 0)",
         )
-        .execute(&pool)
+        .execute(pool)
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_cascades_to_all_referencing_tables() {
+        let pool = fresh_pool().await;
+        let repo = NodeRepo::new(pool.clone());
+
+        // Enroll + insert one row in each related table
+        repo.insert(&make_record("n1", "host-a")).await.unwrap();
+        seed_node_references(&pool).await;
 
         // Confirm data was actually written
         let audit_before: i64 =

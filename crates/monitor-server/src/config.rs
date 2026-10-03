@@ -34,7 +34,7 @@ impl MonitorConfig {
     }
 }
 
-/// PaaS platforms (Render / Railway / Northflank / Heroku-style) inject `PORT`
+/// `PaaS` platforms (Render / Railway / Northflank / Heroku-style) inject `PORT`
 /// and expect the process to bind `0.0.0.0:$PORT`. Honour it when the config
 /// file does not pin a listen address.
 fn default_listen() -> String {

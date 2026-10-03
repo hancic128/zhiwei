@@ -5,8 +5,9 @@
 //!   - `http://`: placed behind a managed platform edge (edge already terminates TLS)
 //!
 //! Identity is no longer based on client certificates, but on a set of Ed25519 signing headers
-//! sent with each request (see zhiwei_common::auth). This allows nodes to be deployed to any HTTP environment.
+//! sent with each request (see `zhiwei_common::auth`). This allows nodes to be deployed to any HTTP environment.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use anyhow::{bail, Context};
@@ -170,10 +171,12 @@ impl HttpTransport {
             req.push_str(value);
             req.push_str("\r\n");
         }
-        req.push_str(&format!(
+        // Writing to String never fails; ignore the result.
+        let _ = write!(
+            req,
             "Content-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
-        ));
+        );
 
         AsyncWriteExt::write_all(&mut io, req.as_bytes()).await?;
         AsyncWriteExt::write_all(&mut io, body).await?;
@@ -193,7 +196,7 @@ impl HttpTransport {
 /// body to `serde_json` -- this path explodes behind edges like Render/Cloudflare that "force chunked"
 /// on HTTP/1.1 + close, polluting the body with `<hex>\r\n...\r\n0\r\n\r\n`,
 /// causing JSON parse errors like `trailing characters at line 1 column 2` (2026-09-21).
-pub(crate) async fn read_response<R>(io: &mut R) -> anyhow::Result<(u16, Vec<u8>)>
+pub async fn read_response<R>(io: &mut R) -> anyhow::Result<(u16, Vec<u8>)>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -209,7 +212,7 @@ where
     }
     let status_line_str = std::str::from_utf8(&status_line)
         .map_err(|e| anyhow::anyhow!("response: status line not UTF-8: {e}"))?
-        .trim_end_matches(|c| c == '\r' || c == '\n');
+        .trim_end_matches(['\r', '\n']);
     let mut parts = status_line_str.split_whitespace();
     let _version = parts.next().context("response: status line empty")?;
     let status: u16 = parts
@@ -231,7 +234,7 @@ where
         }
         let s = std::str::from_utf8(&line)
             .map_err(|e| anyhow::anyhow!("response: header not UTF-8: {e}"))?
-            .trim_end_matches(|c| c == '\r' || c == '\n');
+            .trim_end_matches(['\r', '\n']);
         let Some((k, v)) = s.split_once(':') else {
             continue;
         };
@@ -244,11 +247,10 @@ where
 
     let is_chunked = transfer_encoding
         .as_deref()
-        .map(|s| {
+        .is_some_and(|s| {
             s.split(',')
                 .any(|t| t.trim().eq_ignore_ascii_case("chunked"))
-        })
-        .unwrap_or(false);
+        });
 
     // ---- body ----
     let body = if is_chunked {
@@ -273,7 +275,7 @@ where
 ///
 /// chunk = size-line CRLF data CRLF, size-line = 1*HEX [ ";" ext ].
 /// Terminating chunk = "0" CRLF *( trailer CRLF ) CRLF.
-pub(crate) async fn decode_chunked_body<R>(
+pub async fn decode_chunked_body<R>(
     br: &mut tokio::io::BufReader<R>,
 ) -> anyhow::Result<Vec<u8>>
 where
@@ -291,7 +293,7 @@ where
         }
         let size_str = std::str::from_utf8(&size_line)
             .map_err(|e| anyhow::anyhow!("chunked: size line not UTF-8: {e}"))?
-            .trim_end_matches(|c| c == '\r' || c == '\n');
+            .trim_end_matches(['\r', '\n']);
         let size_hex = size_str.split(';').next().unwrap_or("").trim();
         let size = usize::from_str_radix(size_hex, 16)
             .map_err(|e| anyhow::anyhow!("chunked: unable to parse size {size_hex:?}: {e}"))?;
@@ -328,14 +330,14 @@ where
     }
 }
 
-/// Allows TlsStream and TcpStream to share a trait object
-pub(crate) trait IoStream:
+/// Allows `TlsStream` and `TcpStream` to share a trait object
+pub trait IoStream:
     tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send
 {
 }
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> IoStream for T {}
 
-pub(crate) fn build_client_config(
+pub fn build_client_config(
     ca_pem: Option<&str>,
     skip_verify: bool,
 ) -> anyhow::Result<ClientConfig> {
