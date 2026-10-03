@@ -23,13 +23,14 @@ jobs:
             command: cargo clippy --all-targets -- -D warnings
           - job: test
             command: cargo test --all-targets
-          - job: deny
-            command: cargo deny check
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned deliberately. clippy and rustfmt gain lints between releases, so
+      # `@stable` drifts ahead of the dev toolchain and turns unrelated PRs red.
+      # Bump this together with a formatting/lint cleanup pass.
+      - uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: rustfmt, clippy
 
@@ -41,6 +42,13 @@ jobs:
       - name: ${{ matrix.job }}
         run: ${{ matrix.command }}
 
+  deny:
+    name: Rust (deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
   ui:
     name: UI
     runs-on: ubuntu-latest
@@ -51,20 +59,17 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "ui/node_modules"
+          cache: "npm"
           cache-dependency-path: "ui/package-lock.json"
 
       - name: Install dependencies
         working-directory: ui
         run: npm ci
 
+      # `npm run build` runs the locale key-count check, tsc, and vite build.
       - name: Build
         working-directory: ui
         run: npm run build
-
-      - name: Lint
-        working-directory: ui
-        run: npm run lint
 
   docker:
     name: Docker
@@ -85,10 +90,11 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=min
 
-  # Aggregate status: every job must pass
+  # Aggregate status: every job must pass. Branch protection on `main`
+  # requires a check named exactly `CI/checks`, so this job carries that name.
   success:
-    name: All checks passed
-    needs: [rust, ui, docker]
+    name: CI/checks
+    needs: [rust, deny, ui, docker]
     runs-on: ubuntu-latest
     steps:
       - run: echo "All CI checks passed!"

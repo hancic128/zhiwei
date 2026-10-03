@@ -17,7 +17,7 @@ ui/**:
 docs/**:
   - changed-files:
       - any-glob-to-any-file: 'docs/**'
-  - all-globs-to-all-files: '*.md'
+      - all-globs-to-all-files: '*.md'
 
 # CI/CD
 .github/workflows/**:
@@ -27,8 +27,9 @@ docs/**:
 # Docker
 Dockerfile:
   - changed-files:
-      - any-glob-to-any-file: 'Dockerfile'
-        - any-glob-to-any-file: '.dockerignore'
+      - any-glob-to-any-file:
+          - 'Dockerfile'
+          - '.dockerignore'
 
 # Scripts
 scripts/**:
