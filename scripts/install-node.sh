@@ -65,11 +65,10 @@
 #   ZHIWEI_SERVICE_FILE      服务配置路径（默认按平台：systemd unit / launchd plist）
 #   ZHIWEI_LOG_FILE          仅 macOS：launchd 捕获的日志文件（默认 /var/log/zhiwei-node.log）
 #   ZHIWEI_BASE_URL          自建下载源（同 install.sh 语义）。设了就不走 GitHub Releases。
-#                            已知可用值：
-#                              - https://artifacts.hancic.site/releases/hancic128/zhiwei
-#                                （hancic-artifacts 国内直连，由 CI 每次 tag 同步）
-#                            安装时设了会一并记进 env 文件，之后 `--upgrade` 自动沿用
-#                            （国内机器靠它升级，不必每次回忆这个地址）。
+#                            任何按 <owner>/<repo>/v<tag>/<file> 排布的镜像都支持
+#                            （ghcr clone / 内部站点 / 自建），例：
+#                              - https://mirror.example.com/releases/<owner>/<repo>
+#                            安装时设了会一并记进 env 文件，之后 `--upgrade` 自动沿用。
 #   ZHIWEI_CACHE_DIR         安装包缓存目录（默认 /var/cache/zhiwei-node）。重复入网时先取
 #                            远端的 .sha256（几百字节）比对缓存：一致就直接用缓存，不再
 #                            下载整个包。取不到 .sha256 时一定不复用（宁可多花一次带宽）。

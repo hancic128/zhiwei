@@ -191,7 +191,7 @@ Default installs `zhiwei-node`; use `-s -- --bin monitor` to install monitor.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/hancic128/zhiwei/main/scripts/install.sh \
-  | ZHIWEI_BASE_URL=https://artifacts.hancic.site/releases/hancic128/zhiwei sh
+  | ZHIWEI_BASE_URL=https://mirror.example.com/releases/hancic128/zhiwei sh
 ```
 
 ### Enroll
