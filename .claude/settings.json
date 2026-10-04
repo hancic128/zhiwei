@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "zhiwei-monitor": {
+      "type": "http",
+      "url": "http://127.0.0.1:8443/mcp/sse",
+      "headers": {
+        "Authorization": "Bearer <YOUR_TOKEN>"
+      }
+    }
+  }
+}

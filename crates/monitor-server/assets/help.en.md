@@ -171,7 +171,7 @@ These are **completely independent**, with different intents:
 ## AI integration
 
 ZhiWei exposes an MCP SSE endpoint (`{{BASE_URL}}/mcp/sse`) so Claude Desktop,
-Cursor, Cline, etc. can read cluster data directly.
+Cursor, Cline, Claude Code, etc. can read and manage cluster data directly.
 
 ### 1. Create an AI token
 
@@ -180,12 +180,13 @@ the plaintext token (**shown only once**).
 
 ### 2. Configure the MCP client
 
-In Claude Desktop's `claude_desktop_config.json`:
+In your AI client's MCP settings file:
 
 ```json
 {
   "mcpServers": {
     "zhiwei": {
+      "type": "http",
       "url": "{{BASE_URL}}/mcp/sse",
       "headers": {
         "Authorization": "Bearer ait_xxxxxxxxxxxxxxxx"
@@ -197,23 +198,72 @@ In Claude Desktop's `claude_desktop_config.json`:
 
 ### 3. Available tools
 
-- `list_nodes` — cluster node overview (includes `alias` and `tags` so the AI
-  sees the same names you see in the console)
+**Node management** (3):
+- `list_nodes` — cluster node overview (includes `alias` and `tags`)
 - `get_node` — single-node details (host_info + latest metrics)
-- `get_telemetry` — single-node time series
-- `list_alerts` — all active alerts + 50 most recent resolved
-- `list_certs` — certificate scan sources ("node + path" config, no certificate content)
-- `list_containers` — single-node latest container snapshot
-- `list_processes` — single-node latest process snapshot TopN
+- `update_node` — update node alias/tags (write)
+- `delete_node` — delete a node (write)
 
-Container / process snapshots come from the node's low-frequency inventory
-report, so the node must have reported at least once.
+**Telemetry** (1):
+- `get_telemetry` — single-node time series
+
+**Alerts** (8):
+- `list_alerts` — all active + 50 recent resolved
+- `silence_alert` — silence an alert for N minutes (write)
+- `resolve_alert` — manually resolve an alert (write)
+- `list_rules` — custom alert rules
+- `create_rule` — create a new alert rule (write)
+- `update_rule` — update an alert rule (write)
+- `delete_rule` — delete an alert rule (write)
+- `list_builtin_rules` — built-in alert rules
+- `update_builtin_rule` — enable/disable built-in rules (write)
+
+**Certificates** (5):
+- `list_certs` — certificate scan sources
+- `create_cert_source` — add a certificate scan source (write)
+- `test_cert_source` — test a certificate scan source (write)
+- `update_cert_source` — update a certificate source (write)
+- `delete_cert_source` — delete a certificate source (write)
+
+**Channels** (5):
+- `list_channels` — notification channels
+- `create_channel` — create a notification channel (write)
+- `test_channel` — test a channel (write)
+- `update_channel` — update a channel (write)
+- `delete_channel` — delete a channel (write)
+
+**Services** (4):
+- `list_services` — service list
+- `create_service` — create a service (write)
+- `update_service` — update a service (write)
+- `delete_service` — delete a service (write)
+
+**Probes** (6):
+- `list_probes` — all probes
+- `create_probe` — create a probe (write)
+- `test_probe` — test a probe configuration (write)
+- `update_probe` — update a probe (write)
+- `delete_probe` — delete a probe (write)
+- `get_probe_results` — probe history results
+
+**Commands** (3):
+- `exec_command` — execute a command on a node (write)
+- `list_command_history` — command execution history
+- `get_command` — command details
+
+**Other** (4):
+- `list_containers` — single-node container snapshot
+- `list_processes` — single-node process snapshot
+- `get_todo` — todo items
+- `get_retention` — data retention policy
+
+**Total: 47 tools**
 
 ### Security boundary
 
-AI tokens can only **read**. Deleting nodes, restarting services, modifying
-alerts, etc. are **not** in AI token scope (they require console login +
-admin token).
+AI tokens can **read** cluster data and **write** (create/update/delete) alert
+rules, channels, services, probes, and certificates. High-risk operations
+(executing commands, deleting nodes) should be used with caution.
 
 After revoking an AI token, the next request immediately returns 401.
 

@@ -146,7 +146,7 @@ monitor 连不上 ops：
 ## AI 怎么用
 
 知微暴露 MCP SSE 端点（`{{BASE_URL}}/mcp/sse`），让 Claude Desktop、
-Cursor、Cline 等能直接读集群数据。
+Cursor、Cline、Claude Code 等能直接读写集群数据。
 
 ### 1. 创建 AI Token
 
@@ -155,12 +155,13 @@ Cursor、Cline 等能直接读集群数据。
 
 ### 2. 配置 MCP 客户端
 
-在 Claude Desktop 的 `claude_desktop_config.json` 里加：
+在 AI 客户端的 MCP 配置文件中加入：
 
 ```json
 {
   "mcpServers": {
     "zhiwei": {
+      "type": "http",
       "url": "{{BASE_URL}}/mcp/sse",
       "headers": {
         "Authorization": "Bearer ait_xxxxxxxxxxxxxxxx"
@@ -172,21 +173,71 @@ Cursor、Cline 等能直接读集群数据。
 
 ### 3. 可用工具
 
-- `list_nodes` — 集群节点总览（含别名字段 `alias` 与 `tags`，AI 读到的名字
-  和你控制台里看到的一致）
+**节点管理** (4个):
+- `list_nodes` — 集群节点总览（含别名与标签）
 - `get_node` — 单节点详情（host_info + 最新指标）
-- `get_telemetry` — 单节点时间序列
-- `list_alerts` — 全部活跃告警 + 最近 50 条已解决
-- `list_certs` — 证书扫描来源（「节点 + 路径」配置，不含证书内容）
-- `list_containers` — 单节点最新容器快照
-- `list_processes` — 单节点最新进程快照 TopN
+- `update_node` — 更新节点别名/标签（写）
+- `delete_node` — 删除节点（写）
 
-容器 / 进程快照来自节点低频上报的 inventory，所以要求该节点已经报过一次。
+**遥测** (1个):
+- `get_telemetry` — 单节点时间序列
+
+**告警** (9个):
+- `list_alerts` — 全部活跃 + 最近 50 条已解决
+- `silence_alert` — 静默告警 N 分钟（写）
+- `resolve_alert` — 手动解决告警（写）
+- `list_rules` — 自定义告警规则
+- `create_rule` — 创建告警规则（写）
+- `update_rule` — 更新告警规则（写）
+- `delete_rule` — 删除告警规则（写）
+- `list_builtin_rules` — 内置告警规则
+- `update_builtin_rule` — 启停内置规则（写）
+
+**证书** (5个):
+- `list_certs` — 证书扫描来源
+- `create_cert_source` — 添加证书扫描源（写）
+- `test_cert_source` — 测试证书扫描源（写）
+- `update_cert_source` — 更新证书源（写）
+- `delete_cert_source` — 删除证书源（写）
+
+**通知渠道** (5个):
+- `list_channels` — 通知渠道列表
+- `create_channel` — 创建通知渠道（写）
+- `test_channel` — 测试渠道（写）
+- `update_channel` — 更新渠道（写）
+- `delete_channel` — 删除渠道（写）
+
+**服务** (4个):
+- `list_services` — 服务列表
+- `create_service` — 创建服务（写）
+- `update_service` — 更新服务（写）
+- `delete_service` — 删除服务（写）
+
+**探测** (6个):
+- `list_probes` — 所有探测
+- `create_probe` — 创建探测（写）
+- `test_probe` — 测试探测配置（写）
+- `update_probe` — 更新探测（写）
+- `delete_probe` — 删除探测（写）
+- `get_probe_results` — 探测历史结果
+
+**命令** (3个):
+- `exec_command` — 在节点执行命令（写）
+- `list_command_history` — 命令历史
+- `get_command` — 命令详情
+
+**其他** (4个):
+- `list_containers` — 单节点容器快照
+- `list_processes` — 单节点进程快照
+- `get_todo` — 待办事项
+- `get_retention` — 数据保留策略
+
+**共计：47 个工具**
 
 ### 安全边界
 
-AI token 只允许**读**。删除节点、重启服务、修改告警等写操作**不在 AI
-token 权限范围**（需要控制台登录 + admin token）。
+AI token 可以**读取**集群数据，也可以**写**告警规则、渠道、服务、探测、
+证书等。危险操作（执行命令、删除节点）请谨慎使用。
 
 撤销 AI token 后，下一次请求立即返回 401。
 
