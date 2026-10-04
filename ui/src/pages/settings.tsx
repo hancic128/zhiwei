@@ -74,7 +74,7 @@ function RetentionSection() {
   const toast = useToast();
   const q = useQuery({ queryKey: ["retention"], queryFn: retentionApi.get });
   const update = useMutation({
-    mutationFn: (params: { raw_days?: number; hourly_days?: number; alert_retention_days?: number }) =>
+    mutationFn: (params: { raw?: number; hourly?: number; alerts?: number }) =>
       retentionApi.update(params),
     onSuccess: () => {
       toast.push("success", t("settings.retentionSaved"));
@@ -89,23 +89,23 @@ function RetentionSection() {
 
   React.useEffect(() => {
     if (q.data) {
-      setEditRaw(q.data.raw_days);
-      setEditHourly(q.data.hourly_days);
-      setEditAlert(q.data.alert_retention_days);
+      setEditRaw(q.data.raw_retention_days.value);
+      setEditHourly(q.data.hourly_retention_days.value);
+      setEditAlert(q.data.alert_retention_days.value);
     }
   }, [q.data]);
 
   const handleSave = () => {
     update.mutate({
-      raw_days: editRaw ?? undefined,
-      hourly_days: editHourly ?? undefined,
-      alert_retention_days: editAlert ?? undefined,
+      raw: editRaw ?? undefined,
+      hourly: editHourly ?? undefined,
+      alerts: editAlert ?? undefined,
     });
   };
 
-  const isDirty = editRaw !== q.data?.raw_days ||
-    editHourly !== q.data?.hourly_days ||
-    editAlert !== q.data?.alert_retention_days;
+  const isDirty = editRaw !== q.data?.raw_retention_days.value ||
+    editHourly !== q.data?.hourly_retention_days.value ||
+    editAlert !== q.data?.alert_retention_days.value;
 
   return (
     <Card>
@@ -141,6 +141,8 @@ function RetentionSection() {
                   <span className="text-ink-500">{t("retention.daysUnit")}</span>
                 </div>
                 <p className="text-xs text-ink-400 mt-1">{t("retention.rawHint")}</p>
+                <p className="text-xs text-ink-500 mt-1">{q.data.raw_retention_days.description}</p>
+                <p className="text-xs text-brand-600 dark:text-brand-400 mt-1">{q.data.raw_retention_days.when_effective}</p>
               </div>
               <div>
                 <p className="text-xs text-ink-400">{t("retention.hourlyTitle")}</p>
@@ -156,6 +158,8 @@ function RetentionSection() {
                   <span className="text-ink-500">{t("retention.daysUnit")}</span>
                 </div>
                 <p className="text-xs text-ink-400 mt-1">{t("retention.hourlyHint")}</p>
+                <p className="text-xs text-ink-500 mt-1">{q.data.hourly_retention_days.description}</p>
+                <p className="text-xs text-brand-600 dark:text-brand-400 mt-1">{q.data.hourly_retention_days.when_effective}</p>
               </div>
               <div>
                 <p className="text-xs text-ink-400">{t("retention.alertTitle")}</p>
@@ -171,6 +175,8 @@ function RetentionSection() {
                   <span className="text-ink-500">{t("retention.daysUnit")}</span>
                 </div>
                 <p className="text-xs text-ink-400 mt-1">{t("retention.alertDaysHint")}</p>
+                <p className="text-xs text-ink-500 mt-1">{q.data.alert_retention_days.description}</p>
+                <p className="text-xs text-brand-600 dark:text-brand-400 mt-1">{q.data.alert_retention_days.when_effective}</p>
               </div>
             </div>
             {isDirty && (

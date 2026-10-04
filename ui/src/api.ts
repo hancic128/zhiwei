@@ -780,14 +780,26 @@ export const builtinAlertsApi = {
 
 /** Data retention policy — numbers come from backend retention.rs, no hard-coding on the frontend */
 export interface RetentionView {
-  raw_days: number;
-  hourly_days: number;
-  alert_retention_days: number;
+  raw_retention_days: {
+    value: number;
+    description: string;
+    when_effective: string;
+  };
+  hourly_retention_days: {
+    value: number;
+    description: string;
+    when_effective: string;
+  };
+  alert_retention_days: {
+    value: number;
+    description: string;
+    when_effective: string;
+  };
 }
 
 export const retentionApi = {
   get: () => request<RetentionView>("/v1/retention"),
-  update: (body: { alert_retention_days?: number }) =>
+  update: (body: { raw?: number; hourly?: number; alerts?: number }) =>
     request<RetentionView>("/v1/retention", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
