@@ -334,10 +334,10 @@ async fn probe_timeline(state: &AppState, from_ms: i64, to_ms: i64, bucket_ns: i
     let out: Vec<serde_json::Value> = probes
         .iter()
         .filter_map(|p| {
-            let points = series.remove(&p.id)?;
+            let points = series.remove(&p.probe.id)?;
             Some(serde_json::json!({
-                "id": p.id,
-                "name": p.name,
+                "id": p.probe.id,
+                "name": p.probe.name,
                 "group": serde_json::Value::Null,
                 "points": points,
             }))

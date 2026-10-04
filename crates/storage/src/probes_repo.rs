@@ -228,19 +228,69 @@ impl ProbesRepo {
 
     // ---------- Probes ----------
 
-    /// List all probes (ordered by name).
+    /// List all probes with their current state (ordered by name).
     ///
     /// # Errors
     ///
     /// Returns `sqlx::Error` if the query or label lookup fails.
-    pub async fn list_probes(&self) -> anyhow::Result<Vec<Probe>> {
-        let rows: Vec<ProbeRow> = sqlx::query_as(&format!(
+    pub async fn list_probes(&self) -> anyhow::Result<Vec<ProbeWithState>> {
+        // First get all probes
+        let probe_rows: Vec<ProbeRow> = sqlx::query_as(&format!(
             "SELECT {PROBE_COLS} FROM probes p ORDER BY p.name"
         ))
         .fetch_all(&self.pool)
         .await?;
-        let mut probes: Vec<Probe> = rows.into_iter().map(probe_from_row).collect();
-        self.fill_node_labels(&mut probes).await?;
+
+        // Then get all probe states
+        let state_rows: Vec<StateRow> = sqlx::query_as(&format!(
+            "SELECT {STATE_COLS} FROM probe_state"
+        ))
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut state_map: std::collections::HashMap<String, ProbeState> = state_rows
+            .into_iter()
+            .map(|r| {
+                let state = state_from_row(r);
+                (state.probe_id.clone(), state)
+            })
+            .collect();
+
+        let mut probes: Vec<ProbeWithState> = probe_rows
+            .into_iter()
+            .map(|pr| {
+                let id = pr.0.clone();
+                let state = state_map.remove(&id).unwrap_or_else(|| ProbeState::unknown(&id, zhiwei_common::Timestamp::now().unix_nano()));
+                ProbeWithState {
+                    probe: probe_from_row(pr),
+                    state,
+                }
+            })
+            .collect();
+
+        // Fill node labels
+        for p in &mut probes {
+            let node_ids = p.probe.node_ids.clone();
+            if node_ids.is_empty() {
+                p.probe.node_labels = Vec::new();
+                continue;
+            }
+            let rows: Vec<(String, String, String)> =
+                sqlx::query_as("SELECT id, alias, hostname FROM nodes")
+                    .fetch_all(&self.pool)
+                    .await?;
+            let names: std::collections::HashMap<String, String> = rows
+                .into_iter()
+                .map(|(id, alias, hostname)| {
+                    let label = if alias.trim().is_empty() { hostname } else { alias };
+                    (id, label)
+                })
+                .collect();
+            p.probe.node_labels = node_ids
+                .iter()
+                .map(|id| names.get(id).cloned().unwrap_or_else(|| id.clone()))
+                .collect();
+        }
         Ok(probes)
     }
 
@@ -599,14 +649,12 @@ impl ProbesRepo {
         let mut total = 0i64;
         let mut healthy = 0i64;
         for p in &probes {
-            if !p.enabled {
+            if !p.probe.enabled {
                 continue;
             }
             total += 1;
-            if let Some(state) = states.get(&p.id) {
-                if state.state == STATE_OK {
-                    healthy += 1;
-                }
+            if p.state.state == STATE_OK {
+                healthy += 1;
             }
         }
         Ok((healthy, total))
