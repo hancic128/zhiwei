@@ -1,9 +1,9 @@
-//! HTTP API for service health (services / probes).
+//! HTTP API for service health (probes).
 //!
 //! Two types of callers:
 //!   - Nodes: `GET /v1/probe-config` (pull config), `POST /v1/probe-results` (submit results),
 //!     use Ed25519 request signing, can only operate their own data;
-//!   - Console: `/v1/services`, `/v1/probes`, use admin token.
+//!   - Console: `/v1/probes`, use admin token.
 //!
 //! Original `/v1/overview` replaced by `/v1/todo` (`todo_api`) -- see
 //! `docs/superpowers/specs/2026-09-19-product-structure-design.md`.
@@ -66,7 +66,6 @@ pub async fn probe_config_handler(
         .map(|p| {
             serde_json::json!({
                 "id": p.id,
-                "service": p.service_name,
                 "name": p.name,
                 "kind": p.kind,
                 "target": serde_json::from_str::<serde_json::Value>(&p.target_json)
@@ -273,10 +272,7 @@ fn ratio_series(rows: Vec<(String, i64, i64, i64)>) -> HashMap<String, Vec<serde
 /// Uses proportion instead of single probe results -- raw results are affected by sampling density,
 /// curves become jittery; proportions are comparable across different probe frequencies on the same scale.
 ///
-/// `level=service` (default): one line per service; `level=probe`: one line per probe.
-/// Service-level curves flatten out "which probe within the same service is jittering", need to see
-/// it during investigation. Probe-level uses service name as group prefix (`Service / Probe`),
-/// keeping lines for the same service together in the legend.
+/// `level=probe` (default): one line per probe.
 pub async fn services_timeline_handler(
     State(state): State<AppState>,
     Query(q): Query<HashMap<String, String>>,
@@ -307,20 +303,16 @@ pub async fn services_timeline_handler(
         .unwrap_or(60)
         .clamp(10, 240);
     let bucket_ns = (to_ms - from_ms) * 1_000_000 / buckets;
-    let by_probe = q.get("level").map(String::as_str) == Some("probe");
 
-    if by_probe {
-        return probe_timeline(&state, from_ms, to_ms, bucket_ns).await;
-    }
-    service_timeline(&state, from_ms, to_ms, bucket_ns).await
+    probe_timeline(&state, from_ms, to_ms, bucket_ns).await
 }
 
-/// `level=probe`: one line per probe, using the service name as group prefix.
+/// One line per probe.
 async fn probe_timeline(state: &AppState, from_ms: i64, to_ms: i64, bucket_ns: i64) -> Response {
     let rows = match state
         .storage
         .probes()
-        .health_buckets_by_probe(from_ms * 1_000_000, to_ms * 1_000_000, bucket_ns)
+        .health_buckets(from_ms * 1_000_000, to_ms * 1_000_000, bucket_ns)
         .await
     {
         Ok(r) => r,
@@ -345,8 +337,8 @@ async fn probe_timeline(state: &AppState, from_ms: i64, to_ms: i64, bucket_ns: i
             let points = series.remove(&p.id)?;
             Some(serde_json::json!({
                 "id": p.id,
-                "name": format!("{} / {}", p.service_name, p.name),
-                "group": p.service_name,
+                "name": p.name,
+                "group": serde_json::Value::Null,
                 "points": points,
             }))
         })
@@ -362,237 +354,6 @@ async fn probe_timeline(state: &AppState, from_ms: i64, to_ms: i64, bucket_ns: i
     .into_response()
 }
 
-/// `level=service` (default): one line per service.
-async fn service_timeline(state: &AppState, from_ms: i64, to_ms: i64, bucket_ns: i64) -> Response {
-    let rows = match state
-        .storage
-        .probes()
-        .health_buckets(from_ms * 1_000_000, to_ms * 1_000_000, bucket_ns)
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("query probe results: {e}"),
-            )
-        }
-    };
-    let services = state
-        .storage
-        .probes()
-        .list_services()
-        .await
-        .unwrap_or_default();
-
-    // service_id -> point set (in bucket order)
-    let mut series = ratio_series(rows);
-    let out: Vec<serde_json::Value> = services
-        .iter()
-        .filter_map(|s| {
-            let points = series.remove(&s.id)?;
-            Some(serde_json::json!({
-                "id": s.id,
-                "name": s.name,
-                "group": serde_json::Value::Null,
-                "points": points,
-            }))
-        })
-        .collect();
-
-    Json(serde_json::json!({
-        "from_ms": from_ms,
-        "to_ms": to_ms,
-        "bucket_ms": bucket_ns / 1_000_000,
-        "level": "service",
-        "series": out,
-    }))
-    .into_response()
-}
-
-pub async fn list_services_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !read_auth_ok(&state, &headers).await {
-        return err(
-            StatusCode::UNAUTHORIZED,
-            "authentication required (Bearer admin token)",
-        );
-    }
-    match state.storage.probes().services_with_probes().await {
-        Ok(list) => Json(list).into_response(),
-        Err(e) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("list services: {e}"),
-        ),
-    }
-}
-
-pub async fn create_service_handler(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    #[derive(serde::Deserialize)]
-    struct Body {
-        name: String,
-        #[serde(default)]
-        description: String,
-        #[serde(default)]
-        group_name: String,
-        #[serde(default = "default_tier")]
-        tier: i64,
-    }
-    const fn default_tier() -> i64 {
-        2
-    }
-    if !read_auth_ok(&state, &headers).await {
-        return err(
-            StatusCode::UNAUTHORIZED,
-            "authentication required (Bearer admin token)",
-        );
-    }
-
-    let b: Body = match serde_json::from_slice(&body) {
-        Ok(b) => b,
-        Err(e) => return err(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
-    };
-    if b.name.trim().is_empty() {
-        return err(StatusCode::BAD_REQUEST, "Service name cannot be empty");
-    }
-
-    let now = zhiwei_common::Timestamp::now().unix_nano();
-    match state
-        .storage
-        .probes()
-        .create_service(
-            b.name.trim(),
-            &b.description,
-            &b.group_name,
-            b.tier.clamp(1, 3),
-            now,
-        )
-        .await
-    {
-        Ok(svc) => (StatusCode::CREATED, Json(svc)).into_response(),
-        Err(e) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("create service: {e}"),
-        ),
-    }
-}
-
-pub async fn patch_service_handler(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    #[derive(serde::Deserialize)]
-    struct Body {
-        #[serde(default)]
-        name: Option<String>,
-        #[serde(default)]
-        description: Option<String>,
-        #[serde(default)]
-        group_name: Option<String>,
-        #[serde(default)]
-        tier: Option<i64>,
-        #[serde(default)]
-        enabled: Option<bool>,
-    }
-    if !read_auth_ok(&state, &headers).await {
-        return err(
-            StatusCode::UNAUTHORIZED,
-            "authentication required (Bearer admin token)",
-        );
-    }
-    let b: Body = match serde_json::from_slice(&body) {
-        Ok(b) => b,
-        Err(e) => return err(StatusCode::BAD_REQUEST, format!("invalid body: {e}")),
-    };
-    let patch = zhiwei_storage::probes_repo::ServicePatch {
-        name: b.name,
-        description: b.description,
-        group_name: b.group_name,
-        tier: b.tier,
-        enabled: b.enabled,
-    };
-    let now = zhiwei_common::Timestamp::now().unix_nano();
-    match state
-        .storage
-        .probes()
-        .update_service(&id, &patch, now)
-        .await
-    {
-        Ok(()) => {
-            // Disabling entire service: also close unresolved alerts for its probes -- no longer probing,
-            // shouldn't keep showing red. (probe_counts / service health aggregation already exclude disabled,
-            // what we're clearing here are legacy "probe down" alerts and todo items)
-            if patch.enabled == Some(false) {
-                let probes = state
-                    .storage
-                    .probes()
-                    .list_probes()
-                    .await
-                    .unwrap_or_default();
-                for p in probes.iter().filter(|p| p.service_id == id) {
-                    if let Err(e) = state
-                        .storage
-                        .alerts()
-                        .resolve_open_probe_alerts(&p.id, now)
-                        .await
-                    {
-                        warn!(error = %e, "Failed to close service probe alerts");
-                    }
-                }
-            }
-            StatusCode::NO_CONTENT.into_response()
-        }
-        Err(e) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("patch service: {e}"),
-        ),
-    }
-}
-
-pub async fn delete_service_handler(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    if !read_auth_ok(&state, &headers).await {
-        return err(
-            StatusCode::UNAUTHORIZED,
-            "authentication required (Bearer admin token)",
-        );
-    }
-    // First close unresolved alerts for this service's probes, to avoid leaving orphan alerts
-    // that can never be resolved
-    let now = zhiwei_common::Timestamp::now().unix_nano();
-    match state.storage.probes().list_probes().await {
-        Ok(probes) => {
-            for p in probes.iter().filter(|p| p.service_id == id) {
-                if let Err(e) = state
-                    .storage
-                    .alerts()
-                    .resolve_open_probe_alerts(&p.id, now)
-                    .await
-                {
-                    warn!(error = %e, "Failed to close probe alerts");
-                }
-            }
-        }
-        Err(e) => warn!(error = %e, "Failed to read probes"),
-    }
-
-    match state.storage.probes().delete_service(&id).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("delete service: {e}"),
-        ),
-    }
-}
-
 /// Flat probe list (with state): for "probes" standalone view and node detail pages
 pub async fn list_probes_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if !read_auth_ok(&state, &headers).await {
@@ -601,11 +362,8 @@ pub async fn list_probes_handler(State(state): State<AppState>, headers: HeaderM
             "authentication required (Bearer admin token)",
         );
     }
-    match state.storage.probes().services_with_probes().await {
-        Ok(services) => {
-            let flat: Vec<_> = services.into_iter().flat_map(|s| s.probes).collect();
-            Json(flat).into_response()
-        }
+    match state.storage.probes().list_probes().await {
+        Ok(list) => Json(list).into_response(),
         Err(e) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("list probes: {e}"),
@@ -676,8 +434,9 @@ pub async fn create_probe_handler(
 ) -> Response {
     #[derive(serde::Deserialize)]
     struct Body {
-        service_id: String,
         name: String,
+        #[serde(default)]
+        description: String,
         kind: String,
         #[serde(default)]
         target_json: String,
@@ -721,17 +480,6 @@ pub async fn create_probe_handler(
     if b.name.trim().is_empty() {
         return err(StatusCode::BAD_REQUEST, "Probe name cannot be empty");
     }
-    if state
-        .storage
-        .probes()
-        .find_service(&b.service_id)
-        .await
-        .ok()
-        .flatten()
-        .is_none()
-    {
-        return err(StatusCode::BAD_REQUEST, "service_id not found");
-    }
     let (target_json, expect_json) =
         match normalize_probe_parts(&b.kind, &b.target_json, &b.expect_json) {
             Ok(v) => v,
@@ -739,8 +487,8 @@ pub async fn create_probe_handler(
         };
 
     let input = zhiwei_storage::probes_repo::ProbeInput {
-        service_id: b.service_id,
         name: b.name.trim().to_string(),
+        description: b.description.trim().to_string(),
         kind: b.kind,
         target_json,
         expect_json,
@@ -826,6 +574,8 @@ pub async fn patch_probe_handler(
         #[serde(default)]
         name: Option<String>,
         #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
         kind: Option<String>,
         #[serde(default)]
         target_json: Option<String>,
@@ -874,6 +624,7 @@ pub async fn patch_probe_handler(
 
     let patch = zhiwei_storage::probes_repo::ProbePatch {
         name: b.name,
+        description: b.description,
         kind: b.kind,
         target_json,
         expect_json: b.expect_json,

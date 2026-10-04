@@ -130,16 +130,6 @@ fn probes_routes() -> Router<AppState> {
             get(crate::probes_api::services_timeline_handler),
         )
         .route(
-            "/v1/services",
-            get(crate::probes_api::list_services_handler)
-                .post(crate::probes_api::create_service_handler),
-        )
-        .route(
-            "/v1/services/:id",
-            axum::routing::patch(crate::probes_api::patch_service_handler)
-                .delete(crate::probes_api::delete_service_handler),
-        )
-        .route(
             "/v1/probes",
             get(crate::probes_api::list_probes_handler)
                 .post(crate::probes_api::create_probe_handler),

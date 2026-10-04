@@ -42,6 +42,7 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
     m020_builtin_alert_thresholds(pool).await?;
     m021_resource_metric_alerts(pool).await?;
     m022_settings_table(pool).await?;
+    m023_remove_service_layer(pool).await?;
 
     Ok(())
 }
@@ -723,6 +724,30 @@ async fn m022_settings_table(pool: &SqlitePool) -> anyhow::Result<()> {
         -- Default alert retention: 365 days
         INSERT OR IGNORE INTO settings (key, value) VALUES ('alert_retention_days', '365');
         INSERT INTO schema_version (version) VALUES (22);
+        ",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// 023: Remove service layer
+//
+// Probes become top-level entities with their own description field.
+// The services table is dropped entirely (empty in production).
+async fn m023_remove_service_layer(pool: &SqlitePool) -> anyhow::Result<()> {
+    if migration_applied(pool, 23).await? {
+        return Ok(());
+    }
+    sqlx::query(
+        r"
+        -- Add description column to probes
+        ALTER TABLE probes ADD COLUMN description TEXT NOT NULL DEFAULT '';
+
+        -- Drop the services table (no data to migrate)
+        DROP TABLE IF EXISTS services;
+
+        INSERT INTO schema_version (version) VALUES (23);
         ",
     )
     .execute(pool)

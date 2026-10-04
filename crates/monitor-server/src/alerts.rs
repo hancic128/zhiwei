@@ -887,7 +887,7 @@ pub async fn on_probe_transition(
     }
     let repo = state.storage.alerts();
     let now = Timestamp::now().unix_nano();
-    let rule_name = format!("Service {} · {}", probe.service_name, probe.name);
+    let rule_name = probe.name.clone();
 
     if transition.new_state == STATE_OK {
         handle_probe_recovered(state, &repo, probe, transition, hostname, &rule_name, now).await;
@@ -933,15 +933,14 @@ async fn handle_probe_recovered(
     }
     let rule = probe_alert_rule(rule_name, "warning");
     let message = format!(
-        "Probe {} for service {} recovered (previously {:?})",
-        probe.name, probe.service_name, transition.previous_state
+        "Probe {} recovered (previously {:?})",
+        probe.name, transition.previous_state
     );
     let facts = AlertFacts {
         node: hostname.to_string(),
         firing: false,
         fields: vec![
             ("Node", hostname.to_string()),
-            ("Service", probe.service_name.clone()),
             ("Probe", probe.name.clone()),
         ],
         detail: message,
@@ -977,8 +976,8 @@ async fn handle_probe_down(
         transition.last_error.clone()
     };
     let message = format!(
-        "Probe {} for service {} is down: {detail}",
-        probe.name, probe.service_name
+        "Probe {} is down: {detail}",
+        probe.name
     );
 
     let opened = repo
@@ -1004,7 +1003,6 @@ async fn handle_probe_down(
         firing: true,
         fields: vec![
             ("Node", hostname.to_string()),
-            ("Service", probe.service_name.clone()),
             ("Probe", probe.name.clone()),
             (
                 "Consecutive failures",

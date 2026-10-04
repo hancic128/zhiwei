@@ -1,7 +1,7 @@
-//! Service health storage: services / probes / probe state machine / probe result time series.
+//! Probe health storage: probes / probe state machine / probe result time series.
 //!
-//! Structure: services 1:N probes 1:1 `probe_state` (current state machine)
-//!                              1:N `probe_results` (historical details, rolling 7-day retention)
+//! Structure: probes 1:1 `probe_state` (current state machine)
+//!                     1:N `probe_results` (historical details, rolling 7-day retention)
 //!
 //! Probes are executed by the node side (`location = node`), monitor only handles
 //! config distribution, state aggregation, and alert triggering. State machine rules
@@ -15,23 +15,10 @@ pub const STATE_DEGRADED: &str = "degraded";
 pub const STATE_DOWN: &str = "down";
 
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct Service {
+pub struct Probe {
     pub id: String,
     pub name: String,
     pub description: String,
-    pub group_name: String,
-    pub tier: i64,
-    pub enabled: bool,
-    pub created_at_unix_nano: i64,
-    pub updated_at_unix_nano: i64,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct Probe {
-    pub id: String,
-    pub service_id: String,
-    pub service_name: String,
-    pub name: String,
     pub kind: String,
     pub target_json: String,
     pub expect_json: String,
@@ -93,16 +80,6 @@ pub struct ProbeWithState {
     pub state: ProbeState,
 }
 
-/// Service + probes + service health summary
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct ServiceWithProbes {
-    #[serde(flatten)]
-    pub service: Service,
-    /// Service health: all probes ok -> ok; any down -> down; else degraded; no probes -> unknown
-    pub health: String,
-    pub probes: Vec<ProbeWithState>,
-}
-
 /// State machine output after one result is stored (alert engine uses this to decide open/close)
 #[derive(Debug, Clone)]
 pub struct StateTransition {
@@ -118,8 +95,8 @@ pub struct StateTransition {
 /// Input for creating a new probe
 #[derive(Debug, Clone, Default)]
 pub struct ProbeInput {
-    pub service_id: String,
     pub name: String,
+    pub description: String,
     pub kind: String,
     pub target_json: String,
     pub expect_json: String,
@@ -136,6 +113,7 @@ pub struct ProbeInput {
 #[derive(Debug, Clone, Default)]
 pub struct ProbePatch {
     pub name: Option<String>,
+    pub description: Option<String>,
     pub kind: Option<String>,
     pub target_json: Option<String>,
     pub expect_json: Option<String>,
@@ -147,53 +125,27 @@ pub struct ProbePatch {
     pub enabled: Option<bool>,
 }
 
-/// Partial service modification
-#[derive(Debug, Clone, Default)]
-pub struct ServicePatch {
-    pub name: Option<String>,
-    pub description: Option<String>,
-    pub group_name: Option<String>,
-    pub tier: Option<i64>,
-    pub enabled: Option<bool>,
-}
-
-type ServiceRow = (String, String, String, String, i64, i64, i64, i64);
-
 #[allow(clippy::type_complexity)]
 type ProbeRow = (
-    String, // p.id
-    String, // p.service_id
-    String, // s.name
-    String, // p.name
-    String, // p.kind
-    String, // p.target_json
-    String, // p.expect_json
-    i64,    // p.interval_seconds
-    i64,    // p.timeout_ms
-    i64,    // p.failure_threshold
-    String, // p.node_ids_json (JSON array, empty = any node)
-    String, // p.location
-    i64,    // p.enabled
-    i64,    // p.created_at_unix_nano
-    i64,    // p.updated_at_unix_nano
+    String,  // p.id
+    String,  // p.name
+    String,  // p.description
+    String,  // p.kind
+    String,  // p.target_json
+    String,  // p.expect_json
+    i64,     // p.interval_seconds
+    i64,     // p.timeout_ms
+    i64,     // p.failure_threshold
+    String,  // p.node_ids_json (JSON array, empty = any node)
+    String,  // p.location
+    i64,     // p.enabled
+    i64,     // p.created_at_unix_nano
+    i64,     // p.updated_at_unix_nano
 );
 
 type StateRow = (String, String, i64, i64, i64, Option<f64>, String);
 
 type ResultRow = (i64, String, Option<f64>, Option<i64>, String);
-
-fn service_from_row(r: ServiceRow) -> Service {
-    Service {
-        id: r.0,
-        name: r.1,
-        description: r.2,
-        group_name: r.3,
-        tier: r.4,
-        enabled: r.5 != 0,
-        created_at_unix_nano: r.6,
-        updated_at_unix_nano: r.7,
-    }
-}
 
 fn state_from_row(r: StateRow) -> ProbeState {
     ProbeState {
@@ -210,21 +162,20 @@ fn state_from_row(r: StateRow) -> ProbeState {
 fn probe_from_row(r: ProbeRow) -> Probe {
     Probe {
         id: r.0,
-        service_id: r.1,
-        service_name: r.2,
-        name: r.3,
-        kind: r.4,
-        target_json: r.5,
-        expect_json: r.6,
-        interval_seconds: r.7,
-        timeout_ms: r.8,
-        failure_threshold: r.9,
-        node_ids: parse_node_ids(&r.10),
+        name: r.1,
+        description: r.2,
+        kind: r.3,
+        target_json: r.4,
+        expect_json: r.5,
+        interval_seconds: r.6,
+        timeout_ms: r.7,
+        failure_threshold: r.8,
+        node_ids: parse_node_ids(&r.9),
         node_labels: Vec::new(),
-        location: r.11,
-        enabled: r.12 != 0,
-        created_at_unix_nano: r.13,
-        updated_at_unix_nano: r.14,
+        location: r.10,
+        enabled: r.11 != 0,
+        created_at_unix_nano: r.12,
+        updated_at_unix_nano: r.13,
     }
 }
 
@@ -238,18 +189,15 @@ fn node_ids_json(ids: &[String]) -> String {
     serde_json::to_string(ids).unwrap_or_else(|_| "[]".into())
 }
 
-const SERVICE_COLS: &str =
-    "id, name, description, group_name, tier, enabled, created_at_unix_nano, updated_at_unix_nano";
-
 const STATE_COLS: &str = "probe_id, state, consecutive_failures, last_change_at_unix_nano, \
      last_check_at_unix_nano, last_latency_ms, last_error";
 
 const PROBE_COLS: &str =
-    "p.id, p.service_id, s.name, p.name, p.kind, p.target_json, p.expect_json, \
+    "p.id, p.name, p.description, p.kind, p.target_json, p.expect_json, \
      p.interval_seconds, p.timeout_ms, p.failure_threshold, p.node_ids_json, p.location, p.enabled, \
      p.created_at_unix_nano, p.updated_at_unix_nano";
 
-/// Aggregate worst state (service health = worst probe state)
+/// Aggregate worst state (probe health = worst probe state)
 #[must_use]
 pub fn worst_state(states: &[String]) -> String {
     if states.is_empty() {
@@ -278,148 +226,16 @@ impl ProbesRepo {
         Self { pool }
     }
 
-    // ---------- Services ----------
-
-    /// List all services ordered by name.
-    ///
-    /// # Errors
-    ///
-    /// Returns `sqlx::Error` if the query fails.
-    pub async fn list_services(&self) -> anyhow::Result<Vec<Service>> {
-        let rows: Vec<ServiceRow> = sqlx::query_as(&format!(
-            "SELECT {SERVICE_COLS} FROM services ORDER BY name"
-        ))
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows.into_iter().map(service_from_row).collect())
-    }
-
-    /// Look up a service by id.
-    ///
-    /// # Errors
-    ///
-    /// Returns `sqlx::Error` if the query fails.
-    pub async fn find_service(&self, id: &str) -> anyhow::Result<Option<Service>> {
-        let row: Option<ServiceRow> =
-            sqlx::query_as(&format!("SELECT {SERVICE_COLS} FROM services WHERE id = ?"))
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await?;
-        Ok(row.map(service_from_row))
-    }
-
-    /// Insert a new service and return the resulting row.
-    ///
-    /// # Errors
-    ///
-    /// Returns `sqlx::Error` if the insert or lookup fails, or `anyhow::Error`
-    /// if the row is missing after a successful insert.
-    pub async fn create_service(
-        &self,
-        name: &str,
-        description: &str,
-        group_name: &str,
-        tier: i64,
-        now: i64,
-    ) -> anyhow::Result<Service> {
-        let id = uuid::Uuid::new_v4().to_string();
-        sqlx::query(
-            "INSERT INTO services (id, name, description, group_name, tier, enabled, created_at_unix_nano, updated_at_unix_nano)
-             VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
-        )
-        .bind(&id)
-        .bind(name)
-        .bind(description)
-        .bind(group_name)
-        .bind(tier)
-        .bind(now)
-        .bind(now)
-        .execute(&self.pool)
-        .await?;
-        self.find_service(&id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("service not found after creation"))
-    }
-
-    /// Apply a partial update to a service.
-    ///
-    /// # Errors
-    ///
-    /// Returns `sqlx::Error` if the lookup or update fails, or `anyhow::Error`
-    /// if no service matches the given id.
-    pub async fn update_service(
-        &self,
-        id: &str,
-        patch: &ServicePatch,
-        now: i64,
-    ) -> anyhow::Result<()> {
-        let Some(mut svc) = self.find_service(id).await? else {
-            anyhow::bail!("service not found");
-        };
-        if let Some(v) = &patch.name {
-            svc.name.clone_from(v);
-        }
-        if let Some(v) = &patch.description {
-            svc.description.clone_from(v);
-        }
-        if let Some(v) = &patch.group_name {
-            svc.group_name.clone_from(v);
-        }
-        if let Some(v) = patch.tier {
-            svc.tier = v;
-        }
-        if let Some(v) = patch.enabled {
-            svc.enabled = v;
-        }
-        sqlx::query(
-            "UPDATE services SET name = ?, description = ?, group_name = ?, tier = ?, enabled = ?,
-                    updated_at_unix_nano = ? WHERE id = ?",
-        )
-        .bind(&svc.name)
-        .bind(&svc.description)
-        .bind(&svc.group_name)
-        .bind(svc.tier)
-        .bind(i64::from(svc.enabled))
-        .bind(now)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    /// Delete service along with its probes, state, and result details
-    ///
-    /// # Errors
-    ///
-    /// Returns `sqlx::Error` if any of the queries fail.
-    pub async fn delete_service(&self, id: &str) -> anyhow::Result<()> {
-        let probe_ids: Vec<(String,)> =
-            sqlx::query_as("SELECT id FROM probes WHERE service_id = ?")
-                .bind(id)
-                .fetch_all(&self.pool)
-                .await?;
-        for (pid,) in &probe_ids {
-            self.delete_probe(pid).await?;
-        }
-        sqlx::query("DELETE FROM services WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
     // ---------- Probes ----------
 
-    /// List all probes (ordered by service name then probe name).
+    /// List all probes (ordered by name).
     ///
     /// # Errors
     ///
     /// Returns `sqlx::Error` if the query or label lookup fails.
     pub async fn list_probes(&self) -> anyhow::Result<Vec<Probe>> {
         let rows: Vec<ProbeRow> = sqlx::query_as(&format!(
-            "SELECT {PROBE_COLS} FROM probes p
-             JOIN services s ON s.id = p.service_id
-             ORDER BY s.name, p.name"
+            "SELECT {PROBE_COLS} FROM probes p ORDER BY p.name"
         ))
         .fetch_all(&self.pool)
         .await?;
@@ -436,8 +252,7 @@ impl ProbesRepo {
     pub async fn probes_for_node(&self, node_id: &str) -> anyhow::Result<Vec<Probe>> {
         let rows: Vec<ProbeRow> = sqlx::query_as(&format!(
             "SELECT {PROBE_COLS} FROM probes p
-             JOIN services s ON s.id = p.service_id
-             WHERE p.enabled = 1 AND s.enabled = 1 AND p.location = 'node'
+             WHERE p.enabled = 1 AND p.location = 'node'
                AND (p.node_ids_json = '[]'
                     OR EXISTS (SELECT 1 FROM json_each(p.node_ids_json) WHERE json_each.value = ?))
              ORDER BY p.name"
@@ -455,9 +270,7 @@ impl ProbesRepo {
     /// Returns `sqlx::Error` if the query or label lookup fails.
     pub async fn find_probe(&self, id: &str) -> anyhow::Result<Option<Probe>> {
         let row: Option<ProbeRow> = sqlx::query_as(&format!(
-            "SELECT {PROBE_COLS} FROM probes p
-             JOIN services s ON s.id = p.service_id
-             WHERE p.id = ?"
+            "SELECT {PROBE_COLS} FROM probes p WHERE p.id = ?"
         ))
         .bind(id)
         .fetch_optional(&self.pool)
@@ -513,14 +326,14 @@ impl ProbesRepo {
     pub async fn create_probe(&self, input: &ProbeInput, now: i64) -> anyhow::Result<Probe> {
         let id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
-            "INSERT INTO probes (id, service_id, name, kind, target_json, expect_json,
+            "INSERT INTO probes (id, name, description, kind, target_json, expect_json,
                                  interval_seconds, timeout_ms, failure_threshold, node_ids_json, location,
                                  enabled, created_at_unix_nano, updated_at_unix_nano)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
-        .bind(&input.service_id)
         .bind(&input.name)
+        .bind(&input.description)
         .bind(&input.kind)
         .bind(&input.target_json)
         .bind(&input.expect_json)
@@ -552,6 +365,9 @@ impl ProbesRepo {
         if let Some(v) = &patch.name {
             p.name.clone_from(v);
         }
+        if let Some(v) = &patch.description {
+            p.description.clone_from(v);
+        }
         if let Some(v) = &patch.kind {
             p.kind.clone_from(v);
         }
@@ -582,11 +398,12 @@ impl ProbesRepo {
             p.enabled = v;
         }
         sqlx::query(
-            "UPDATE probes SET name = ?, kind = ?, target_json = ?, expect_json = ?,
+            "UPDATE probes SET name = ?, description = ?, kind = ?, target_json = ?, expect_json = ?,
                     interval_seconds = ?, timeout_ms = ?, failure_threshold = ?, node_ids_json = ?,
                     enabled = ?, updated_at_unix_nano = ? WHERE id = ?",
         )
         .bind(&p.name)
+        .bind(&p.description)
         .bind(&p.kind)
         .bind(&p.target_json)
         .bind(&p.expect_json)
@@ -692,11 +509,7 @@ impl ProbesRepo {
         };
 
         let changed = previous.state != new_state;
-        let last_change = if changed {
-            now
-        } else {
-            previous.last_change_at_unix_nano
-        };
+        let last_change = if changed { now } else { previous.last_change_at_unix_nano };
 
         sqlx::query(
             "INSERT INTO probe_state (probe_id, state, consecutive_failures, last_change_at_unix_nano,
@@ -764,81 +577,34 @@ impl ProbesRepo {
 
     // ---------- Aggregate views ----------
 
-    /// Service page data: service -> probes -> state
+    /// Overview card data: healthy / total probe count.
     ///
-    /// # Errors
-    ///
-    /// Returns `sqlx::Error` if any underlying query fails.
-    pub async fn services_with_probes(&self) -> anyhow::Result<Vec<ServiceWithProbes>> {
-        let services = self.list_services().await?;
-        let mut states = self.all_states().await?;
-        let probes = self.list_probes().await?;
-
-        let mut out = Vec::with_capacity(services.len());
-        for svc in services {
-            let mine: Vec<ProbeWithState> = probes
-                .iter()
-                .filter(|p| p.service_id == svc.id)
-                .map(|p| ProbeWithState {
-                    probe: p.clone(),
-                    state: states
-                        .remove(&p.id)
-                        .unwrap_or_else(|| ProbeState::unknown(&p.id, 0)),
-                })
-                .collect();
-            let names: Vec<String> = mine
-                .iter()
-                // Disabled probes don't participate in service health aggregation: disabling a probe
-                // means you intentionally stopped probing, its last down shouldn't keep the whole
-                // service showing red (still shown in list, grayed out)
-                .filter(|p| p.probe.enabled && svc.enabled)
-                .map(|p| p.state.state.clone())
-                .collect();
-            out.push(ServiceWithProbes {
-                health: worst_state(&names),
-                service: svc,
-                probes: mine,
-            });
-        }
-        Ok(out)
-    }
-
-    async fn all_states(&self) -> anyhow::Result<std::collections::HashMap<String, ProbeState>> {
-        let rows: Vec<StateRow> = sqlx::query_as(&format!("SELECT {STATE_COLS} FROM probe_state"))
-            .fetch_all(&self.pool)
-            .await?;
-        Ok(rows
-            .into_iter()
-            .map(|r| {
-                let st = state_from_row(r);
-                (st.probe_id.clone(), st)
-            })
-            .collect())
-    }
-
-    /// Overview card data: healthy / total probe count (by probe dimension, not grouped by service).
-    ///
-    /// Disabled probes (`p.enabled = 0`) and fully disabled services (`s.enabled = 0`) are excluded:
-    /// disabled probes won't be dispatched anymore, shouldn't expect them to work, their down
-    /// shouldn't count toward cluster failures.
+    /// Disabled probes (`p.enabled = 0`) are excluded: disabled probes won't be dispatched anymore,
+    /// shouldn't expect them to work, their down shouldn't count toward cluster failures.
     ///
     /// # Errors
     ///
     /// Returns `sqlx::Error` if any underlying query fails.
     pub async fn probe_counts(&self) -> anyhow::Result<(i64, i64)> {
-        let services = self.services_with_probes().await?;
+        let rows: Vec<StateRow> = sqlx::query_as(&format!("SELECT {STATE_COLS} FROM probe_state"))
+            .fetch_all(&self.pool)
+            .await?;
+        let probes = self.list_probes().await?;
+        let states: std::collections::HashMap<String, ProbeState> = rows
+            .into_iter()
+            .map(state_from_row)
+            .map(|s| (s.probe_id.clone(), s))
+            .collect();
+
         let mut total = 0i64;
         let mut healthy = 0i64;
-        for s in &services {
-            if !s.service.enabled {
+        for p in &probes {
+            if !p.enabled {
                 continue;
             }
-            for p in &s.probes {
-                if !p.probe.enabled {
-                    continue;
-                }
-                total += 1;
-                if p.state.state == STATE_OK {
+            total += 1;
+            if let Some(state) = states.get(&p.id) {
+                if state.state == STATE_OK {
                     healthy += 1;
                 }
             }
@@ -846,12 +612,10 @@ impl ProbesRepo {
         Ok((healthy, total))
     }
 
-    // ---------- Maintenance ----------
-
-    /// Service health timeline: aggregate probe results by time bucket, one row per (service, bucket).
+    /// Probe health timeline: aggregate probe results by time bucket, one row per (probe, bucket).
     ///
-    /// Returns `(service_id, bucket_start_unix_nano, ok_count, total_count)`.
-    /// Charts show "what proportion of probes in this bucket were ok" -- better than showing single
+    /// Returns `(probe_id, bucket_start_unix_nano, ok_count, total_count)`.
+    /// Charts show "what proportion of checks in this bucket were ok" -- better than showing single
     /// probe raw results, smoother trend, not affected by varying sampling density.
     ///
     /// # Errors
@@ -863,43 +627,14 @@ impl ProbesRepo {
         to_ns: i64,
         bucket_ns: i64,
     ) -> anyhow::Result<Vec<(String, i64, i64, i64)>> {
-        self.health_buckets_grouped("p.service_id", from_ns, to_ns, bucket_ns)
-            .await
-    }
-
-    /// Same as above, but aggregated by **probe**, returns `(probe_id, bucket_start_unix_nano, ok, total)`.
-    /// When a service has multiple probes, service-level curves flatten out "which probe is jittering".
-    ///
-    /// # Errors
-    ///
-    /// Returns `sqlx::Error` if the query fails.
-    pub async fn health_buckets_by_probe(
-        &self,
-        from_ns: i64,
-        to_ns: i64,
-        bucket_ns: i64,
-    ) -> anyhow::Result<Vec<(String, i64, i64, i64)>> {
-        self.health_buckets_grouped("r.probe_id", from_ns, to_ns, bucket_ns)
-            .await
-    }
-
-    async fn health_buckets_grouped(
-        &self,
-        group_col: &str,
-        from_ns: i64,
-        to_ns: i64,
-        bucket_ns: i64,
-    ) -> anyhow::Result<Vec<(String, i64, i64, i64)>> {
         let bucket_ns = bucket_ns.max(1);
-        // group_col only comes from two constants in this file, no external input accepted
         let sql = format!(
             r"
-            SELECT {group_col} AS grp,
+            SELECT r.probe_id AS grp,
                    (r.ts_unix_nano / ?) * ? AS bucket_start,
                    SUM(CASE WHEN r.state = 'ok' THEN 1 ELSE 0 END) AS ok_count,
                    COUNT(*) AS total_count
             FROM probe_results r
-            JOIN probes p ON p.id = r.probe_id
             WHERE r.ts_unix_nano >= ? AND r.ts_unix_nano <= ?
             GROUP BY grp, bucket_start
             ORDER BY grp, bucket_start
@@ -914,6 +649,8 @@ impl ProbesRepo {
             .await?;
         Ok(rows)
     }
+
+    // ---------- Maintenance ----------
 
     /// Delete result details older than `cutoff_unix_nano`, returns rows deleted
     ///
@@ -956,10 +693,10 @@ mod tests {
         assert_eq!(worst_state(&["ok".into(), "unknown".into()]), "unknown");
     }
 
-    /// Disabled probes excluded from counts/health: both overview count and service health aggregation
-    /// exclude them. This is a regression test for "service probes after disabling are not counted in totals/failures".
+    /// Disabled probes excluded from counts: both overview count exclude them.
+    /// This is a regression test for "probes after disabling are not counted in totals/failures".
     #[tokio::test]
-    async fn disabled_probes_are_excluded_from_counts_and_health() {
+    async fn disabled_probes_are_excluded_from_counts() {
         use sqlx::sqlite::SqlitePoolOptions;
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
@@ -970,10 +707,9 @@ mod tests {
         let repo = ProbesRepo::new(pool);
 
         let now = 1_000_000_000;
-        let svc = repo.create_service("web", "", "", 1, now).await.unwrap();
         let mk = |name: &str, enabled: bool| ProbeInput {
-            service_id: svc.id.clone(),
             name: name.to_string(),
+            description: "".to_string(),
             kind: "http".into(),
             target_json: "{}".into(),
             expect_json: "{}".into(),
@@ -996,7 +732,7 @@ mod tests {
             .unwrap();
 
         // The disabled "off" probe first goes to down (simulating "residual state after disabling"),
-        // but it shouldn't count toward totals or make service show red
+        // but it shouldn't count toward totals
         assert_eq!(
             repo.get_state(&off.id).await.unwrap().unwrap().state,
             STATE_DOWN
@@ -1008,14 +744,12 @@ mod tests {
             "disabled probe not counted in total (bad is enabled but never probed, counts as unknown, in total)"
         );
 
-        // The enabled "bad" probe goes to down -> service health = down
+        // The enabled "bad" probe goes to down
         repo.record_result(&bad, "n1", now, "timeout", None, None, "boom")
             .await
             .unwrap();
-        let svcs = repo.services_with_probes().await.unwrap();
-        assert_eq!(svcs[0].health, STATE_DOWN);
 
-        // Disable bad -> service health returns to ok (disabled down no longer participates in aggregation)
+        // Disable bad -> counts return to (1, 1)
         repo.update_probe(
             &bad.id,
             &ProbePatch {
@@ -1026,24 +760,6 @@ mod tests {
         )
         .await
         .unwrap();
-        let svcs = repo.services_with_probes().await.unwrap();
-        assert_eq!(
-            svcs[0].health, STATE_OK,
-            "disabled down probe shouldn't keep service showing red"
-        );
         assert_eq!(repo.probe_counts().await.unwrap(), (1, 1));
-
-        // Entire service disabled -> all not counted
-        repo.update_service(
-            &svc.id,
-            &ServicePatch {
-                enabled: Some(false),
-                ..Default::default()
-            },
-            now,
-        )
-        .await
-        .unwrap();
-        assert_eq!(repo.probe_counts().await.unwrap(), (0, 0));
     }
 }
