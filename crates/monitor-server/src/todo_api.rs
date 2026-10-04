@@ -279,6 +279,18 @@ fn node_display(nodes: &[NodeRecord], id: &str, fallback: &str) -> String {
     )
 }
 
+/// Translate legacy Chinese messages to English.
+fn translate_message(source: &str, message: &str) -> String {
+    // Only translate container messages, others are already in English
+    if source == "container" {
+        message
+            .replace("已停止", "stopped")
+            .replace("已启动", "started")
+    } else {
+        message.to_string()
+    }
+}
+
 /// Map a stored alert row into a todo item. `resolved` selects whether the
 /// resolved timestamp is carried (open alerts have none).
 fn alert_item(a: &Alert, nodes: &[NodeRecord], resolved: bool) -> TodoItem {
@@ -299,7 +311,7 @@ fn alert_item(a: &Alert, nodes: &[NodeRecord], resolved: bool) -> TodoItem {
         source: a.source.clone(),
         severity: a.severity.clone(),
         title: title.to_string(),
-        detail: a.message.clone(),
+        detail: translate_message(&a.source, &a.message),
         hint_key: hint_key(&a.source, &a.metric),
         node_id: a.node_id.clone(),
         hostname: node_display(nodes, &a.node_id, &a.hostname),
