@@ -1,5 +1,1 @@
-#!/bin/sh
-# Commit message hook: run commitlint
-. "$(dirname -- "$0")/_/husky.sh"
-
 npx --no -- commitlint --edit ${1}
