@@ -1226,12 +1226,14 @@ impl AlertsRepo {
         );
 
         // Execute with bound parameters
+        // NOTE: since_ms/until_ms are in milliseconds, but started_at_unix_nano
+        // is stored in nanoseconds, so we need to convert.
         let mut query_builder = sqlx::query_as::<_, AlertRow>(&sql);
         if let Some(since) = query.since_ms {
-            query_builder = query_builder.bind(since);
+            query_builder = query_builder.bind(since * 1_000_000);
         }
         if let Some(until) = query.until_ms {
-            query_builder = query_builder.bind(until);
+            query_builder = query_builder.bind(until * 1_000_000);
         }
         let rows: Vec<AlertRow> = query_builder.fetch_all(&self.pool).await?;
         Ok(rows.into_iter().map(alert_from_row).collect())
