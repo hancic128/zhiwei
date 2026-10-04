@@ -897,7 +897,7 @@ function McpSection() {
   const mcpConfig = `{
   "mcpServers": {
     "zhiwei-monitor": {
-      "type": "sse",
+      "type": "http",
       "url": "${baseUrl}/mcp/sse",
       "headers": {
         "Authorization": "Bearer <YOUR_TOKEN>"
@@ -914,7 +914,7 @@ function McpSection() {
           title={t("settings.mcpTitle")}
           description={t("settings.mcpSubtitle")}
           action={
-            <Button variant="ghost" size="sm" onClick={() => navigate("/help#ai-mcp")}>
+            <Button variant="ghost" size="sm" onClick={() => navigate("/help#ai-integration")}>
               <HelpCircle className="w-4 h-4 mr-1" />
               {t("settings.mcpHelp")}
             </Button>

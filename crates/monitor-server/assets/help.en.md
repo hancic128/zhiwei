@@ -186,7 +186,7 @@ In your AI client's MCP settings file:
 {
   "mcpServers": {
     "zhiwei": {
-      "type": "sse",
+      "type": "http",
       "url": "{{BASE_URL}}/mcp/sse",
       "headers": {
         "Authorization": "Bearer ait_xxxxxxxxxxxxxxxx"

@@ -226,10 +226,7 @@ cmd_stop() {
 
 cmd_reset() {
   cmd_stop
-  rm -rf "$DATA_DIR"
-  say "Deleted $DATA_DIR"
-  echo
-  say "Restarting..."
+  # Recompile and restart, preserving data
   cmd_start
 }
 

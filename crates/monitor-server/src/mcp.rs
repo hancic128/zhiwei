@@ -623,7 +623,27 @@ fn rpc_result(id: &Value, result: &Value) -> Value {
     })
 }
 
-// ---------- HTTP handler ----------
+// ---------- HTTP handlers ----------
+
+/// `GET /mcp/sse` — Health check. Returns server info in SSE format.
+pub async fn health_handler() -> Response {
+    let body = json!({
+        "protocolVersion": MCP_PROTOCOL_VERSION,
+        "capabilities": server_capabilities(),
+        "serverInfo": server_info(),
+    });
+    let body_str = serde_json::to_string(&body).unwrap_or_default();
+    (
+        StatusCode::OK,
+        [
+            ("content-type", "text/event-stream"),
+            ("cache-control", "no-cache"),
+            ("access-control-allow-origin", "*"),
+        ],
+        format!("event: message\ndata: {}\n\n", body_str),
+    )
+        .into_response()
+}
 
 /// `POST /mcp/sse` — MCP over SSE (synchronous response, each response is one
 /// SSE event).
