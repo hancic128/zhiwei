@@ -660,6 +660,14 @@ export interface AlertsView {
   resolved: Alert[];
 }
 
+export interface AlertQuery {
+  since?: number;
+  until?: number;
+  status?: "open" | "resolved" | "all";
+  sources?: string;
+  limit?: number;
+}
+
 export interface AlertRule {
   id: number;
   name: string;
@@ -693,7 +701,16 @@ export interface NotifyChannel {
 }
 
 export const alertsApi = {
-  list: () => request<AlertsView>("/v1/alerts"),
+  list: (query?: AlertQuery) => {
+    const params = new URLSearchParams();
+    if (query?.since !== undefined) params.set("since", String(query.since));
+    if (query?.until !== undefined) params.set("until", String(query.until));
+    if (query?.status !== undefined) params.set("status", query.status);
+    if (query?.sources !== undefined) params.set("sources", query.sources);
+    if (query?.limit !== undefined) params.set("limit", String(query.limit));
+    const qs = params.toString();
+    return request<AlertsView>(`/v1/alerts${qs ? `?${qs}` : ""}`);
+  },
   silence: (id: number, minutes = 60) =>
     request<unknown>(`/v1/alerts/${id}/silence`, {
       method: "POST",

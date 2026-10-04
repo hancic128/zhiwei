@@ -732,7 +732,16 @@
     "offlineAfterHint": "节点不可达超过此时间后触发告警。",
     "daysBeforeExpiry": "到期前天数",
     "daysBeforeExpiryHint": "证书在此天数内到期时触发告警。",
-    "noChanges": "没有需要保存的更改"
+    "noChanges": "没有需要保存的更改",
+    "alertHistory": "告警历史",
+    "customRange": "自定义",
+    "from": "从",
+    "to": "到",
+    "historyError": "加载告警历史失败",
+    "noAlerts": "没有符合筛选条件的告警",
+    "colTime": "时间",
+    "colSource": "来源",
+    "colMessage": "消息"
   },
   "settings": {
     "caTitle": "monitor 的 TLS 证书（本地 CA）",

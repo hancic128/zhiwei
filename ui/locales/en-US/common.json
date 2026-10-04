@@ -733,7 +733,16 @@
     "resolvedToast": "Resolved",
     "resolve": "Resolve alert",
     "criticalCount": "{{n}} critical",
-    "warningCount": "{{n}} warning"
+    "warningCount": "{{n}} warning",
+    "alertHistory": "Alert History",
+    "customRange": "Custom",
+    "from": "From",
+    "to": "To",
+    "historyError": "Failed to load alert history",
+    "noAlerts": "No alerts match the filters",
+    "colTime": "Time",
+    "colSource": "Source",
+    "colMessage": "Message"
   },
   "settings": {
     "caTitle": "Monitor's TLS certificate (local CA)",
