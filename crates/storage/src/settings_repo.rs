@@ -53,4 +53,24 @@ impl SettingsRepo {
         let value = self.get("alert_retention_days").await?;
         Ok(value.and_then(|v| v.parse().ok()).unwrap_or(365))
     }
+
+    /// Get raw data retention days setting.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
+    pub async fn raw_retention_days(&self) -> anyhow::Result<i64> {
+        let value = self.get("raw_retention_days").await?;
+        Ok(value.and_then(|v| v.parse().ok()).unwrap_or(14))
+    }
+
+    /// Get hourly aggregate retention days setting.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
+    pub async fn hourly_retention_days(&self) -> anyhow::Result<i64> {
+        let value = self.get("hourly_retention_days").await?;
+        Ok(value.and_then(|v| v.parse().ok()).unwrap_or(730))
+    }
 }

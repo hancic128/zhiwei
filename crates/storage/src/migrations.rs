@@ -44,6 +44,7 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
     m021_resource_metric_alerts(pool).await?;
     m022_settings_table(pool).await?;
     m023_remove_service_layer(pool).await?;
+    m024_retention_settings(pool).await?;
 
     Ok(())
 }
@@ -749,6 +750,26 @@ async fn m023_remove_service_layer(pool: &SqlitePool) -> anyhow::Result<()> {
         DROP TABLE IF EXISTS services;
 
         INSERT INTO schema_version (version) VALUES (23);
+        ",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// 024: Add retention period settings for raw and hourly data
+async fn m024_retention_settings(pool: &SqlitePool) -> anyhow::Result<()> {
+    if migration_applied(pool, 24).await? {
+        return Ok(());
+    }
+    sqlx::query(
+        r"
+        -- Default raw retention: 14 days
+        INSERT OR IGNORE INTO settings (key, value) VALUES ('raw_retention_days', '14');
+        -- Default hourly retention: 730 days (~2 years)
+        INSERT OR IGNORE INTO settings (key, value) VALUES ('hourly_retention_days', '730');
+
+        INSERT INTO schema_version (version) VALUES (24);
         ",
     )
     .execute(pool)

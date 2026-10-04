@@ -13,12 +13,15 @@
 
 /// Raw data retention in days. At central scale (10 nodes) ≈ 224 MB; at
 /// upper scale can lower to 7 days.
+#[allow(dead_code)]
 pub const RAW_RETENTION_DAYS: i64 = 14;
 
 /// Hourly aggregate retention in days (≈ 2 years).
+#[allow(dead_code)]
 pub const HOURLY_RETENTION_DAYS: i64 = 730;
 
 /// Default alert retention in days (1 year).
+#[allow(dead_code)]
 pub const ALERT_RETENTION_DAYS_DEFAULT: i64 = 365;
 
 /// Max hours processed in one retention run — prevents catching up too much
@@ -141,9 +144,8 @@ const NANOS_PER_DAY: i64 = 86_400_000_000_000;
 /// not stacked per occurrence).
 const RETENTION_SOURCE_REF: &str = "retention";
 
-/// `GET /v1/retention` — retention policy. For the settings page:
-/// the numbers are only defined in retention.rs, frontend doesn't hardcode,
-/// avoiding drift between the two sides.
+/// `GET /v1/retention` — retention policy with descriptions.
+/// For the settings page: values are fetched from database settings, not hardcoded.
 pub async fn retention_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if !read_auth_ok(&state, &headers).await {
         return err(
@@ -151,30 +153,63 @@ pub async fn retention_handler(State(state): State<AppState>, headers: HeaderMap
             "authentication required (Bearer admin token)",
         );
     }
-    let alert_days = get_alert_retention_days(&state.storage).await;
+    let raw_days = state
+        .storage
+        .settings()
+        .raw_retention_days()
+        .await
+        .unwrap_or(14);
+    let hourly_days = state
+        .storage
+        .settings()
+        .hourly_retention_days()
+        .await
+        .unwrap_or(730);
+    let alert_days = state
+        .storage
+        .settings()
+        .alert_retention_days()
+        .await
+        .unwrap_or(365);
     Json(serde_json::json!({
-        "raw_days": RAW_RETENTION_DAYS,
-        "hourly_days": HOURLY_RETENTION_DAYS,
-        "alert_retention_days": alert_days,
+        "raw_retention_days": {
+            "value": raw_days,
+            "description": "Raw 10-second telemetry data retention in days. Reduce to save disk space at cost of losing recent granularity.",
+            "when_effective": "Next retention run (every 10 minutes). Existing raw data older than new value will be deleted."
+        },
+        "hourly_retention_days": {
+            "value": hourly_days,
+            "description": "Hourly aggregate data retention in days. Aggregates preserve trends when raw data expires.",
+            "when_effective": "Next retention run (every 10 minutes)."
+        },
+        "alert_retention_days": {
+            "value": alert_days,
+            "description": "Resolved alert history retention in days. Keep longer for audit and trend analysis.",
+            "when_effective": "Next retention run (every 10 minutes)."
+        }
     }))
     .into_response()
 }
 
 /// `PATCH /v1/retention` — update retention settings.
 ///
-/// Currently only `alert_retention_days` is writable.
-/// `raw_days` and `hourly_days` define the data granularity window (10-second raw vs hourly aggregates)
-/// and cannot be changed without a code update — they affect storage layout.
+/// All three retention parameters are configurable:
+/// - `raw_retention_days`: Raw 10-second data retention (affects storage layout)
+/// - `hourly_retention_days`: Hourly aggregate data retention
+/// - `alert_retention_days`: Resolved alert retention
+///
+/// Changes take effect on the next retention run (every 10 minutes).
 #[derive(serde::Deserialize)]
-#[allow(dead_code)]
+#[allow(clippy::struct_field_names)]
 pub struct RetentionPatch {
     pub raw: Option<i64>,
     pub hourly: Option<i64>,
-    pub alert_retention_days: Option<i64>,
+    pub alerts: Option<i64>,
 }
 
 /// `PATCH /v1/retention` — update retention settings.
-/// Only `alert_retention_days` takes effect; `raw_days` and `hourly_days` are accepted but ignored.
+/// All three parameters are writable. Changes take effect on the next retention run.
+#[allow(clippy::cognitive_complexity)]
 pub async fn patch_retention_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -189,14 +224,36 @@ pub async fn patch_retention_handler(
         );
     }
 
-    // raw_days and hourly_days are informational only in this implementation
-    // They define the data granularity window, not the retention duration
+    let settings = state.storage.settings();
 
-    if let Some(days) = patch.alert_retention_days {
-        let days = days.clamp(1, 3650); // 1 day to 10 years
-        if let Err(e) = state
-            .storage
-            .settings()
+    if let Some(days) = patch.raw {
+        let days = days.clamp(1, 3650);
+        if let Err(e) = settings.set("raw_retention_days", &days.to_string()).await {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("update setting: {e}"),
+            );
+        }
+        info!(raw_retention_days = days, "retention setting updated");
+    }
+
+    if let Some(days) = patch.hourly {
+        let days = days.clamp(1, 3650);
+        if let Err(e) = settings
+            .set("hourly_retention_days", &days.to_string())
+            .await
+        {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("update setting: {e}"),
+            );
+        }
+        info!(hourly_retention_days = days, "retention setting updated");
+    }
+
+    if let Some(days) = patch.alerts {
+        let days = days.clamp(1, 3650);
+        if let Err(e) = settings
             .set("alert_retention_days", &days.to_string())
             .await
         {
@@ -205,15 +262,29 @@ pub async fn patch_retention_handler(
                 format!("update setting: {e}"),
             );
         }
-        info!(alert_retention_days = days, "retention settings updated");
+        info!(alert_retention_days = days, "retention setting updated");
     }
 
-    // Return updated settings
-    let alert_days = get_alert_retention_days(&state.storage).await;
+    // Return updated settings with descriptions
+    let raw_days = settings.raw_retention_days().await.unwrap_or(14);
+    let hourly_days = settings.hourly_retention_days().await.unwrap_or(730);
+    let alert_days = settings.alert_retention_days().await.unwrap_or(365);
     Json(serde_json::json!({
-        "raw_days": RAW_RETENTION_DAYS,
-        "hourly_days": HOURLY_RETENTION_DAYS,
-        "alert_retention_days": alert_days,
+        "raw_retention_days": {
+            "value": raw_days,
+            "description": "Raw 10-second telemetry data retention in days. Reduce to save disk space at cost of losing recent granularity.",
+            "when_effective": "Next retention run (every 10 minutes). Existing raw data older than new value will be deleted."
+        },
+        "hourly_retention_days": {
+            "value": hourly_days,
+            "description": "Hourly aggregate data retention in days. Aggregates preserve trends when raw data expires.",
+            "when_effective": "Next retention run (every 10 minutes)."
+        },
+        "alert_retention_days": {
+            "value": alert_days,
+            "description": "Resolved alert history retention in days. Keep longer for audit and trend analysis.",
+            "when_effective": "Next retention run (every 10 minutes)."
+        }
     }))
     .into_response()
 }
@@ -282,8 +353,22 @@ pub async fn run_once(state: &AppState, now_ns: i64) -> anyhow::Result<Stats> {
         }
     }
 
-    let raw_cutoff = now_ns - RAW_RETENTION_DAYS * NANOS_PER_DAY;
-    let hourly_cutoff = now_ns - HOURLY_RETENTION_DAYS * NANOS_PER_DAY;
+    // Get retention settings from database
+    let raw_days = state
+        .storage
+        .settings()
+        .raw_retention_days()
+        .await
+        .unwrap_or(14);
+    let hourly_days = state
+        .storage
+        .settings()
+        .hourly_retention_days()
+        .await
+        .unwrap_or(730);
+
+    let raw_cutoff = now_ns - raw_days * NANOS_PER_DAY;
+    let hourly_cutoff = now_ns - hourly_days * NANOS_PER_DAY;
     // Deletion line doesn't cross "how far aggregation got" — otherwise raw
     // data that hasn't been aggregated yet would be discarded.
     totals.raw_deleted = telemetry
