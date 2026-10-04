@@ -445,6 +445,8 @@
       "platform": "Next: this is the platform itself — check the monitor log and data-dir permissions."
     },
     "silencedNote": "{{n}} more are silenced — hidden here and not notifying until the window ends.",
+    "loadMore": "Load more",
+    "loadingMore": "Loading...",
     "summaryNodesHint": "online / total",
     "summaryServicesHint": "healthy / total",
     "summaryProbesHint": "healthy / total",
@@ -712,8 +714,6 @@
     "delete": "Delete",
     "deleteConfirmTitle": "Delete rule",
     "deleteConfirmMessage": "Deleting this rule also resolves its open alerts. This cannot be undone.",
-    "resolveConfirmTitle": "Resolve alert",
-    "resolveConfirmMessage": "Manually close this alert?",
     "noChanges": "No changes to save",
     "severity": "Severity",
     "warning": "Warning",
@@ -730,7 +730,9 @@
     "updated": "Rule updated",
     "silencedToast": "Silenced",
     "resolvedToast": "Resolved",
-    "resolve": "Resolve alert",
+    "resolve": "Resolved",
+    "resolveConfirmTitle": "Confirm resolved",
+    "resolveConfirmMessage": "Mark this alert as resolved?",
     "criticalCount": "{{n}} critical",
     "warningCount": "{{n}} warning"
   },
@@ -876,7 +878,12 @@
     "aiTokenRevoked": "AI token revoked",
     "aiTokenRevokeTitle": "Revoke AI token",
     "aiTokenRevokeMessage": "After this every AI client using this token disconnects immediately. This cannot be undone.",
-    "aiTokenRevoke": "Revoke"
+    "aiTokenRevoke": "Revoke",
+    "mcpTitle": "MCP Integration",
+    "mcpSubtitle": "Connect AI clients via Model Context Protocol",
+    "mcpHelp": "View help",
+    "mcpEndpoint": "MCP endpoint",
+    "mcpHint": "Copy the configuration to your AI client's settings file"
   },
   "logs": {
     "title": "Logs",

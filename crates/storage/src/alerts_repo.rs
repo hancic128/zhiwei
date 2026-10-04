@@ -1060,6 +1060,7 @@ impl AlertsRepo {
     pub async fn open_container_alert(
         &self,
         container_id: &str,
+        container_name: &str,
         rule_name: &str,
         node_id: &str,
         hostname: &str,
@@ -1067,15 +1068,18 @@ impl AlertsRepo {
         message: &str,
         now: i64,
     ) -> anyhow::Result<i64> {
-        if let Some(existing) = self.open_container_alert_id(container_id).await? {
+        // Store as "{name}:{id}" so we can match by name when container restarts with new ID
+        let source_ref = format!("{}:{}", container_name, container_id);
+        if let Some(existing) = self.open_container_alert_id(&source_ref).await? {
             sqlx::query(
                 "UPDATE alerts
-                 SET message = ?, severity = ?, started_at_unix_nano = ?
+                 SET message = ?, severity = ?, started_at_unix_nano = ?, source_ref = ?
                  WHERE id = ?",
             )
             .bind(message)
             .bind(severity)
             .bind(now)
+            .bind(&source_ref)
             .bind(existing)
             .execute(&self.pool)
             .await?;
@@ -1093,7 +1097,7 @@ impl AlertsRepo {
         .bind(severity)
         .bind(message)
         .bind(now)
-        .bind(container_id)
+        .bind(&source_ref)
         .execute(&self.pool)
         .await?;
         Ok(r.last_insert_rowid())
@@ -1115,6 +1119,40 @@ impl AlertsRepo {
         )
         .bind(now)
         .bind(container_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(r.rows_affected())
+    }
+
+    /// Close unresolved container alerts by container NAME (not ID).
+    ///
+    /// Docker container IDs change on restart, but container names are stable.
+    /// This method resolves any open "container stopped" alerts for containers
+    /// with matching name, regardless of their current container_id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
+    pub async fn resolve_open_container_alerts_by_name(
+        &self,
+        container_name: &str,
+        node_id: &str,
+        now: i64,
+    ) -> anyhow::Result<u64> {
+        // Match source_ref starting with "{name}:" (the format used in open_container_alert)
+        let prefix = format!("{container_name}:");
+        let prefix_len = i64::try_from(prefix.len()).unwrap_or(100);
+        let r = sqlx::query(
+            r"UPDATE alerts SET resolved_at_unix_nano = ?
+             WHERE source = 'container'
+               AND resolved_at_unix_nano IS NULL
+               AND substr(source_ref, 1, ?) = ?
+               AND node_id = ?",
+        )
+        .bind(now)
+        .bind(prefix_len)
+        .bind(&prefix)
+        .bind(node_id)
         .execute(&self.pool)
         .await?;
         Ok(r.rows_affected())
@@ -1500,6 +1538,7 @@ mod container_builtin_channel_tests {
         let a = repo
             .open_container_alert(
                 "cid-1",
+                "nginx", // container name
                 "Container Stopped",
                 "n1",
                 "host-a",
@@ -1512,6 +1551,7 @@ mod container_builtin_channel_tests {
         let b = repo
             .open_container_alert(
                 "cid-1",
+                "nginx",
                 "Container Stopped",
                 "n1",
                 "host-a",
@@ -1530,6 +1570,7 @@ mod container_builtin_channel_tests {
         // Another container's alert should not be accidentally closed
         repo.open_container_alert(
             "cid-2",
+            "redis",
             "Container Stopped",
             "n1",
             "host-a",
@@ -1539,8 +1580,9 @@ mod container_builtin_channel_tests {
         )
         .await
         .unwrap();
+        // Resolve by name (the new way)
         assert_eq!(
-            repo.resolve_open_container_alerts("cid-1", 300)
+            repo.resolve_open_container_alerts_by_name("nginx", "n1", 300)
                 .await
                 .unwrap(),
             1
@@ -1558,6 +1600,7 @@ mod container_builtin_channel_tests {
         let c = repo
             .open_container_alert(
                 "cid-1",
+                "nginx",
                 "Container Stopped",
                 "n1",
                 "host-a",
@@ -1568,6 +1611,68 @@ mod container_builtin_channel_tests {
             .await
             .unwrap();
         assert_ne!(a, c);
+    }
+
+    #[tokio::test]
+    async fn container_restart_with_new_id_is_closed_by_name() {
+        // Docker container IDs change on restart, but names are stable.
+        // This test verifies that an alert opened for "nginx:old-id" is closed
+        // when the same container restarts with "nginx:new-id".
+        let pool = fresh_pool().await;
+        let repo = AlertsRepo::new(pool.clone());
+
+        // Container stopped: opens alert with old ID (using format "{name}:{id}")
+        let alert_id = repo
+            .open_container_alert(
+                "old-container-id-abc123",
+                "nginx",
+                "Container Stopped",
+                "n1",
+                "host-a",
+                "warning",
+                "stopped",
+                100,
+            )
+            .await
+            .unwrap();
+
+        // Verify alert exists and is unresolved
+        let open_count = open_alert_count(&pool, "container").await;
+        assert_eq!(open_count, 1, "should have one open alert");
+
+        // Container restarted with new ID: diff_containers will detect this and call:
+        // 1. handle_container_stopped with new ID -> creates new alert
+        // 2. handle_container_started with new ID -> closes by name
+        // Simulate step 1: open a new alert for the restarted container
+        let _new_alert_id = repo
+            .open_container_alert(
+                "new-container-id-xyz789",
+                "nginx",
+                "Container Stopped",
+                "n1",
+                "host-a",
+                "warning",
+                "stopped",
+                200,
+            )
+            .await
+            .unwrap();
+
+        // The old alert should be reused (idempotent by name: "nginx:old-id" vs "nginx:new-id" are different)
+        // Since they have different IDs, they create separate alerts
+        let open_count = open_alert_count(&pool, "container").await;
+        assert_eq!(open_count, 2, "should have two alerts: old and new");
+
+        // Simulate handle_container_started: close by name (this is the fix for the restart bug)
+        let closed = repo
+            .resolve_open_container_alerts_by_name("nginx", "n1", 300)
+            .await
+            .unwrap();
+        assert_eq!(closed, 2, "should close both alerts by container name");
+
+        // Verify alerts are resolved
+        let open_count = open_alert_count(&pool, "container").await;
+        assert_eq!(open_count, 0, "all alerts should be closed");
     }
 
     #[tokio::test]
@@ -1587,6 +1692,7 @@ mod container_builtin_channel_tests {
         .unwrap();
         repo.open_container_alert(
             "cid-1",
+            "nginx",
             "Container Stopped",
             "n1",
             "host-a",

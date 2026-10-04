@@ -1,4 +1,5 @@
 import * as React from "react";
+import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import {
@@ -7,8 +8,10 @@ import {
   Copy,
   Eye,
   EyeOff,
+  HelpCircle,
   Info,
   KeyRound,
+  Network,
   Pencil,
   Plus,
   ShieldCheck,
@@ -60,6 +63,7 @@ export function Settings() {
       <CredentialSection />
       <EnrollTokensSection />
       <AiSection />
+      <McpSection />
       <CaSection />
       <p className="text-xs text-ink-400">{t("settings.caWarn")}</p>
     </div>
@@ -893,22 +897,6 @@ function AiSection() {
     onError: (e) => toast.push("error", t(friendlyError(e))),
   });
 
-  const readOnly = [
-    "GET /v1/todo",
-    "GET /v1/nodes",
-    "GET /v1/nodes/<id>/series?metric=&from=&to=&limit=",
-    "GET /v1/nodes/<id>/containers",
-    "GET /v1/containers",
-    "GET /v1/certificates",
-    "GET /v1/services",
-  ];
-  const actions = [
-    "container_start / container_stop / container_restart / container_remove",
-    "kill_process(pid, signal) / fetch_logs",
-    "restart_host / shutdown_host",
-    "refresh_inventory / scan_certs",
-  ];
-
   const tokens = tokensQ.data?.tokens ?? [];
 
   return (
@@ -918,21 +906,6 @@ function AiSection() {
           icon={<Bot className="w-5 h-5 text-brand-600" aria-hidden="true" />}
           title={t("settings.aiTitle")}
           description={t("settings.aiSubtitle")}
-          action={
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={() =>
-                copy(
-                  t("settings.aiBrief", { base, token: token || "<admin token>" }),
-                  "settings.aiBriefCopied",
-                )
-              }
-            >
-              <Copy className="w-4 h-4" aria-hidden="true" />
-              {t("settings.aiCopyBrief")}
-            </Button>
-          }
         />
         <CardBody compact className="space-y-4">
           <dl className="grid gap-4 sm:grid-cols-2">
@@ -981,46 +954,6 @@ function AiSection() {
               </dd>
             </div>
           </dl>
-
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div>
-              <h4 className="text-xs text-ink-400">{t("settings.aiRead")}</h4>
-              <ul className="mt-1 space-y-0.5">
-                {readOnly.map((r) => (
-                  <li
-                    key={r}
-                    className="text-xs font-mono text-ink-600 dark:text-surface-4 break-all"
-                  >
-                    {r}
-                  </li>
-                ))}
-              </ul>
-            </div>
-            <div>
-              <h4 className="text-xs text-ink-400">{t("settings.aiAct")}</h4>
-              <ul className="mt-1 space-y-0.5">
-                {actions.map((a) => (
-                  <li
-                    key={a}
-                    className="text-xs font-mono text-ink-600 dark:text-surface-4 break-all"
-                  >
-                    {a}
-                  </li>
-                ))}
-              </ul>
-              <p className="mt-2 text-xs text-ink-400 break-all">
-                POST /v1/exec {"{"}"node_id","action","params"{"}"}
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-start gap-2">
-            <ShieldCheck
-              className="w-4 h-4 mt-0.5 shrink-0 text-ink-400"
-              aria-hidden="true"
-            />
-            <p className="text-xs text-ink-400">{t("settings.aiBoundary")}</p>
-          </div>
         </CardBody>
       </Card>
 
@@ -1126,6 +1059,53 @@ function AiSection() {
         onConfirm={() => pendingRevoke && revoke.mutate(pendingRevoke.id)}
       />
     </>
+  );
+}
+
+function McpSection() {
+  const { t } = useTranslation();
+  const navigate = useNavigate();
+  const baseUrl = window.location.origin;
+
+  const code = `{
+  "mcpServers": {
+    "zhiwei-monitor": {
+      "url": "${baseUrl}/mcp/sse",
+      "headers": {
+        "Authorization": "Bearer <YOUR_AI_TOKEN>"
+      }
+    }
+  }
+}`;
+
+  return (
+    <Card>
+      <CardHeader
+        icon={<Network className="w-5 h-5 text-brand-600" />}
+        title={t("settings.mcpTitle")}
+        description={t("settings.mcpSubtitle")}
+        action={
+          <Button variant="ghost" size="sm" onClick={() => navigate("/help#ai-mcp")}>
+            <HelpCircle className="w-4 h-4 mr-1" />
+            {t("settings.mcpHelp")}
+          </Button>
+        }
+      />
+      <CardBody compact className="space-y-4">
+        <div className="text-sm text-ink-500">
+          <p>
+            {t("settings.mcpEndpoint")}:{" "}
+            <code className="bg-surface-2 px-1 rounded">
+              {baseUrl}/mcp/sse
+            </code>
+          </p>
+        </div>
+        <pre className="bg-surface-2 dark:bg-ink-700/60 rounded-lg px-4 py-3 text-xs overflow-x-auto">
+          <code className="text-ink-700 dark:text-surface-4">{code}</code>
+        </pre>
+        <p className="text-xs text-ink-400">{t("settings.mcpHint")}</p>
+      </CardBody>
+    </Card>
   );
 }
 

@@ -7,12 +7,12 @@
 //! Design: `docs/superpowers/specs/2026-09-19-product-structure-design.md` §4.
 
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use zhiwei_storage::alerts_repo::Alert;
 use zhiwei_storage::node_repo::NodeRecord;
 
@@ -26,7 +26,35 @@ pub use crate::alerts::NODE_OFFLINE_AFTER_MS;
 
 /// Number of recovered-history entries kept — history is for trust, doesn't
 /// need to be long
-const RECOVERED_LIMIT: i64 = 5;
+const RECOVERED_LIMIT: i64 = 50;
+
+/// Default page size for now/watch/recovered lists
+const DEFAULT_PAGE_SIZE: i64 = 20;
+
+/// Pagination query params for todo API
+#[derive(Debug, Deserialize)]
+pub struct TodoQuery {
+    #[serde(default = "default_page_size")]
+    pub page_size: i64,
+    #[serde(default)]
+    pub now_cursor: Option<i64>,
+    #[serde(default)]
+    pub watch_cursor: Option<i64>,
+    #[serde(default)]
+    pub recovered_cursor: Option<i64>,
+}
+
+fn default_page_size() -> i64 {
+    DEFAULT_PAGE_SIZE
+}
+
+/// Paginated list response
+#[derive(Debug, Serialize)]
+pub struct Page<T> {
+    pub items: Vec<T>,
+    pub next_cursor: Option<i64>,
+    pub total: i64,
+}
 
 /// Buckets: by "do I need to act now", not by severity
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,7 +159,11 @@ pub struct Summary {
 
 /// `GET /v1/todo` — default page: combines "things to handle today" into one
 /// stream.
-pub async fn todo_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
+pub async fn todo_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<TodoQuery>,
+) -> Response {
     if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
@@ -141,6 +173,7 @@ pub async fn todo_handler(State(state): State<AppState>, headers: HeaderMap) -> 
 
     let now_ns = zhiwei_common::Timestamp::now().unix_nano();
     let now_epoch_ms = now_ns / 1_000_000;
+    let page_size = query.page_size.clamp(1, 100);
 
     let nodes = match state.storage.nodes().list_all().await {
         Ok(n) => n,
@@ -184,6 +217,18 @@ pub async fn todo_handler(State(state): State<AppState>, headers: HeaderMap) -> 
 
     let recovered = recovered_items(&resolved_alerts, &nodes);
 
+    // Apply pagination: now list
+    let now_total = now_items.len() as i64;
+    let (now_page, now_cursor) = paginate(now_items, query.now_cursor, page_size);
+
+    // Apply pagination: watch list
+    let watch_total = watch_items.len() as i64;
+    let (watch_page, watch_cursor) = paginate(watch_items, query.watch_cursor, page_size);
+
+    // Apply pagination: recovered list
+    let recovered_total = recovered.len() as i64;
+    let (recovered_page, recovered_cursor) = paginate(recovered, query.recovered_cursor, page_size);
+
     let summary = Summary {
         nodes_online: nodes
             .iter()
@@ -203,16 +248,57 @@ pub async fn todo_handler(State(state): State<AppState>, headers: HeaderMap) -> 
         "generated_at_unix_nano": now_ns,
         "summary": summary,
         "counts": {
-            "now": now_items.len(),
-            "watch": watch_items.len(),
-            "recovered": recovered.len(),
+            "now": now_total,
+            "watch": watch_total,
+            "recovered": recovered_total,
             "silenced": silenced,
         },
-        "now": now_items,
-        "watch": watch_items,
-        "recovered": recovered,
+        "now": Page { items: now_page, next_cursor: now_cursor, total: now_total },
+        "watch": Page { items: watch_page, next_cursor: watch_cursor, total: watch_total },
+        "recovered": Page { items: recovered_page, next_cursor: recovered_cursor, total: recovered_total },
     }))
     .into_response()
+}
+
+/// Apply cursor-based pagination: skip items until cursor, take page_size+1 to check if there's more.
+fn paginate<T: Sortable>(
+    mut items: Vec<T>,
+    cursor: Option<i64>,
+    page_size: i64,
+) -> (Vec<T>, Option<i64>) {
+    let start = cursor.map_or(0, |c| {
+        items
+            .iter()
+            .position(|i| i.sort_key() >= c)
+            .unwrap_or(items.len())
+    });
+    let remaining = items.split_off(start);
+    let has_more = remaining.len() as i64 > page_size;
+    let page: Vec<T> = remaining.into_iter().take(page_size as usize).collect();
+    let next_cursor = if has_more {
+        page.last().map(|i| i.sort_key())
+    } else {
+        None
+    };
+    (page, next_cursor)
+}
+
+/// Trait for sortable items in pagination
+trait Sortable {
+    fn sort_key(&self) -> i64;
+}
+
+impl Sortable for TodoItem {
+    fn sort_key(&self) -> i64 {
+        // For recovered items, use resolved_at_unix_nano; for others use since_unix_nano
+        if let Some(resolved) = self.resolved_at_unix_nano {
+            // Recovered items: newest first (higher resolved_at first)
+            -resolved
+        } else {
+            // Active items: oldest first (lower since_unix_nano first)
+            self.since_unix_nano
+        }
+    }
 }
 
 /// Whether a node last seen at `last_seen_unix_nano` is considered online at `now_epoch_ms`.
@@ -376,10 +462,17 @@ fn sort_items(items: &mut [TodoItem]) {
 }
 
 fn recovered_items(resolved_alerts: &[Alert], nodes: &[NodeRecord]) -> Vec<TodoItem> {
-    resolved_alerts
+    let mut items: Vec<_> = resolved_alerts
         .iter()
         .map(|a| alert_item(a, nodes, true))
-        .collect()
+        .collect();
+    // Sort by resolved time, newest first
+    items.sort_by(|a, b| {
+        let a_time = a.resolved_at_unix_nano.unwrap_or(0);
+        let b_time = b.resolved_at_unix_nano.unwrap_or(0);
+        b_time.cmp(&a_time)
+    });
+    items
 }
 
 #[cfg(test)]
