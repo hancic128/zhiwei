@@ -41,6 +41,7 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
     m019b_migrate_chinese_builtin_names(pool).await?;
     m020_builtin_alert_thresholds(pool).await?;
     m021_resource_metric_alerts(pool).await?;
+    m022_settings_table(pool).await?;
 
     Ok(())
 }
@@ -701,6 +702,27 @@ async fn m021_resource_metric_alerts(pool: &SqlitePool) -> anyhow::Result<()> {
                    ('mem_high',  'Memory Usage High', 1, 85.0, 300, 0),
                    ('disk_high',  'Disk Usage High', 1, 90.0, 300, 0);
         INSERT INTO schema_version (version) VALUES (21);
+        ",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// 022: Add settings table for key-value configuration
+async fn m022_settings_table(pool: &SqlitePool) -> anyhow::Result<()> {
+    if migration_applied(pool, 22).await? {
+        return Ok(());
+    }
+    sqlx::query(
+        r"
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        -- Default alert retention: 365 days
+        INSERT OR IGNORE INTO settings (key, value) VALUES ('alert_retention_days', '365');
+        INSERT INTO schema_version (version) VALUES (22);
         ",
     )
     .execute(pool)

@@ -172,7 +172,11 @@ fn probes_routes() -> Router<AppState> {
 fn admin_routes() -> Router<AppState> {
     Router::new()
         .route("/v1/todo", get(crate::todo_api::todo_handler))
-        .route("/v1/retention", get(crate::retention::retention_handler))
+        .route(
+            "/v1/retention",
+            get(crate::retention::retention_handler)
+                .patch(crate::retention::patch_retention_handler),
+        )
         .route("/v1/help", get(help_handler))
         .route("/v1/admin/token", post(change_admin_token_handler))
         .route(
@@ -2353,13 +2357,31 @@ async fn all_certificates_handler(State(state): State<AppState>, headers: Header
 
 // ---------- Alerts and Rules ----------
 
+#[derive(Deserialize)]
+struct AlertsQuery {
+    since: Option<i64>,
+    until: Option<i64>,
+    status: Option<String>,
+    sources: Option<String>,
+    #[serde(default = "default_alerts_limit")]
+    limit: i64,
+}
+
+const fn default_alerts_limit() -> i64 {
+    50
+}
+
 #[derive(Serialize)]
 struct AlertsView {
     open: Vec<zhiwei_storage::alerts_repo::Alert>,
     resolved: Vec<zhiwei_storage::alerts_repo::Alert>,
 }
 
-async fn alerts_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
+async fn alerts_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<AlertsQuery>,
+) -> Response {
     if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
@@ -2367,16 +2389,33 @@ async fn alerts_handler(State(state): State<AppState>, headers: HeaderMap) -> Re
         );
     }
     let repo = state.storage.alerts();
-    let (open, resolved) = match (repo.open_alerts().await, repo.resolved_alerts(50).await) {
-        (Ok(o), Ok(r)) => (o, r),
-        (Err(e), _) | (_, Err(e)) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("query alerts: {e}"),
-            );
-        }
+    let alert_query = zhiwei_storage::alerts_repo::AlertQuery {
+        since_ms: query.since,
+        until_ms: query.until,
+        status: query.status.clone(),
+        sources: query.sources.clone(),
+        limit: Some(query.limit),
     };
-    Json(AlertsView { open, resolved }).into_response()
+
+    let open_alerts = if query.status.as_deref() == Some("resolved") {
+        vec![]
+    } else {
+        repo.open_alerts().await.unwrap_or_default()
+    };
+
+    let resolved_alerts = if query.status.as_deref() == Some("open") {
+        vec![]
+    } else {
+        repo.query_alerts_filtered(&alert_query)
+            .await
+            .unwrap_or_default()
+    };
+
+    Json(AlertsView {
+        open: open_alerts,
+        resolved: resolved_alerts,
+    })
+    .into_response()
 }
 
 async fn silence_alert_handler(

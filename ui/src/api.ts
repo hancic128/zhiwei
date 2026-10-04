@@ -765,10 +765,17 @@ export const builtinAlertsApi = {
 export interface RetentionView {
   raw_days: number;
   hourly_days: number;
+  alert_retention_days: number;
 }
 
 export const retentionApi = {
   get: () => request<RetentionView>("/v1/retention"),
+  update: (body: { alert_retention_days?: number }) =>
+    request<RetentionView>("/v1/retention", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
 };
 
 /** Selectable alert metrics (matches the metric names collected by node-agent) */
@@ -1025,6 +1032,10 @@ export interface TodoView {
 export interface TodoQuery {
   page?: number;
   page_size?: number;
+  since?: number;
+  until?: number;
+  status?: "open" | "resolved" | "all";
+  sources?: string;
 }
 
 export const todoApi = {
@@ -1032,6 +1043,10 @@ export const todoApi = {
     const params = new URLSearchParams();
     if (query?.page !== undefined) params.set("page", String(query.page));
     if (query?.page_size !== undefined) params.set("page_size", String(query.page_size));
+    if (query?.since !== undefined) params.set("since", String(query.since));
+    if (query?.until !== undefined) params.set("until", String(query.until));
+    if (query?.status !== undefined) params.set("status", query.status);
+    if (query?.sources !== undefined) params.set("sources", query.sources);
     const qs = params.toString();
     return request<TodoView>(`/v1/todo${qs ? `?${qs}` : ""}`);
   },

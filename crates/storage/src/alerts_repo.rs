@@ -221,6 +221,21 @@ fn alert_from_row(r: AlertRow) -> Alert {
     }
 }
 
+/// Query parameters for filtered alert list.
+#[derive(Debug, Default)]
+pub struct AlertQuery {
+    /// Time range: only alerts with `started_at_unix_nano` >= since (milliseconds)
+    pub since_ms: Option<i64>,
+    /// Time range: only alerts with `started_at_unix_nano` <= until (milliseconds)
+    pub until_ms: Option<i64>,
+    /// Filter by status: "open" | "resolved" | "all" (default)
+    pub status: Option<String>,
+    /// Filter by source types (comma-separated): "`rule,probe,cert,node_offline,container`"
+    pub sources: Option<String>,
+    /// Maximum number of results (default 500)
+    pub limit: Option<i64>,
+}
+
 #[derive(Clone)]
 pub struct AlertsRepo {
     pool: SqlitePool,
@@ -1155,6 +1170,87 @@ impl AlertsRepo {
             limit.clamp(1, 500)
         ))
         .await
+    }
+
+    /// Query alerts with optional filters.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
+    pub async fn query_alerts_filtered(&self, query: &AlertQuery) -> anyhow::Result<Vec<Alert>> {
+        let mut conditions: Vec<String> = Vec::new();
+
+        // Status filter
+        match query.status.as_deref() {
+            Some("open") => conditions.push("resolved_at_unix_nano IS NULL".to_string()),
+            Some("resolved") => conditions.push("resolved_at_unix_nano IS NOT NULL".to_string()),
+            _ => {} // "all" or None: no filter
+        }
+
+        // Time range filter
+        if let Some(_since) = query.since_ms {
+            conditions.push("started_at_unix_nano >= ?".to_string());
+        }
+        if let Some(_until) = query.until_ms {
+            conditions.push("started_at_unix_nano <= ?".to_string());
+        }
+
+        // Source filter
+        if let Some(sources) = &query.sources {
+            let source_list: Vec<String> = sources
+                .split(',')
+                .map(|s| format!("'{}'", s.trim()))
+                .collect();
+            if !source_list.is_empty() {
+                conditions.push(format!("source IN ({})", source_list.join(",")));
+            }
+        }
+
+        let limit = query.limit.unwrap_or(500).clamp(1, 1000);
+        let tail = if conditions.is_empty() {
+            format!("ORDER BY started_at_unix_nano DESC LIMIT {limit}")
+        } else {
+            format!(
+                "WHERE {} ORDER BY started_at_unix_nano DESC LIMIT {}",
+                conditions.join(" AND "),
+                limit
+            )
+        };
+
+        // Build query with params
+        let sql = format!(
+            r"SELECT id, rule_id, rule_name, node_id, hostname, severity, metric, op, threshold,
+                      value, message, started_at_unix_nano, resolved_at_unix_nano,
+                      silenced_until_unix_nano, source, source_ref
+               FROM alerts {tail}"
+        );
+
+        // Execute with bound parameters
+        let mut query_builder = sqlx::query_as::<_, AlertRow>(&sql);
+        if let Some(since) = query.since_ms {
+            query_builder = query_builder.bind(since);
+        }
+        if let Some(until) = query.until_ms {
+            query_builder = query_builder.bind(until);
+        }
+        let rows: Vec<AlertRow> = query_builder.fetch_all(&self.pool).await?;
+        Ok(rows.into_iter().map(alert_from_row).collect())
+    }
+
+    /// Delete resolved alerts older than the specified timestamp (milliseconds).
+    /// Returns the number of deleted rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
+    pub async fn purge_old_resolved_alerts(&self, before_ms: i64) -> anyhow::Result<u64> {
+        let result = sqlx::query(
+            "DELETE FROM alerts WHERE resolved_at_unix_nano IS NOT NULL AND resolved_at_unix_nano < ?",
+        )
+        .bind(before_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 
     async fn query_alerts(&self, tail: &str) -> anyhow::Result<Vec<Alert>> {

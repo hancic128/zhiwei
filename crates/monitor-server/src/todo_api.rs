@@ -25,7 +25,7 @@ use crate::state::AppState;
 /// avoiding "console shows online / background already alerts" inconsistency.
 pub use crate::alerts::NODE_OFFLINE_AFTER_MS;
 
-/// Query parameters for todo endpoint pagination.
+/// Query parameters for todo endpoint pagination and filtering.
 #[derive(Debug, Deserialize)]
 pub struct TodoQuery {
     /// Page number (0-indexed).
@@ -34,6 +34,18 @@ pub struct TodoQuery {
     /// Number of items per page.
     #[serde(default = "default_page_size")]
     pub page_size: i64,
+    /// Time range: only alerts with `started_at` >= since (Unix milliseconds)
+    #[serde(default)]
+    pub since: Option<i64>,
+    /// Time range: only alerts with `started_at` <= until (Unix milliseconds)
+    #[serde(default)]
+    pub until: Option<i64>,
+    /// Filter by status: "open" | "resolved" | "all" (default)
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Filter by source types (comma-separated): "`rule,probe,cert,node_offline,container`"
+    #[serde(default)]
+    pub sources: Option<String>,
 }
 
 const fn default_page_size() -> i64 {
@@ -185,13 +197,26 @@ pub async fn todo_handler(
         .open_alerts()
         .await
         .unwrap_or_default();
-    // Use larger limit for pagination; we fetch all and slice on the backend side
-    let resolved_alerts = state
-        .storage
-        .alerts()
-        .resolved_alerts(1000) // Fetch enough for pagination
-        .await
-        .unwrap_or_default();
+
+    // Fetch resolved alerts with optional filters
+    let resolved_alerts = if query.status.as_deref() == Some("open") {
+        // User wants only open alerts, skip resolved
+        vec![]
+    } else {
+        let alert_query = zhiwei_storage::alerts_repo::AlertQuery {
+            since_ms: query.since,
+            until_ms: query.until,
+            status: query.status.clone(),
+            sources: query.sources.clone(),
+            limit: Some(1000),
+        };
+        state
+            .storage
+            .alerts()
+            .query_alerts_filtered(&alert_query)
+            .await
+            .unwrap_or_default()
+    };
 
     let (mut now_items, mut watch_items, silenced) =
         bucket_open_alerts(&open_alerts, &nodes, now_ns);

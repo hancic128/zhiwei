@@ -845,6 +845,8 @@
     "pwStrStrong": "强",
     "pwStrVeryStrong": "很强",
     "pwNote": "只有这一把钥匙（节点走签名、不认它）。改完立即生效，本机也会自动换成新的，不用重新登录。",
+    "retentionSaved": "保留设置已保存",
+    "daysUnit": "天",
     "pwChanged": "凭据已更新",
     "caEdgeNote": "当前部署由前置边缘终结 TLS —— 这个 CA 用不上：monitor 的证书是边缘签发的，节点也不再 pin 它（走系统根）。这里的指纹只作排查参考。",
     "enrollTokensTitle": "入网令牌",
@@ -971,5 +973,28 @@
     "revokeConfirm": "撤销后此 token 立即失效，相关 AI 客户端会立刻掉线。",
     "enrollTokenGenerating": "正在生成入网命令…",
     "commandAutoCopied": "命令已生成并复制到剪贴板"
+  },
+  "filter": {
+    "all": "全部",
+    "open": "未解决",
+    "resolved": "已解决",
+    "clear": "清除筛选",
+    "allSources": "全部来源",
+    "sourceRule": "指标规则",
+    "sourceProbe": "服务探针",
+    "sourceCert": "证书",
+    "sourceNodeOffline": "节点离线",
+    "sourceContainer": "容器"
+  },
+  "retention": {
+    "title": "数据保留",
+    "subtitle": "控制数据保留时长",
+    "rawTitle": "原始遥测",
+    "rawDays": "{{n}} 天",
+    "hourlyTitle": "小时聚合",
+    "hourlyDays": "{{n}} 天",
+    "alertTitle": "已解决告警",
+    "alertDays": "{{n}} 天",
+    "alertDaysHint": "早于此时间的已解决告警将自动清理"
   }
 }

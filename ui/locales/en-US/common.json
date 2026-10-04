@@ -846,6 +846,8 @@
     "pwStrStrong": "Strong",
     "pwStrVeryStrong": "Very strong",
     "pwNote": "This is the only key the console has (nodes use signatures and don't recognise it). It takes effect immediately, and this browser switches over too — no re-login.",
+    "retentionSaved": "Retention settings saved",
+    "daysUnit": "days",
     "pwChanged": "Credential updated",
     "caEdgeNote": "TLS is terminated by an edge in this deployment, so this CA isn't used: the monitor's certificate is edge-issued and nodes no longer pin it (they use system roots). The fingerprint here is only a diagnostic.",
     "enrollTokensTitle": "Enroll tokens",
@@ -972,5 +974,28 @@
     "revokeConfirm": "After revoking, this token stops working immediately and every AI client using it disconnects instantly.",
     "enrollTokenGenerating": "Generating enroll command…",
     "commandAutoCopied": "Command generated and copied"
+  },
+  "filter": {
+    "all": "All",
+    "open": "Open",
+    "resolved": "Resolved",
+    "clear": "Clear filters",
+    "allSources": "All sources",
+    "sourceRule": "Metric rule",
+    "sourceProbe": "Service probe",
+    "sourceCert": "Certificate",
+    "sourceNodeOffline": "Node offline",
+    "sourceContainer": "Container"
+  },
+  "retention": {
+    "title": "Data Retention",
+    "subtitle": "Control how long data is kept",
+    "rawTitle": "Raw telemetry",
+    "rawDays": "{{n}} days",
+    "hourlyTitle": "Hourly aggregates",
+    "hourlyDays": "{{n}} days",
+    "alertTitle": "Resolved alerts",
+    "alertDays": "{{n}} days",
+    "alertDaysHint": "Resolved alerts older than this are automatically purged"
   }
 }

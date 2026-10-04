@@ -20,6 +20,7 @@ import {
   aiTokens,
   alertsApi,
   enrollTokens,
+  retentionApi,
   setToken,
   settingsApi,
   type AiTokenMeta,
@@ -57,6 +58,7 @@ export function Settings() {
   return (
     <div className="space-y-4 md:space-y-6">
       <UiSection />
+      <RetentionSection />
       <ChannelsSection />
       <CredentialSection />
       <EnrollTokensSection />
@@ -64,6 +66,95 @@ export function Settings() {
       <CaSection />
       <p className="text-xs text-ink-400">{t("settings.caWarn")}</p>
     </div>
+  );
+}
+
+function RetentionSection() {
+  const { t } = useTranslation();
+  const toast = useToast();
+  const q = useQuery({ queryKey: ["retention"], queryFn: retentionApi.get });
+  const update = useMutation({
+    mutationFn: (alertDays: number) => retentionApi.update({ alert_retention_days: alertDays }),
+    onSuccess: () => {
+      toast.push("success", t("settings.retentionSaved"));
+      void q.refetch();
+    },
+    onError: (e) => toast.push("error", t(friendlyError(e))),
+  });
+
+  const [editDays, setEditDays] = React.useState<number | null>(null);
+
+  React.useEffect(() => {
+    if (q.data) {
+      setEditDays(q.data.alert_retention_days);
+    }
+  }, [q.data]);
+
+  const handleSave = () => {
+    if (editDays !== null) {
+      update.mutate(editDays);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader
+        icon={<Clock className="w-5 h-5 text-brand-600" aria-hidden="true" />}
+        title={t("retention.title")}
+        description={t("retention.subtitle")}
+      />
+      <CardBody>
+        {q.isLoading ? (
+          <Skeleton className="h-24 w-full" />
+        ) : q.isError ? (
+          <ErrorState
+            compact
+            message={t(friendlyError(q.error))}
+            onRetry={() => void q.refetch()}
+            retrying={q.isFetching}
+          />
+        ) : q.data ? (
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
+              <div>
+                <p className="text-xs text-ink-400">{t("retention.rawTitle")}</p>
+                <p className="font-medium">{t("retention.rawDays", { n: q.data.raw_days })}</p>
+              </div>
+              <div>
+                <p className="text-xs text-ink-400">{t("retention.hourlyTitle")}</p>
+                <p className="font-medium">{t("retention.hourlyDays", { n: q.data.hourly_days })}</p>
+              </div>
+              <div>
+                <p className="text-xs text-ink-400">{t("retention.alertTitle")}</p>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min="1"
+                    max="3650"
+                    value={editDays ?? ""}
+                    onChange={(e) => setEditDays(parseInt(e.target.value) || null)}
+                    className="w-20 px-2 py-1 text-sm border rounded bg-surface-1 dark:bg-ink-700 border-surface-3 dark:border-ink-600"
+                  />
+                  <span className="text-ink-500">{t("retention.daysUnit", { n: editDays ?? 0 })}</span>
+                </div>
+                <p className="text-xs text-ink-400 mt-1">{t("retention.alertDaysHint")}</p>
+              </div>
+            </div>
+            {editDays !== q.data.alert_retention_days && (
+              <div className="flex justify-end">
+                <Button
+                  onClick={handleSave}
+                  loading={update.isPending}
+                  size="sm"
+                >
+                  {t("action.save")}
+                </Button>
+              </div>
+            )}
+          </div>
+        ) : null}
+      </CardBody>
+    </Card>
   );
 }
 

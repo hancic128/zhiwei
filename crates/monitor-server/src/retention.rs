@@ -18,9 +18,21 @@ pub const RAW_RETENTION_DAYS: i64 = 14;
 /// Hourly aggregate retention in days (≈ 2 years).
 pub const HOURLY_RETENTION_DAYS: i64 = 730;
 
+/// Default alert retention in days (1 year).
+pub const ALERT_RETENTION_DAYS_DEFAULT: i64 = 365;
+
 /// Max hours processed in one retention run — prevents catching up too much
 /// after a long downtime.
 const MAX_HOURS_PER_RUN: i64 = 48;
+
+/// Get alert retention days from settings (with fallback to default).
+pub async fn get_alert_retention_days(storage: &zhiwei_storage::Storage) -> i64 {
+    storage
+        .settings()
+        .alert_retention_days()
+        .await
+        .unwrap_or(ALERT_RETENTION_DAYS_DEFAULT)
+}
 
 /// Lookback window when no historical aggregation exists yet (hours).
 const INITIAL_LOOKBACK_HOURS: i64 = 24;
@@ -139,9 +151,58 @@ pub async fn retention_handler(State(state): State<AppState>, headers: HeaderMap
             "authentication required (Bearer admin token)",
         );
     }
+    let alert_days = get_alert_retention_days(&state.storage).await;
     Json(serde_json::json!({
         "raw_days": RAW_RETENTION_DAYS,
         "hourly_days": HOURLY_RETENTION_DAYS,
+        "alert_retention_days": alert_days,
+    }))
+    .into_response()
+}
+
+/// `PATCH /v1/retention` — update retention settings.
+#[derive(serde::Deserialize)]
+pub struct RetentionPatch {
+    pub alert_retention_days: Option<i64>,
+}
+
+/// `PATCH /v1/retention` — update retention settings (currently only `alert_retention_days`).
+pub async fn patch_retention_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Json(patch): axum::extract::Json<RetentionPatch>,
+) -> Response {
+    use axum::http::StatusCode;
+
+    if !read_auth_ok(&state, &headers).await {
+        return err(
+            StatusCode::UNAUTHORIZED,
+            "authentication required (Bearer admin token)",
+        );
+    }
+
+    if let Some(days) = patch.alert_retention_days {
+        let days = days.clamp(1, 3650); // 1 day to 10 years
+        if let Err(e) = state
+            .storage
+            .settings()
+            .set("alert_retention_days", &days.to_string())
+            .await
+        {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("update setting: {e}"),
+            );
+        }
+        info!(alert_retention_days = days, "retention settings updated");
+    }
+
+    // Return updated settings
+    let alert_days = get_alert_retention_days(&state.storage).await;
+    Json(serde_json::json!({
+        "raw_days": RAW_RETENTION_DAYS,
+        "hourly_days": HOURLY_RETENTION_DAYS,
+        "alert_retention_days": alert_days,
     }))
     .into_response()
 }
@@ -161,6 +222,8 @@ pub struct Stats {
     pub rows: i64,
     pub raw_deleted: u64,
     pub hourly_deleted: u64,
+    /// How many resolved alerts were purged
+    pub alerts_deleted: u64,
 }
 
 /// Run one retention round: compress sealed hours into aggregates, then roll
@@ -216,6 +279,16 @@ pub async fn run_once(state: &AppState, now_ns: i64) -> anyhow::Result<Stats> {
         .delete_raw_before(raw_cutoff.min(aggregated_through))
         .await?;
     totals.hourly_deleted = telemetry.delete_hourly_before(hourly_cutoff).await?;
+
+    // Alert retention: purge resolved alerts older than configured days
+    let alert_retention_days = get_alert_retention_days(&state.storage).await;
+    let alert_cutoff = now_ns - alert_retention_days * NANOS_PER_DAY;
+    totals.alerts_deleted = state
+        .storage
+        .alerts()
+        .purge_old_resolved_alerts(alert_cutoff / 1_000_000) // convert to milliseconds
+        .await?;
+
     Ok(totals)
 }
 
@@ -229,12 +302,17 @@ pub fn spawn(state: AppState) {
             let now_ns = zhiwei_common::Timestamp::now().unix_nano();
             match run_once(&state, now_ns).await {
                 Ok(totals) => {
-                    if totals.rows > 0 || totals.raw_deleted > 0 || totals.hourly_deleted > 0 {
+                    if totals.rows > 0
+                        || totals.raw_deleted > 0
+                        || totals.hourly_deleted > 0
+                        || totals.alerts_deleted > 0
+                    {
                         info!(
                             buckets = totals.buckets,
                             rows = totals.rows,
                             raw_deleted = totals.raw_deleted,
                             hourly_deleted = totals.hourly_deleted,
+                            alerts_deleted = totals.alerts_deleted,
                             "Retention done"
                         );
                     }

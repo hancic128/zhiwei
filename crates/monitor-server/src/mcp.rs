@@ -85,10 +85,16 @@ fn tools_list() -> Value {
             ),
             tool_def(
                 "list_alerts",
-                "List active alerts and the last 50 resolved alerts (fixed 50-item window, no pagination).",
+                "List active alerts and resolved alerts (supports filtering by time range, status, and source).",
                 &json!({
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "since": { "type": "integer", "description": "Start time in Unix milliseconds (optional)" },
+                        "until": { "type": "integer", "description": "End time in Unix milliseconds (optional)" },
+                        "status": { "type": "string", "enum": ["open", "resolved", "all"], "description": "Filter by alert status (default: all)" },
+                        "sources": { "type": "string", "description": "Comma-separated source types: rule,probe,cert,node_offline,container" },
+                        "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 50, "description": "Maximum number of resolved alerts to return" }
+                    },
                     "additionalProperties": false,
                 }),
             ),
@@ -560,10 +566,17 @@ fn tools_list() -> Value {
             // ========== Other ==========
             tool_def(
                 "get_todo",
-                "Get the current todo list and task status.",
+                "Get the current todo list and task status (supports filtering by time range, status, and source).",
                 &json!({
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "since": { "type": "integer", "description": "Start time in Unix milliseconds (optional)" },
+                        "until": { "type": "integer", "description": "End time in Unix milliseconds (optional)" },
+                        "status": { "type": "string", "enum": ["open", "resolved", "all"], "description": "Filter by alert status (default: all)" },
+                        "sources": { "type": "string", "description": "Comma-separated source types: rule,probe,cert,node_offline,container" },
+                        "page": { "type": "integer", "minimum": 0, "default": 0, "description": "Page number (0-indexed)" },
+                        "page_size": { "type": "integer", "minimum": 1, "maximum": 100, "default": 5, "description": "Items per page" }
+                    },
                     "additionalProperties": false,
                 }),
             ),
@@ -889,7 +902,29 @@ async fn call_tool_impl(
             pretty_json(body)
         }
         "list_alerts" => {
-            let body = http_get(&client, base_url, token, "/v1/alerts").await?;
+            // Build query params
+            let mut params = Vec::new();
+            if let Some(since) = opt_i64(arguments, "since") {
+                params.push(format!("since={since}"));
+            }
+            if let Some(until) = opt_i64(arguments, "until") {
+                params.push(format!("until={until}"));
+            }
+            if let Some(status) = opt_str(arguments, "status") {
+                params.push(format!("status={status}"));
+            }
+            if let Some(sources) = opt_str(arguments, "sources") {
+                params.push(format!("sources={sources}"));
+            }
+            if let Some(limit) = opt_i64(arguments, "limit") {
+                params.push(format!("limit={limit}"));
+            }
+            let query = if params.is_empty() {
+                String::new()
+            } else {
+                format!("?{}", params.join("&"))
+            };
+            let body = http_get(&client, base_url, token, &format!("/v1/alerts{query}")).await?;
             pretty_json(body)
         }
         "list_certs" => {
@@ -1308,7 +1343,32 @@ async fn call_tool_impl(
 
         // ========== Other ==========
         "get_todo" => {
-            let body = http_get(&client, base_url, token, "/v1/todo").await?;
+            // Build query params
+            let mut params = Vec::new();
+            if let Some(since) = opt_i64(arguments, "since") {
+                params.push(format!("since={since}"));
+            }
+            if let Some(until) = opt_i64(arguments, "until") {
+                params.push(format!("until={until}"));
+            }
+            if let Some(status) = opt_str(arguments, "status") {
+                params.push(format!("status={status}"));
+            }
+            if let Some(sources) = opt_str(arguments, "sources") {
+                params.push(format!("sources={sources}"));
+            }
+            if let Some(page) = opt_i64(arguments, "page") {
+                params.push(format!("page={page}"));
+            }
+            if let Some(page_size) = opt_i64(arguments, "page_size") {
+                params.push(format!("page_size={page_size}"));
+            }
+            let query = if params.is_empty() {
+                String::new()
+            } else {
+                format!("?{}", params.join("&"))
+            };
+            let body = http_get(&client, base_url, token, &format!("/v1/todo{query}")).await?;
             pretty_json(body)
         }
         "get_retention" => {

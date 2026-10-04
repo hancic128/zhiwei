@@ -14,6 +14,7 @@ pub mod inventory_repo;
 pub mod migrations;
 pub mod node_repo;
 pub mod probes_repo;
+pub mod settings_repo;
 pub mod telemetry_repo;
 
 pub use ai_tokens_repo::AiTokensRepo;
@@ -28,6 +29,7 @@ pub use commands_repo::CommandsRepo;
 pub use inventory_repo::InventoryRepo;
 pub use node_repo::NodeRepo;
 pub use probes_repo::ProbesRepo;
+pub use settings_repo::SettingsRepo;
 pub use telemetry_repo::TelemetryRepo;
 
 #[derive(Clone)]
@@ -102,5 +104,10 @@ impl Storage {
     #[must_use]
     pub fn ai_tokens(&self) -> AiTokensRepo {
         AiTokensRepo::new(self.pool.clone())
+    }
+
+    #[must_use]
+    pub fn settings(&self) -> SettingsRepo {
+        SettingsRepo::new(self.pool.clone())
     }
 }
