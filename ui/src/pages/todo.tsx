@@ -1,11 +1,7 @@
 /**
  * Todo (default page).
  *
- * Positioning (docs/POSITIONING.md): the system delivers not curves but
- * "a few things for me to handle today". The four constraints are in
- * docs/superpowers/specs/2026-09-19-product-structure-design.md §4: each item
- * has a next step, items are tiered by "do I need to act now", empty must
- * feel confident, and recovered items leave a trail.
+ * Design: docs/superpowers/specs/2026-09-19-product-structure-design.md §4.
  */
 import * as React from "react";
 import { Link } from "react-router-dom";
@@ -30,7 +26,7 @@ import { StatCards, type StatCard } from "@/components/stat-cards";
 import { useToast } from "@/components/ui/toast";
 import { cn, friendlyError, relativeTime } from "@/lib/utils";
 
-/** Source icon for each todo item — see at a glance "which kind of thing is this" */
+/** Source icon for each todo item */
 function SourceIcon({ source, className }: { source: string; className?: string }) {
   switch (source) {
     case "probe":
@@ -50,10 +46,6 @@ function TodoRow({ item, muted = false }: { item: TodoItem; muted?: boolean }) {
   const { t } = useTranslation();
   const qc = useQueryClient();
   const toast = useToast();
-  // Alert item ids look like alert-12; items computed by the system such as
-  // node offline / command channel have no corresponding alert and must not
-  // be silenced (the previous code only let node_offline through and ran
-  // Number() on the rest, which would silence NaN for any other source)
   const alertId = item.id.startsWith("alert-") ? Number(item.id.slice(6)) : null;
   const [silenceOpen, setSilenceOpen] = React.useState(false);
   const [resolveOpen, setResolveOpen] = React.useState(false);
@@ -67,7 +59,6 @@ function TodoRow({ item, muted = false }: { item: TodoItem; muted?: boolean }) {
     },
     onError: (e) => toast.push("error", t(friendlyError(e))),
   });
-  // Manually resolve an alert
   const resolve = useMutation({
     mutationFn: () => alertsApi.resolve(alertId as number),
     onSuccess: () => {
@@ -77,8 +68,6 @@ function TodoRow({ item, muted = false }: { item: TodoItem; muted?: boolean }) {
     },
     onError: (e) => toast.push("error", t(friendlyError(e))),
   });
-  // The copy for node offline is assembled in the UI to keep both Chinese and
-  // English in sync (the backend only provides the timestamp)
   const detail = item.detail
     ? item.detail
     : item.source === "node_offline"
@@ -258,13 +247,7 @@ function Bucket({
   );
 }
 
-/**
- * Top four large cards: each card is clickable and navigates to its page.
- *
- * An empty todo is not a blank page — these cards make "nothing to do" itself
- * visible, and they are the only transition needed when switching from the
- * dashboard to todo (design §4 item 3).
- */
+/** Top four large cards */
 function StatusCards({ summary }: { summary: TodoSummary }) {
   const { t } = useTranslation();
   const cards: StatCard[] = [
@@ -316,71 +299,38 @@ function StatusCards({ summary }: { summary: TodoSummary }) {
 export function Todo() {
   const { t } = useTranslation();
   const [showRecovered, setShowRecovered] = React.useState(false);
-  const [nowCursor, setNowCursor] = React.useState<number | undefined>(undefined);
-  const [watchCursor, setWatchCursor] = React.useState<number | undefined>(undefined);
-  const [recoveredCursor, setRecoveredCursor] = React.useState<number | undefined>(undefined);
-  const [loadedItems, setLoadedItems] = React.useState<{ now: TodoItem[]; watch: TodoItem[]; recovered: TodoItem[] }>({
-    now: [],
-    watch: [],
-    recovered: [],
-  });
-  const [hasMore, setHasMore] = React.useState({ now: false, watch: false, recovered: false });
-  const [loadingMore, setLoadingMore] = React.useState({ now: false, watch: false, recovered: false });
+  const [page, setPage] = React.useState(0);
+  const [accumulated, setAccumulated] = React.useState<{
+    now: TodoItem[];
+    watch: TodoItem[];
+    recovered: TodoItem[];
+  }>({ now: [], watch: [], recovered: [] });
 
   const q = useQuery({
-    queryKey: ["todo", nowCursor],
-    queryFn: () => todoApi.get({ cursor: nowCursor, limit: 5 }),
-    initialPageData: false,
+    queryKey: ["todo", page],
+    queryFn: () => todoApi.get({ page, page_size: 5 }),
   });
 
-  // Initialize or append items
   React.useEffect(() => {
     if (q.data) {
-      if (nowCursor === undefined) {
-        // First load
-        setLoadedItems({
+      if (page === 0) {
+        setAccumulated({
           now: q.data.now,
           watch: q.data.watch,
           recovered: q.data.recovered,
         });
       } else {
-        // Load more
-        setLoadedItems(prev => ({
+        setAccumulated(prev => ({
           now: [...prev.now, ...q.data.now],
           watch: [...prev.watch, ...q.data.watch],
           recovered: [...prev.recovered, ...q.data.recovered],
         }));
       }
-      if (q.data.pagination) {
-        setHasMore({
-          now: q.data.pagination.has_more.now,
-          watch: q.data.pagination.has_more.watch,
-          recovered: q.data.pagination.has_more.recovered,
-        });
-      }
     }
-  }, [q.data, nowCursor]);
+  }, [q.data, page]);
 
-  const handleLoadMore = (bucket: "now" | "watch" | "recovered") => {
-    if (!q.data?.pagination) return;
-    setLoadingMore(prev => ({ ...prev, [bucket]: true }));
-
-    let nextCursor: number | undefined;
-    if (bucket === "now") {
-      nextCursor = q.data.pagination.next_cursor.now ?? undefined;
-      setNowCursor(nextCursor);
-    } else if (bucket === "watch") {
-      nextCursor = q.data.pagination.next_cursor.watch ?? undefined;
-      setWatchCursor(nextCursor);
-    } else {
-      nextCursor = q.data.pagination.next_cursor.recovered ?? undefined;
-      setRecoveredCursor(nextCursor);
-    }
-
-    // Refetch with new cursor
-    void q.refetch().finally(() => {
-      setLoadingMore(prev => ({ ...prev, [bucket]: false }));
-    });
+  const handleLoadMore = () => {
+    setPage(p => p + 1);
   };
 
   if (q.isPending) return <TableSkeleton rows={4} />;
@@ -393,11 +343,16 @@ export function Todo() {
     );
   }
 
-  const { summary, counts, now, watch, recovered } = q.data;
-  const displayNow = nowCursor === undefined ? now : loadedItems.now;
-  const displayWatch = nowCursor === undefined ? watch : loadedItems.watch;
-  const displayRecovered = nowCursor === undefined ? recovered : loadedItems.recovered;
+  const data = q.data;
+  const { summary } = data;
+  const counts = data.counts;
+  const pagination = data.pagination;
   const allClear = counts.now === 0 && counts.watch === 0;
+
+  // Check if there are more items
+  const hasMoreNow = data.now.length === (pagination?.page_size ?? 5);
+  const hasMoreWatch = data.watch.length === (pagination?.page_size ?? 5);
+  const hasMoreRecovered = data.recovered.length === (pagination?.page_size ?? 5);
 
   return (
     <div className="space-y-4">
@@ -415,19 +370,19 @@ export function Todo() {
 
       <Bucket
         title={t("todo.bucketNow")}
-        items={displayNow}
+        items={accumulated.now}
         emptyText={t("todo.noneNow")}
-        hasMore={hasMore.now}
-        onLoadMore={() => handleLoadMore("now")}
-        loadingMore={loadingMore.now}
+        hasMore={hasMoreNow}
+        onLoadMore={handleLoadMore}
+        loadingMore={q.isFetching}
       />
       <Bucket
         title={t("todo.bucketWatch")}
-        items={displayWatch}
+        items={accumulated.watch}
         emptyText={t("todo.noneWatch")}
-        hasMore={hasMore.watch}
-        onLoadMore={() => handleLoadMore("watch")}
-        loadingMore={loadingMore.watch}
+        hasMore={hasMoreWatch}
+        onLoadMore={handleLoadMore}
+        loadingMore={q.isFetching}
       />
 
       {counts.silenced > 0 && (
@@ -462,14 +417,14 @@ export function Todo() {
           {showRecovered && (
             <>
               <ul className="border-t border-surface-3 dark:border-ink-700">
-                {displayRecovered.map((i) => (
+                {accumulated.recovered.map((i) => (
                   <TodoRow key={i.id} item={i} muted />
                 ))}
               </ul>
-              {hasMore.recovered && (
+              {hasMoreRecovered && (
                 <LoadMoreButton
-                  onClick={() => handleLoadMore("recovered")}
-                  loading={loadingMore.recovered}
+                  onClick={handleLoadMore}
+                  loading={q.isFetching}
                 />
               )}
             </>

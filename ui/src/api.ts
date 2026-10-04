@@ -1008,8 +1008,8 @@ export interface TodoSummary {
 }
 
 export interface TodoPagination {
-  has_more: { now: boolean; watch: boolean; recovered: boolean };
-  next_cursor: { now: number | null; watch: number | null; recovered: number | null };
+  page: number;
+  page_size: number;
 }
 
 export interface TodoView {
@@ -1023,15 +1023,15 @@ export interface TodoView {
 }
 
 export interface TodoQuery {
-  cursor?: number;
-  limit?: number;
+  page?: number;
+  page_size?: number;
 }
 
 export const todoApi = {
   get: (query?: TodoQuery) => {
     const params = new URLSearchParams();
-    if (query?.cursor !== undefined) params.set("cursor", String(query.cursor));
-    if (query?.limit !== undefined) params.set("limit", String(query.limit));
+    if (query?.page !== undefined) params.set("page", String(query.page));
+    if (query?.page_size !== undefined) params.set("page_size", String(query.page_size));
     const qs = params.toString();
     return request<TodoView>(`/v1/todo${qs ? `?${qs}` : ""}`);
   },

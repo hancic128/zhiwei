@@ -28,15 +28,15 @@ pub use crate::alerts::NODE_OFFLINE_AFTER_MS;
 /// Query parameters for todo endpoint pagination.
 #[derive(Debug, Deserialize)]
 pub struct TodoQuery {
-    /// Cursor: `since_unix_nano` of the last item in the previous page.
-    /// For recovered list, this is `resolved_at_unix_nano`.
-    pub cursor: Option<i64>,
-    /// Number of items per list (now, watch, recovered).
-    #[serde(default = "default_limit")]
-    pub limit: i64,
+    /// Page number (0-indexed).
+    #[serde(default)]
+    pub page: i64,
+    /// Number of items per page.
+    #[serde(default = "default_page_size")]
+    pub page_size: i64,
 }
 
-fn default_limit() -> i64 {
+const fn default_page_size() -> i64 {
     5
 }
 
@@ -157,8 +157,8 @@ pub async fn todo_handler(
 
     let now_ns = zhiwei_common::Timestamp::now().unix_nano();
     let now_epoch_ms = now_ns / 1_000_000;
-    let limit = query.limit.clamp(1, 100);
-    let cursor = query.cursor.unwrap_or(i64::MAX);
+    let page_size = query.page_size.clamp(1, 100);
+    let page = usize::try_from(query.page.max(0)).unwrap_or(0);
 
     let nodes = match state.storage.nodes().list_all().await {
         Ok(n) => n,
@@ -203,10 +203,10 @@ pub async fn todo_handler(
 
     let all_recovered = recovered_items(&resolved_alerts, &nodes);
 
-    // Apply cursor-based pagination: items with since_unix_nano < cursor (older)
-    let (now_page, now_has_more) = paginate(now_items, cursor, limit);
-    let (watch_page, watch_has_more) = paginate(watch_items, cursor, limit);
-    let (recovered_page, recovered_has_more) = paginate_recovered(all_recovered, cursor, limit);
+    // Apply pagination
+    let now_page = paginate(now_items, page, page_size);
+    let watch_page = paginate(watch_items, page, page_size);
+    let recovered_page = paginate_recovered(all_recovered, page, page_size);
 
     let summary = Summary {
         nodes_online: nodes
@@ -233,16 +233,8 @@ pub async fn todo_handler(
             "silenced": silenced,
         },
         "pagination": {
-            "has_more": {
-                "now": now_has_more,
-                "watch": watch_has_more,
-                "recovered": recovered_has_more,
-            },
-            "next_cursor": {
-                "now": now_page.last().map(|i| i.since_unix_nano),
-                "watch": watch_page.last().map(|i| i.since_unix_nano),
-                "recovered": recovered_page.last().map(|i| i.resolved_at_unix_nano.unwrap_or(i.since_unix_nano)),
-            },
+            "page": page,
+            "page_size": page_size,
         },
         "now": now_page,
         "watch": watch_page,
@@ -251,26 +243,24 @@ pub async fn todo_handler(
     .into_response()
 }
 
-/// Paginate items by since_unix_nano cursor.
-fn paginate(mut items: Vec<TodoItem>, cursor: i64, limit: i64) -> (Vec<TodoItem>, bool) {
-    // Filter items with since_unix_nano < cursor (older than cursor)
-    items.retain(|i| i.since_unix_nano < cursor);
-    let has_more = items.len() > limit as usize;
-    items.truncate(usize::try_from(limit).unwrap_or(0));
-    (items, has_more)
+/// Paginate items by page number.
+fn paginate(items: Vec<TodoItem>, page: usize, page_size: i64) -> Vec<TodoItem> {
+    let start = page * usize::try_from(page_size).unwrap_or(0);
+    let end = start + usize::try_from(page_size).unwrap_or(0);
+    items.into_iter().skip(start).take(end - start).collect()
 }
 
-/// Paginate recovered items by resolved_at_unix_nano cursor.
-fn paginate_recovered(mut items: Vec<TodoItem>, cursor: i64, limit: i64) -> (Vec<TodoItem>, bool) {
-    // Filter items with resolved_at_unix_nano < cursor (older than cursor)
-    items.retain(|i| {
-        i.resolved_at_unix_nano
-            .unwrap_or(i.since_unix_nano)
-            < cursor
+/// Paginate recovered items (sorted by `resolved_at_unix_nano`).
+fn paginate_recovered(items: Vec<TodoItem>, page: usize, page_size: i64) -> Vec<TodoItem> {
+    let mut sorted = items;
+    sorted.sort_by(|a, b| {
+        let a_time = a.resolved_at_unix_nano.unwrap_or(a.since_unix_nano);
+        let b_time = b.resolved_at_unix_nano.unwrap_or(b.since_unix_nano);
+        b_time.cmp(&a_time) // newest first
     });
-    let has_more = items.len() > limit as usize;
-    items.truncate(usize::try_from(limit).unwrap_or(0));
-    (items, has_more)
+    let start = page * usize::try_from(page_size).unwrap_or(0);
+    let end = start + usize::try_from(page_size).unwrap_or(0);
+    sorted.into_iter().skip(start).take(end - start).collect()
 }
 
 /// Whether a node last seen at `last_seen_unix_nano` is considered online at `now_epoch_ms`.
