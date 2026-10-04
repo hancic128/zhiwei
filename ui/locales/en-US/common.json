@@ -883,7 +883,20 @@
     "mcpSubtitle": "Connect AI clients via Model Context Protocol",
     "mcpHelp": "View help",
     "mcpEndpoint": "MCP endpoint",
-    "mcpHint": "Copy the configuration to your AI client's settings file"
+    "mcpHint": "Copy the configuration to your AI client's settings file",
+    "mcpConfigCopied": "MCP config copied",
+    "mcpTokensTitle": "AI Tokens",
+    "mcpTokensSubtitle": "Long-lived tokens for MCP clients; revoking disconnects all clients immediately",
+    "mcpTokensCreate": "New",
+    "mcpTokensEmpty": "No AI tokens yet",
+    "mcpTokensEmptyHint": "Click \"New\" to generate a token, then put it in the MCP config.",
+    "mcpTokenColName": "Name",
+    "mcpTokenColCreated": "Created",
+    "mcpTokenColLastUsed": "Last used",
+    "mcpTokenRevoked": "AI token revoked",
+    "mcpTokenRevokeTitle": "Revoke AI token",
+    "mcpTokenRevokeMessage": "After this every MCP client using this token disconnects immediately. This cannot be undone.",
+    "mcpTokenRevoke": "Revoke"
   },
   "logs": {
     "title": "Logs",

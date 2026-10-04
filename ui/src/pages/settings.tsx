@@ -3,7 +3,6 @@ import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import {
-  Bot,
   Clock,
   Copy,
   Eye,
@@ -21,7 +20,6 @@ import {
   aiTokens,
   alertsApi,
   enrollTokens,
-  getToken,
   setToken,
   settingsApi,
   type AiTokenMeta,
@@ -62,7 +60,6 @@ export function Settings() {
       <ChannelsSection />
       <CredentialSection />
       <EnrollTokensSection />
-      <AiSection />
       <McpSection />
       <CaSection />
       <p className="text-xs text-ink-400">{t("settings.caWarn")}</p>
@@ -860,37 +857,30 @@ function CredentialSection() {
  * AI integration + AI tokens (combined into one section: "integration guide" for the agent to read,
  * "token list" for the admin to manage).
  */
-function AiSection() {
+/**
+ * MCP Integration section — AI token management + MCP config display.
+ */
+function McpSection() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const qc = useQueryClient();
   const toast = useToast();
-  const [revealed, setRevealed] = React.useState(false);
+  const baseUrl = window.location.origin;
   const [dialogOpen, setDialogOpen] = React.useState(false);
-  const [pendingRevoke, setPendingRevoke] = React.useState<AiTokenMeta | null>(
-    null,
-  );
-
-  const token = getToken() ?? "";
-  const base = window.location.origin;
-  const masked = token ? `${token.slice(0, 8)}…${token.slice(-4)}` : "—";
-
-  const copy = (text: string, okKey: string) =>
-    void copyText(text).then((ok) =>
-      toast.push(ok ? "success" : "error", t(ok ? okKey : "toast.copyFailed")),
-    );
+  const [pendingRevoke, setPendingRevoke] = React.useState<AiTokenMeta | null>(null);
 
   const tokensQ = useQuery({
     queryKey: ["ai-tokens"],
     queryFn: aiTokens.list,
+    staleTime: 30_000,
   });
 
-  const invalidate = () =>
-    void qc.invalidateQueries({ queryKey: ["ai-tokens"] });
+  const invalidate = () => void qc.invalidateQueries({ queryKey: ["ai-tokens"] });
 
   const revoke = useMutation({
     mutationFn: (id: string) => aiTokens.revoke(id),
     onSuccess: () => {
-      toast.push("success", t("settings.aiTokenRevoked"));
+      toast.push("success", t("settings.mcpTokenRevoked"));
       setPendingRevoke(null);
       invalidate();
     },
@@ -899,61 +889,55 @@ function AiSection() {
 
   const tokens = tokensQ.data?.tokens ?? [];
 
+  const copy = (text: string, okKey: string) =>
+    void copyText(text).then((ok) =>
+      toast.push(ok ? "success" : "error", t(ok ? okKey : "toast.copyFailed")),
+    );
+
+  const mcpConfig = `{
+  "mcpServers": {
+    "zhiwei-monitor": {
+      "url": "${baseUrl}/mcp/sse",
+      "headers": {
+        "Authorization": "Bearer <YOUR_TOKEN>"
+      }
+    }
+  }
+}`;
+
   return (
     <>
       <Card>
         <CardHeader
-          icon={<Bot className="w-5 h-5 text-brand-600" aria-hidden="true" />}
-          title={t("settings.aiTitle")}
-          description={t("settings.aiSubtitle")}
+          icon={<Network className="w-5 h-5 text-brand-600" aria-hidden="true" />}
+          title={t("settings.mcpTitle")}
+          description={t("settings.mcpSubtitle")}
+          action={
+            <Button variant="ghost" size="sm" onClick={() => navigate("/help#ai-mcp")}>
+              <HelpCircle className="w-4 h-4 mr-1" />
+              {t("settings.mcpHelp")}
+            </Button>
+          }
         />
         <CardBody compact className="space-y-4">
-          <dl className="grid gap-4 sm:grid-cols-2">
-            <div className="min-w-0">
-              <dt className="text-xs text-ink-400">{t("settings.aiBase")}</dt>
-              <dd className="mt-1 flex items-center gap-2">
-                <code className="text-sm text-ink-900 dark:text-surface-0 truncate">
-                  {base}
-                </code>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  aria-label={t("settings.aiCopyBase")}
-                  onClick={() => copy(base, "settings.aiBaseCopied")}
-                >
-                  <Copy className="w-4 h-4" aria-hidden="true" />
-                </Button>
-              </dd>
-            </div>
-            <div className="min-w-0">
-              <dt className="text-xs text-ink-400">{t("settings.aiToken")}</dt>
-              <dd className="mt-1 flex items-center gap-2">
-                <code className="text-sm tabular-nums text-ink-900 dark:text-surface-0">
-                  {revealed ? token : masked}
-                </code>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  aria-label={t(revealed ? "settings.aiHide" : "settings.aiReveal")}
-                  onClick={() => setRevealed((v) => !v)}
-                >
-                  {revealed ? (
-                    <EyeOff className="w-4 h-4" aria-hidden="true" />
-                  ) : (
-                    <Eye className="w-4 h-4" aria-hidden="true" />
-                  )}
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  aria-label={t("settings.aiCopyToken")}
-                  onClick={() => copy(token, "settings.aiTokenCopied")}
-                >
-                  <Copy className="w-4 h-4" aria-hidden="true" />
-                </Button>
-              </dd>
-            </div>
-          </dl>
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-ink-400">{t("settings.mcpEndpoint")}</span>
+            <code className="text-sm bg-surface-2 px-2 py-1 rounded">{baseUrl}/mcp/sse</code>
+          </div>
+          <div className="relative">
+            <pre className="bg-surface-2 dark:bg-ink-700/60 rounded-lg px-4 py-3 text-xs overflow-x-auto">
+              <code className="text-ink-700 dark:text-surface-4">{mcpConfig}</code>
+            </pre>
+            <Button
+              variant="secondary"
+              size="sm"
+              className="absolute top-2 right-2"
+              onClick={() => copy(mcpConfig, "settings.mcpConfigCopied")}
+            >
+              <Copy className="w-4 h-4 mr-1" />
+              {t("action.copy")}
+            </Button>
+          </div>
         </CardBody>
       </Card>
 
@@ -961,17 +945,17 @@ function AiSection() {
         <TableToolbar>
           <div>
             <h2 className="text-base font-semibold text-ink-900 dark:text-surface-0">
-              {t("settings.aiTokensTitle")}
+              {t("settings.mcpTokensTitle")}
             </h2>
             <p className="text-sm text-ink-500 mt-0.5">
-              {t("settings.aiTokensSubtitle")}
+              {t("settings.mcpTokensSubtitle")}
             </p>
           </div>
           <div className="flex items-center gap-2">
             <DotBadge tone="neutral">{tokens.length}</DotBadge>
             <Button size="sm" onClick={() => setDialogOpen(true)}>
               <Plus className="w-4 h-4" aria-hidden="true" />
-              {t("settings.aiTokensCreate")}
+              {t("settings.mcpTokensCreate")}
             </Button>
           </div>
         </TableToolbar>
@@ -986,16 +970,16 @@ function AiSection() {
           <Skeleton className="h-20 w-full" />
         ) : tokens.length === 0 ? (
           <EmptyState
-            title={t("settings.aiTokensEmpty")}
-            description={t("settings.aiTokensEmptyHint")}
+            title={t("settings.mcpTokensEmpty")}
+            description={t("settings.mcpTokensEmptyHint")}
           />
         ) : (
           <Table>
             <THead>
               <tr>
-                <Th>{t("settings.aiTokenColName")}</Th>
-                <Th>{t("settings.aiTokenColCreated")}</Th>
-                <Th>{t("settings.aiTokenColLastUsed")}</Th>
+                <Th>{t("settings.mcpTokenColName")}</Th>
+                <Th>{t("settings.mcpTokenColCreated")}</Th>
+                <Th>{t("settings.mcpTokenColLastUsed")}</Th>
                 <Th align="right">{t("alerts.colActions")}</Th>
               </tr>
             </THead>
@@ -1031,8 +1015,7 @@ function AiSection() {
                       className="text-rose-600 dark:text-rose-400"
                       disabled={tok.revoked_at_unix_nano != null}
                     >
-                      <Trash2 className="w-4 h-4" aria-hidden="true"
-                      />
+                      <Trash2 className="w-4 h-4" aria-hidden="true" />
                     </Button>
                   </Td>
                 </Tr>
@@ -1042,16 +1025,13 @@ function AiSection() {
         )}
       </TableShell>
 
-      <AiTokenDialog
-        open={dialogOpen}
-        onClose={() => setDialogOpen(false)}
-      />
+      <AiTokenDialog open={dialogOpen} onClose={() => setDialogOpen(false)} />
 
       <ConfirmDialog
         open={!!pendingRevoke}
-        title={t("settings.aiTokenRevokeTitle")}
-        message={t("settings.aiTokenRevokeMessage")}
-        confirmLabel={t("settings.aiTokenRevoke")}
+        title={t("settings.mcpTokenRevokeTitle")}
+        message={t("settings.mcpTokenRevokeMessage")}
+        confirmLabel={t("settings.mcpTokenRevoke")}
         cancelLabel={t("alerts.cancel")}
         danger
         loading={revoke.isPending}
@@ -1059,53 +1039,6 @@ function AiSection() {
         onConfirm={() => pendingRevoke && revoke.mutate(pendingRevoke.id)}
       />
     </>
-  );
-}
-
-function McpSection() {
-  const { t } = useTranslation();
-  const navigate = useNavigate();
-  const baseUrl = window.location.origin;
-
-  const code = `{
-  "mcpServers": {
-    "zhiwei-monitor": {
-      "url": "${baseUrl}/mcp/sse",
-      "headers": {
-        "Authorization": "Bearer <YOUR_AI_TOKEN>"
-      }
-    }
-  }
-}`;
-
-  return (
-    <Card>
-      <CardHeader
-        icon={<Network className="w-5 h-5 text-brand-600" />}
-        title={t("settings.mcpTitle")}
-        description={t("settings.mcpSubtitle")}
-        action={
-          <Button variant="ghost" size="sm" onClick={() => navigate("/help#ai-mcp")}>
-            <HelpCircle className="w-4 h-4 mr-1" />
-            {t("settings.mcpHelp")}
-          </Button>
-        }
-      />
-      <CardBody compact className="space-y-4">
-        <div className="text-sm text-ink-500">
-          <p>
-            {t("settings.mcpEndpoint")}:{" "}
-            <code className="bg-surface-2 px-1 rounded">
-              {baseUrl}/mcp/sse
-            </code>
-          </p>
-        </div>
-        <pre className="bg-surface-2 dark:bg-ink-700/60 rounded-lg px-4 py-3 text-xs overflow-x-auto">
-          <code className="text-ink-700 dark:text-surface-4">{code}</code>
-        </pre>
-        <p className="text-xs text-ink-400">{t("settings.mcpHint")}</p>
-      </CardBody>
-    </Card>
   );
 }
 

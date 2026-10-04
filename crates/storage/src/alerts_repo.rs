@@ -1069,7 +1069,7 @@ impl AlertsRepo {
         now: i64,
     ) -> anyhow::Result<i64> {
         // Store as "{name}:{id}" so we can match by name when container restarts with new ID
-        let source_ref = format!("{}:{}", container_name, container_id);
+        let source_ref = format!("{container_name}:{container_id}");
         if let Some(existing) = self.open_container_alert_id(&source_ref).await? {
             sqlx::query(
                 "UPDATE alerts
@@ -1128,7 +1128,7 @@ impl AlertsRepo {
     ///
     /// Docker container IDs change on restart, but container names are stable.
     /// This method resolves any open "container stopped" alerts for containers
-    /// with matching name, regardless of their current container_id.
+    /// with matching name, regardless of their current `container_id`.
     ///
     /// # Errors
     ///
