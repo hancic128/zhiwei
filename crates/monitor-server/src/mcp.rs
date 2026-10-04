@@ -45,6 +45,7 @@ fn server_capabilities() -> Value {
 }
 
 /// Tool definitions (static registry).
+#[allow(clippy::too_many_lines)]
 fn tools_list() -> Value {
     json!({
         "tools": [
@@ -640,7 +641,7 @@ pub async fn health_handler() -> Response {
             ("cache-control", "no-cache"),
             ("access-control-allow-origin", "*"),
         ],
-        format!("event: message\ndata: {}\n\n", body_str),
+        format!("event: message\ndata: {body_str}\n\n"),
     )
         .into_response()
 }
@@ -840,6 +841,7 @@ fn pretty_json(body: String) -> String {
 // ---------- Tool implementations ----------
 
 /// Actual tool implementations: each tool = one HTTP call to a monitor REST endpoint.
+#[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 async fn call_tool_impl(
     base_url: &str,
     token: &str,
@@ -1285,10 +1287,10 @@ async fn call_tool_impl(
         "list_command_history" => {
             let node_id = opt_str(arguments, "node_id");
             let limit = opt_i64(arguments, "limit").unwrap_or(50);
-            let path = match node_id {
-                Some(nid) => format!("/v1/commands/history?node_id={nid}&limit={limit}"),
-                None => format!("/v1/commands/history?limit={limit}"),
-            };
+            let path = node_id.map_or_else(
+                || format!("/v1/commands/history?limit={limit}"),
+                |nid| format!("/v1/commands/history?node_id={nid}&limit={limit}"),
+            );
             let body = http_get(&client, base_url, token, &path).await?;
             pretty_json(body)
         }
@@ -1354,14 +1356,32 @@ mod tests {
 
     #[test]
     fn tools_list_exposes_all_tools() {
+        let names = extract_tool_names();
+        check_readonly_tools(&names);
+        check_node_tools(&names);
+        check_rule_tools(&names);
+        check_alert_tools(&names);
+        check_cert_tools(&names);
+        check_channel_tools(&names);
+        check_service_tools(&names);
+        check_probe_tools(&names);
+        check_command_tools(&names);
+        check_other_tools(&names);
+        // Total: 7 original + 34 new = 41 tools
+        assert_eq!(names.len(), 41, "unexpected tool count: {}", names.len());
+    }
+
+    fn extract_tool_names() -> Vec<String> {
         let v = tools_list();
-        let names: Vec<String> = v["tools"]
+        v["tools"]
             .as_array()
             .expect("tools array")
             .iter()
             .map(|t| t["name"].as_str().unwrap_or_default().to_string())
-            .collect();
-        // Original read-only tools
+            .collect()
+    }
+
+    fn check_readonly_tools(names: &[String]) {
         for expected in [
             "list_nodes",
             "get_node",
@@ -1373,7 +1393,9 @@ mod tests {
         ] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
         }
-        // New tools: node management
+    }
+
+    fn check_node_tools(names: &[String]) {
         assert!(
             names.contains(&"update_node".to_string()),
             "missing update_node"
@@ -1382,32 +1404,22 @@ mod tests {
             names.contains(&"delete_node".to_string()),
             "missing delete_node"
         );
-        // New tools: alert rules
-        assert!(
-            names.contains(&"list_rules".to_string()),
-            "missing list_rules"
-        );
-        assert!(
-            names.contains(&"create_rule".to_string()),
-            "missing create_rule"
-        );
-        assert!(
-            names.contains(&"update_rule".to_string()),
-            "missing update_rule"
-        );
-        assert!(
-            names.contains(&"delete_rule".to_string()),
-            "missing delete_rule"
-        );
-        assert!(
-            names.contains(&"list_builtin_rules".to_string()),
-            "missing list_builtin_rules"
-        );
-        assert!(
-            names.contains(&"update_builtin_rule".to_string()),
-            "missing update_builtin_rule"
-        );
-        // New tools: alert actions
+    }
+
+    fn check_rule_tools(names: &[String]) {
+        for tool in [
+            "list_rules",
+            "create_rule",
+            "update_rule",
+            "delete_rule",
+            "list_builtin_rules",
+            "update_builtin_rule",
+        ] {
+            assert!(names.contains(&tool.to_string()), "missing {tool}");
+        }
+    }
+
+    fn check_alert_tools(names: &[String]) {
         assert!(
             names.contains(&"silence_alert".to_string()),
             "missing silence_alert"
@@ -1416,107 +1428,67 @@ mod tests {
             names.contains(&"resolve_alert".to_string()),
             "missing resolve_alert"
         );
-        // New tools: cert sources
-        assert!(
-            names.contains(&"create_cert_source".to_string()),
-            "missing create_cert_source"
-        );
-        assert!(
-            names.contains(&"test_cert_source".to_string()),
-            "missing test_cert_source"
-        );
-        assert!(
-            names.contains(&"update_cert_source".to_string()),
-            "missing update_cert_source"
-        );
-        assert!(
-            names.contains(&"delete_cert_source".to_string()),
-            "missing delete_cert_source"
-        );
-        // New tools: channels
-        assert!(
-            names.contains(&"list_channels".to_string()),
-            "missing list_channels"
-        );
-        assert!(
-            names.contains(&"create_channel".to_string()),
-            "missing create_channel"
-        );
-        assert!(
-            names.contains(&"test_channel".to_string()),
-            "missing test_channel"
-        );
-        assert!(
-            names.contains(&"update_channel".to_string()),
-            "missing update_channel"
-        );
-        assert!(
-            names.contains(&"delete_channel".to_string()),
-            "missing delete_channel"
-        );
-        // New tools: services
-        assert!(
-            names.contains(&"list_services".to_string()),
-            "missing list_services"
-        );
-        assert!(
-            names.contains(&"create_service".to_string()),
-            "missing create_service"
-        );
-        assert!(
-            names.contains(&"update_service".to_string()),
-            "missing update_service"
-        );
-        assert!(
-            names.contains(&"delete_service".to_string()),
-            "missing delete_service"
-        );
-        // New tools: probes
-        assert!(
-            names.contains(&"list_probes".to_string()),
-            "missing list_probes"
-        );
-        assert!(
-            names.contains(&"create_probe".to_string()),
-            "missing create_probe"
-        );
-        assert!(
-            names.contains(&"test_probe".to_string()),
-            "missing test_probe"
-        );
-        assert!(
-            names.contains(&"update_probe".to_string()),
-            "missing update_probe"
-        );
-        assert!(
-            names.contains(&"delete_probe".to_string()),
-            "missing delete_probe"
-        );
-        assert!(
-            names.contains(&"get_probe_results".to_string()),
-            "missing get_probe_results"
-        );
-        // New tools: commands
-        assert!(
-            names.contains(&"exec_command".to_string()),
-            "missing exec_command"
-        );
-        assert!(
-            names.contains(&"list_command_history".to_string()),
-            "missing list_command_history"
-        );
-        assert!(
-            names.contains(&"get_command".to_string()),
-            "missing get_command"
-        );
-        // New tools: other
+    }
+
+    fn check_cert_tools(names: &[String]) {
+        for tool in [
+            "create_cert_source",
+            "test_cert_source",
+            "update_cert_source",
+            "delete_cert_source",
+        ] {
+            assert!(names.contains(&tool.to_string()), "missing {tool}");
+        }
+    }
+
+    fn check_channel_tools(names: &[String]) {
+        for tool in [
+            "list_channels",
+            "create_channel",
+            "test_channel",
+            "update_channel",
+            "delete_channel",
+        ] {
+            assert!(names.contains(&tool.to_string()), "missing {tool}");
+        }
+    }
+
+    fn check_service_tools(names: &[String]) {
+        for tool in [
+            "list_services",
+            "create_service",
+            "update_service",
+            "delete_service",
+        ] {
+            assert!(names.contains(&tool.to_string()), "missing {tool}");
+        }
+    }
+
+    fn check_probe_tools(names: &[String]) {
+        for tool in [
+            "list_probes",
+            "create_probe",
+            "test_probe",
+            "update_probe",
+            "delete_probe",
+            "get_probe_results",
+        ] {
+            assert!(names.contains(&tool.to_string()), "missing {tool}");
+        }
+    }
+
+    fn check_command_tools(names: &[String]) {
+        for tool in ["exec_command", "list_command_history", "get_command"] {
+            assert!(names.contains(&tool.to_string()), "missing {tool}");
+        }
+    }
+
+    fn check_other_tools(names: &[String]) {
         assert!(names.contains(&"get_todo".to_string()), "missing get_todo");
         assert!(
             names.contains(&"get_retention".to_string()),
             "missing get_retention"
         );
-        // Total: 7 original + 34 new = 41 tools
-        assert_eq!(names.len(), 41, "unexpected tool count: {}", names.len());
     }
 
     #[test]

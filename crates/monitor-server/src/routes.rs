@@ -175,7 +175,10 @@ fn admin_routes() -> Router<AppState> {
         .route("/v1/retention", get(crate::retention::retention_handler))
         .route("/v1/help", get(help_handler))
         .route("/v1/admin/token", post(change_admin_token_handler))
-        .route("/mcp/sse", get(crate::mcp::health_handler).post(crate::mcp::sse_handler))
+        .route(
+            "/mcp/sse",
+            get(crate::mcp::health_handler).post(crate::mcp::sse_handler),
+        )
         .route(
             "/v1/ai-tokens",
             get(list_ai_tokens_handler).post(create_ai_token_handler),
