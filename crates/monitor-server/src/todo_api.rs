@@ -273,10 +273,11 @@ fn paginate<T: Sortable>(
             .unwrap_or(items.len())
     });
     let remaining = items.split_off(start);
-    let has_more = remaining.len() as i64 > page_size;
-    let page: Vec<T> = remaining.into_iter().take(page_size as usize).collect();
+    let page_size_usize = usize::try_from(page_size).unwrap_or(usize::MAX);
+    let has_more = remaining.len() > page_size_usize;
+    let page: Vec<T> = remaining.into_iter().take(page_size_usize).collect();
     let next_cursor = if has_more {
-        page.last().map(|i| i.sort_key())
+        page.last().map(Sortable::sort_key)
     } else {
         None
     };
@@ -291,13 +292,9 @@ trait Sortable {
 impl Sortable for TodoItem {
     fn sort_key(&self) -> i64 {
         // For recovered items, use resolved_at_unix_nano; for others use since_unix_nano
-        if let Some(resolved) = self.resolved_at_unix_nano {
-            // Recovered items: newest first (higher resolved_at first)
-            -resolved
-        } else {
-            // Active items: oldest first (lower since_unix_nano first)
-            self.since_unix_nano
-        }
+        // Negate resolved time so newer items come first (cursor comparison works correctly)
+        self.resolved_at_unix_nano
+            .map_or(self.since_unix_nano, |resolved| -resolved)
     }
 }
 

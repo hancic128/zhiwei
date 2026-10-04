@@ -1626,9 +1626,7 @@ fn diff_containers(previous_json: &str, current_json: &str) -> Vec<ContainerEven
             None => {
                 if *cur_running {
                     // Check if a container with the same name was previously running
-                    if let Some((old_id, old_started, old_running)) =
-                        prev_by_name.get(name.as_str())
-                    {
+                    if let Some((old_id, _, old_running)) = prev_by_name.get(name.as_str()) {
                         if *old_running {
                             // Same name was running before: this is a restart (old ID disappeared, new ID appeared)
                             stopped.push(ContainerEvent::Stopped {
