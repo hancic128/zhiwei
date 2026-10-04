@@ -54,7 +54,7 @@ export function Sidebar({
 }) {
   const { t } = useTranslation();
   // Count of "things to handle now" — don't show badge when 0 (0 is noise, the todo page says "nothing today" itself)
-  const todoQ = useQuery({ queryKey: ["todo"], queryFn: () => todoApi.get() });
+  const todoQ = useQuery({ queryKey: ["todo"], queryFn: todoApi.get });
   const todoCount = todoQ.data?.counts.now ?? 0;
 
   /** A group of nav items — main list and bottom settings share the same rendering */

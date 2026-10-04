@@ -20,7 +20,7 @@ import {
   Server,
   ShieldCheck,
 } from "lucide-react";
-import { alertsApi, todoApi, type TodoItem, type TodoQuery, type TodoSummary } from "@/api";
+import { alertsApi, todoApi, type TodoItem, type TodoSummary } from "@/api";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardBody } from "@/components/ui/card";
 import { EmptyState, ErrorState, TableSkeleton } from "@/components/ui/feedback";
@@ -197,116 +197,31 @@ function TodoRow({ item, muted = false }: { item: TodoItem; muted?: boolean }) {
 
 function Bucket({
   title,
-  page,
+  items,
   emptyText,
-  onLoadMore,
-  hasMore,
-  loadingMore,
 }: {
   title: string;
-  page: { items: TodoItem[]; next_cursor: number | null; total: number };
+  items: TodoItem[];
   emptyText: string;
-  onLoadMore: () => void;
-  hasMore: boolean;
-  loadingMore: boolean;
 }) {
-  const { t } = useTranslation();
   return (
     <Card>
       <div className="px-6 py-3 border-b border-surface-3 dark:border-ink-700 flex items-center gap-2">
         <h2 className="text-sm font-semibold text-ink-900 dark:text-surface-0">
           {title}
         </h2>
-        {page.total > 0 && <Badge tone="neutral">{page.total}</Badge>}
+        {items.length > 0 && <Badge tone="neutral">{items.length}</Badge>}
       </div>
-      {page.items.length === 0 ? (
+      {items.length === 0 ? (
         <CardBody compact>
           <p className="text-sm text-ink-400">{emptyText}</p>
         </CardBody>
       ) : (
-        <>
-          <ul>
-            {page.items.map((i) => (
-              <TodoRow key={i.id} item={i} />
-            ))}
-          </ul>
-          {hasMore && (
-            <div className="px-6 py-3 border-t border-surface-3 dark:border-ink-700">
-              <button
-                type="button"
-                onClick={onLoadMore}
-                disabled={loadingMore}
-                className="text-sm text-brand-700 hover:underline dark:text-brand-100 disabled:opacity-50"
-              >
-                {loadingMore ? t("todo.loadingMore") : t("todo.loadMore")}
-              </button>
-            </div>
-          )}
-        </>
-      )}
-    </Card>
-  );
-}
-
-function RecoveredBucket({
-  page,
-  onLoadMore,
-  hasMore,
-  loadingMore,
-  expanded,
-  onToggle,
-}: {
-  page: { items: TodoItem[]; next_cursor: number | null; total: number };
-  onLoadMore: () => void;
-  hasMore: boolean;
-  loadingMore: boolean;
-  expanded: boolean;
-  onToggle: () => void;
-}) {
-  const { t } = useTranslation();
-  return (
-    <Card>
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={expanded}
-        className="w-full px-6 py-3 flex items-center gap-2 text-left"
-      >
-        <ChevronRight
-          className={cn(
-            "w-4 h-4 text-ink-400 transition-transform",
-            expanded && "rotate-90",
-          )}
-          aria-hidden="true"
-        />
-        <h2 className="text-sm font-semibold text-ink-900 dark:text-surface-0">
-          {t("todo.bucketRecovered")}
-        </h2>
-        <Badge tone="neutral">{page.total}</Badge>
-        <span className="ml-auto text-xs text-ink-400">
-          {expanded ? t("todo.collapse") : t("todo.expand")}
-        </span>
-      </button>
-      {expanded && (
-        <>
-          <ul className="border-t border-surface-3 dark:border-ink-700">
-            {page.items.map((i) => (
-              <TodoRow key={i.id} item={i} muted />
-            ))}
-          </ul>
-          {hasMore && (
-            <div className="px-6 py-3 border-t border-surface-3 dark:border-ink-700">
-              <button
-                type="button"
-                onClick={onLoadMore}
-                disabled={loadingMore}
-                className="text-sm text-ink-500 hover:text-ink-700 dark:text-ink-400 dark:hover:text-ink-200 disabled:opacity-50"
-              >
-                {loadingMore ? t("todo.loadingMore") : t("todo.loadMore")}
-              </button>
-            </div>
-          )}
-        </>
+        <ul>
+          {items.map((i) => (
+            <TodoRow key={i.id} item={i} />
+          ))}
+        </ul>
       )}
     </Card>
   );
@@ -370,64 +285,7 @@ function StatusCards({ summary }: { summary: TodoSummary }) {
 export function Todo() {
   const { t } = useTranslation();
   const [showRecovered, setShowRecovered] = React.useState(false);
-
-  // Query for initial data
-  const q = useQuery({
-    queryKey: ["todo"],
-    queryFn: () => todoApi.get({ page_size: 20 }),
-  });
-
-  // Mutation for loading more items
-  const loadMore = useMutation({
-    mutationFn: async ({
-      type,
-      cursor,
-    }: {
-      type: "now" | "watch" | "recovered";
-      cursor: number;
-    }) => {
-      const params: TodoQuery = { page_size: 20 };
-      if (type === "now") params.now_cursor = cursor;
-      if (type === "watch") params.watch_cursor = cursor;
-      if (type === "recovered") params.recovered_cursor = cursor;
-      return todoApi.get(params);
-    },
-  });
-
-  // Accumulated data state
-  const [accumulated, setAccumulated] = React.useState<{
-    now: TodoItem[];
-    watch: TodoItem[];
-    recovered: TodoItem[];
-  }>({ now: [], watch: [], recovered: [] });
-
-  // Sync initial data into accumulated state
-  React.useEffect(() => {
-    if (q.data && accumulated.now.length === 0 && accumulated.watch.length === 0) {
-      setAccumulated({
-        now: q.data.now.items,
-        watch: q.data.watch.items,
-        recovered: q.data.recovered.items,
-      });
-    }
-  }, [q.data]);
-
-  const handleLoadMore = (type: "now" | "watch" | "recovered") => {
-    const page = q.data?.[type];
-    if (!page?.next_cursor) return;
-
-    loadMore.mutate(
-      { type, cursor: page.next_cursor },
-      {
-        onSuccess: (data) => {
-          setAccumulated((prev) => ({
-            ...prev,
-            [type]: [...prev[type], ...data[type].items],
-          }));
-        },
-      }
-    );
-  };
+  const q = useQuery({ queryKey: ["todo"], queryFn: todoApi.get });
 
   if (q.isPending) return <TableSkeleton rows={4} />;
   if (q.isError) {
@@ -441,26 +299,6 @@ export function Todo() {
 
   const { summary, counts, now, watch, recovered } = q.data;
   const allClear = counts.now === 0 && counts.watch === 0;
-
-  // Use accumulated data if available, otherwise use initial data
-  const nowPage = {
-    items: accumulated.now.length > 0 ? accumulated.now : now.items,
-    next_cursor: accumulated.now.length > 0 ? now.next_cursor : now.next_cursor,
-    total: counts.now,
-  };
-
-  const watchPage = {
-    items: accumulated.watch.length > 0 ? accumulated.watch : watch.items,
-    next_cursor: accumulated.watch.length > 0 ? watch.next_cursor : watch.next_cursor,
-    total: counts.watch,
-  };
-
-  const recoveredPage = {
-    items: accumulated.recovered.length > 0 ? accumulated.recovered : recovered.items,
-    next_cursor:
-      accumulated.recovered.length > 0 ? recovered.next_cursor : recovered.next_cursor,
-    total: counts.recovered,
-  };
 
   return (
     <div className="space-y-4">
@@ -478,19 +316,13 @@ export function Todo() {
 
       <Bucket
         title={t("todo.bucketNow")}
-        page={nowPage}
+        items={now}
         emptyText={t("todo.noneNow")}
-        onLoadMore={() => handleLoadMore("now")}
-        hasMore={!!nowPage.next_cursor}
-        loadingMore={loadMore.isPending && loadMore.variables?.type === "now"}
       />
       <Bucket
         title={t("todo.bucketWatch")}
-        page={watchPage}
+        items={watch}
         emptyText={t("todo.noneWatch")}
-        onLoadMore={() => handleLoadMore("watch")}
-        hasMore={!!watchPage.next_cursor}
-        loadingMore={loadMore.isPending && loadMore.variables?.type === "watch"}
       />
 
       {counts.silenced > 0 && (
@@ -500,14 +332,36 @@ export function Todo() {
       )}
 
       {counts.recovered > 0 && (
-        <RecoveredBucket
-          page={recoveredPage}
-          onLoadMore={() => handleLoadMore("recovered")}
-          hasMore={!!recoveredPage.next_cursor}
-          loadingMore={loadMore.isPending && loadMore.variables?.type === "recovered"}
-          expanded={showRecovered}
-          onToggle={() => setShowRecovered((v) => !v)}
-        />
+        <Card>
+          <button
+            type="button"
+            onClick={() => setShowRecovered((v) => !v)}
+            aria-expanded={showRecovered}
+            className="w-full px-6 py-3 flex items-center gap-2 text-left"
+          >
+            <ChevronRight
+              className={cn(
+                "w-4 h-4 text-ink-400 transition-transform",
+                showRecovered && "rotate-90",
+              )}
+              aria-hidden="true"
+            />
+            <h2 className="text-sm font-semibold text-ink-900 dark:text-surface-0">
+              {t("todo.bucketRecovered")}
+            </h2>
+            <Badge tone="neutral">{counts.recovered}</Badge>
+            <span className="ml-auto text-xs text-ink-400">
+              {showRecovered ? t("todo.collapse") : t("todo.expand")}
+            </span>
+          </button>
+          {showRecovered && (
+            <ul className="border-t border-surface-3 dark:border-ink-700">
+              {recovered.map((i) => (
+                <TodoRow key={i.id} item={i} muted />
+              ))}
+            </ul>
+          )}
+        </Card>
       )}
     </div>
   );

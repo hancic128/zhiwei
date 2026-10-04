@@ -1567,7 +1567,6 @@ fn container_running(state: &str) -> bool {
 /// - running→non-running, or disappearing from snapshot (rm / cleanup) → `Stopped`;
 /// - Others (non-running→non-running, new but already exited) don't emit events — one-shot containers
 ///   (exit immediately, `--rm`) shouldn't repeat the same state every snapshot.
-/// - Container restart (same name, new ID): sends `Stopped` for the old ID, `Started` for the new ID.
 ///
 /// Return order: stopped first, started last, stable and testable.
 fn diff_containers(previous_json: &str, current_json: &str) -> Vec<ContainerEvent> {
@@ -1578,12 +1577,6 @@ fn diff_containers(previous_json: &str, current_json: &str) -> Vec<ContainerEven
     }
     let mut stopped = Vec::new();
     let mut started = Vec::new();
-
-    // Build a lookup by name for finding "same container, new ID" case
-    let prev_by_name: std::collections::HashMap<&str, (String, i64, bool)> = prev
-        .iter()
-        .map(|(id, (name, started, running))| (name.as_str(), (id.clone(), *started, *running)))
-        .collect();
 
     // 1) Disappearing from snapshot = stopped (cleanup / rm)
     for (id, (name, _started, _running)) in &prev {
@@ -1598,7 +1591,15 @@ fn diff_containers(previous_json: &str, current_json: &str) -> Vec<ContainerEven
     // 2) Containers still in snapshot: judge start/stop by state
     for (id, (name, cur_started, cur_running)) in &cur {
         match prev.get(id) {
-            // Same ID found: check state change
+            // New container: only count as "started" if actually running (one-shot containers that exit immediately don't report)
+            None => {
+                if *cur_running {
+                    started.push(ContainerEvent::Started {
+                        id: id.clone(),
+                        name: name.clone(),
+                    });
+                }
+            }
             Some((_, prev_started, prev_running)) => {
                 if !*prev_running && *cur_running {
                     started.push(ContainerEvent::Started {
@@ -1616,25 +1617,6 @@ fn diff_containers(previous_json: &str, current_json: &str) -> Vec<ContainerEven
                     && *cur_started > *prev_started
                 {
                     // Restart within cycle: state stayed running, only start time changed
-                    started.push(ContainerEvent::Started {
-                        id: id.clone(),
-                        name: name.clone(),
-                    });
-                }
-            }
-            // New ID: check if it's a container restart (same name, new ID)
-            None => {
-                if *cur_running {
-                    // Check if a container with the same name was previously running
-                    if let Some((old_id, _, old_running)) = prev_by_name.get(name.as_str()) {
-                        if *old_running {
-                            // Same name was running before: this is a restart (old ID disappeared, new ID appeared)
-                            stopped.push(ContainerEvent::Stopped {
-                                id: old_id.clone(),
-                                name: name.clone(),
-                            });
-                        }
-                    }
                     started.push(ContainerEvent::Started {
                         id: id.clone(),
                         name: name.clone(),
@@ -1691,7 +1673,8 @@ pub async fn on_container_events(
                     .await;
             }
             ContainerEvent::Started { .. } => {
-                handle_container_started(state, &repo, &name, &short, node_id, hostname, now).await;
+                handle_container_started(state, &repo, &id, &name, &short, node_id, hostname, now)
+                    .await;
             }
         }
     }
@@ -1716,7 +1699,6 @@ async fn handle_container_stopped(
     let opened = repo
         .open_container_alert(
             id,
-            name,
             "Container stopped",
             node_id,
             hostname,
@@ -1748,9 +1730,11 @@ async fn handle_container_stopped(
 }
 
 /// Container started: close the unresolved stopped alert, then (per toggle) notify.
+#[allow(clippy::too_many_arguments)] // event payload + node context; wrapping adds no clarity
 async fn handle_container_started(
     state: &AppState,
     repo: &AlertsRepo,
+    id: &str,
     name: &str,
     short: &str,
     node_id: &str,
@@ -1759,12 +1743,7 @@ async fn handle_container_started(
 ) {
     // Close this container's unresolved stopped alert - even if started toggle is off:
     // if container is up, the old "stopped" alert would be misleading
-    //
-    // Use container NAME (not ID) to match: Docker IDs change on restart, but names are stable.
-    if let Err(e) = repo
-        .resolve_open_container_alerts_by_name(name, node_id, now)
-        .await
-    {
+    if let Err(e) = repo.resolve_open_container_alerts(id, now).await {
         warn!(error = %e, "Failed to close container stopped alert");
     }
     if !builtin_enabled_or_default(repo, "container_started").await {

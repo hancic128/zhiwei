@@ -1007,38 +1007,17 @@ export interface TodoSummary {
   containers_failed: number;
 }
 
-export interface TodoPage {
-  items: TodoItem[];
-  next_cursor: number | null;
-  total: number;
-}
-
 export interface TodoView {
   generated_at_unix_nano: number;
   summary: TodoSummary;
   counts: { now: number; watch: number; recovered: number; silenced: number };
-  now: TodoPage;
-  watch: TodoPage;
-  recovered: TodoPage;
-}
-
-export interface TodoQuery {
-  page_size?: number;
-  now_cursor?: number | null;
-  watch_cursor?: number | null;
-  recovered_cursor?: number | null;
+  now: TodoItem[];
+  watch: TodoItem[];
+  recovered: TodoItem[];
 }
 
 export const todoApi = {
-  get: (query?: TodoQuery) => {
-    const params = new URLSearchParams();
-    if (query?.page_size) params.set("page_size", String(query.page_size));
-    if (query?.now_cursor != null) params.set("now_cursor", String(query.now_cursor));
-    if (query?.watch_cursor != null) params.set("watch_cursor", String(query.watch_cursor));
-    if (query?.recovered_cursor != null) params.set("recovered_cursor", String(query.recovered_cursor));
-    const qs = params.toString();
-    return request<TodoView>(`/v1/todo${qs ? `?${qs}` : ""}`);
-  },
+  get: () => request<TodoView>("/v1/todo"),
 };
 
 // ---------- Service health ----------
