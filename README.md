@@ -111,8 +111,8 @@ See [docs/DEPLOY.md](./docs/DEPLOY.md) for full deployment guide covering:
 ## Documentation
 
 - [docs/FAQ.md](./docs/FAQ.md) — short answers to common questions
-- [docs/architecture.md](./docs/architecture.md) — system overview
-- [docs/api.md](./docs/api.md) — REST API and MCP server reference
+- [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) — system overview
+- [docs/API.md](./docs/API.md) — REST API and MCP server reference
 - [docs/DEPLOY.md](./docs/DEPLOY.md) — deployment guide
 - [docs/ALERTS.md](./docs/ALERTS.md) — alert rules and notification channels
 - [docs/PROBES.md](./docs/PROBES.md) — service health probes

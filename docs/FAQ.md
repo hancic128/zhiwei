@@ -95,5 +95,4 @@ independently revocable credential. Create one in Settings → AI Tokens.
 No. MCP is **read-only** by intent. Management operations (kill / restart /
 reboot / shutdown) go through the console or `POST /v1/exec`, which uses the
 ops-signed command channel — that channel requires the operator's admin
-token, not an AI token. See [docs/SERVICE-HEALTH.md](./SERVICE-HEALTH.md)
-§"Why Not mTLS" for the threat reasoning.
+token, not an AI token.
