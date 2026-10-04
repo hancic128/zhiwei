@@ -282,11 +282,23 @@ fn node_display(nodes: &[NodeRecord], id: &str, fallback: &str) -> String {
 /// Map a stored alert row into a todo item. `resolved` selects whether the
 /// resolved timestamp is carried (open alerts have none).
 fn alert_item(a: &Alert, nodes: &[NodeRecord], resolved: bool) -> TodoItem {
+    // Translate legacy Chinese rule names to English for display
+    let title = match a.rule_name.as_str() {
+        "容器停止" => "Container Stopped",
+        "容器启动" => "Container Started",
+        "节点离线" => "Node Offline",
+        "节点上线" => "Node Online",
+        "服务离线" => "Service Down",
+        "服务上线" => "Service Up",
+        "证书到期" => "Certificate Expiring",
+        "证书已过期" => "Certificate Expired",
+        other => other,
+    };
     TodoItem {
         id: format!("alert-{}", a.id),
         source: a.source.clone(),
         severity: a.severity.clone(),
-        title: a.rule_name.clone(),
+        title: title.to_string(),
         detail: a.message.clone(),
         hint_key: hint_key(&a.source, &a.metric),
         node_id: a.node_id.clone(),
