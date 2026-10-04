@@ -281,9 +281,9 @@ fn node_display(nodes: &[NodeRecord], id: &str, fallback: &str) -> String {
 
 /// Translate legacy Chinese messages to English.
 fn translate_message(source: &str, message: &str) -> String {
-    // Only translate container messages, others are already in English
     if source == "container" {
         message
+            .replace("容器 ", "Container ")
             .replace("已停止", "stopped")
             .replace("已启动", "started")
     } else {
