@@ -11,19 +11,18 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { Calendar, ChevronRight, Pencil, X } from "lucide-react";
+import { ChevronRight, Pencil } from "lucide-react";
 import {
   alertsApi,
   builtinAlertsApi,
   type AlertQuery,
   type BuiltinAlertRule,
 } from "@/api";
+import { TimeRangePicker, type TimeRange } from "@/components/ui/date-range-picker";
 import { DotBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import {
   EmptyState,
@@ -333,46 +332,30 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 // ---------- Alert History ----------
 
-/** Time range presets in milliseconds */
-const TIME_PRESETS = [
-  { label: "24h", ms: 24 * 60 * 60 * 1000 },
-  { label: "7d", ms: 7 * 24 * 60 * 60 * 1000 },
-  { label: "30d", ms: 30 * 24 * 60 * 60 * 1000 },
-  { label: "1y", ms: 365 * 24 * 60 * 60 * 1000 },
-];
-
-interface AlertFilterState {
-  preset: string | null;
-  since: number | null;
-  until: number | null;
-  status: "all" | "open" | "resolved";
-  source: string;
-}
-
-function parseDateInput(val: string): number | null {
-  if (!val) return null;
-  return new Date(val).getTime();
-}
+const SOURCE_OPTIONS = [
+  { value: "", label: "allSources" },
+  { value: "rule", label: "sourceRule" },
+  { value: "probe", label: "sourceProbe" },
+  { value: "cert", label: "sourceCert" },
+  { value: "node_offline", label: "sourceNodeOffline" },
+  { value: "container", label: "sourceContainer" },
+] as const;
 
 function AlertHistorySection() {
   const { t } = useTranslation();
   const [showHistory, setShowHistory] = React.useState(false);
-  const [filters, setFilters] = React.useState<AlertFilterState>({
-    preset: null,
-    since: null,
-    until: null,
-    status: "all",
-    source: "",
+  const [timeRange, setTimeRange] = React.useState<TimeRange>({
+    from: Date.now() - 7 * 24 * 60 * 60 * 1000,
+    to: Date.now(),
   });
-  const [showDatePicker, setShowDatePicker] = React.useState(false);
-  const [customSince, setCustomSince] = React.useState("");
-  const [customUntil, setCustomUntil] = React.useState("");
+  const [statusFilter, setStatusFilter] = React.useState<"all" | "open" | "resolved">("all");
+  const [sourceFilter, setSourceFilter] = React.useState("");
 
   const queryParams: AlertQuery = {
-    ...(filters.since ? { since: filters.since } : {}),
-    ...(filters.until ? { until: filters.until } : {}),
-    ...(filters.status !== "all" ? { status: filters.status } : {}),
-    ...(filters.source ? { sources: filters.source } : {}),
+    since: timeRange.from,
+    until: timeRange.to,
+    ...(statusFilter !== "all" ? { status: statusFilter } : {}),
+    ...(sourceFilter ? { sources: sourceFilter } : {}),
     limit: 100,
   };
 
@@ -382,67 +365,18 @@ function AlertHistorySection() {
     enabled: showHistory,
   });
 
-  const applyPreset = (preset: (typeof TIME_PRESETS)[number] | null) => {
-    if (preset) {
-      const now = Date.now();
-      setFilters({
-        ...filters,
-        preset: preset.label,
-        since: now - preset.ms,
-        until: now,
-      });
-      setShowDatePicker(false);
-    } else {
-      setFilters({
-        preset: null,
-        since: null,
-        until: null,
-        status: "all",
-        source: "",
-      });
-      setCustomSince("");
-      setCustomUntil("");
-      setShowDatePicker(false);
-    }
-  };
-
-  const applyCustomRange = () => {
-    setFilters({
-      preset: null,
-      since: parseDateInput(customSince),
-      until: parseDateInput(customUntil) || Date.now(),
-      status: filters.status,
-      source: filters.source,
-    });
-    setShowDatePicker(false);
-  };
-
-  const clearFilters = () => {
-    setFilters({
-      preset: null,
-      since: null,
-      until: null,
-      status: "all",
-      source: "",
-    });
-    setCustomSince("");
-    setCustomUntil("");
-    setShowDatePicker(false);
-  };
-
-  const hasFilters =
-    filters.preset !== null ||
-    filters.status !== "all" ||
-    filters.source !== "" ||
-    filters.since !== null;
-
   const allAlerts = [...(q.data?.open ?? []), ...(q.data?.resolved ?? [])];
   const filteredAlerts = allAlerts.filter((a) => {
-    if (filters.status === "open" && a.resolved_at_unix_nano !== null) return false;
-    if (filters.status === "resolved" && a.resolved_at_unix_nano === null) return false;
-    if (filters.source && a.source !== filters.source) return false;
+    if (statusFilter === "open" && a.resolved_at_unix_nano !== null) return false;
+    if (statusFilter === "resolved" && a.resolved_at_unix_nano === null) return false;
+    if (sourceFilter && a.source !== sourceFilter) return false;
     return true;
   });
+
+  const sourceLabel = (source: string) => {
+    const opt = SOURCE_OPTIONS.find((o) => o.value === source);
+    return opt ? t(`filter.${opt.label}`) : source;
+  };
 
   return (
     <div className="space-y-4">
@@ -451,171 +385,89 @@ function AlertHistorySection() {
         onClick={() => setShowHistory((v) => !v)}
         className="flex items-center gap-2 text-sm font-medium text-ink-700 hover:text-ink-900 dark:text-ink-300 dark:hover:text-ink-100"
       >
-        <ChevronRight
-          className={cn("w-4 h-4 transition-transform", showHistory && "rotate-90")}
-        />
+        <ChevronRight className={cn("w-4 h-4 transition-transform", showHistory && "rotate-90")} />
         {t("alerts.alertHistory")}
       </button>
 
       {showHistory && (
-        <Card>
-          {/* Filters */}
-          <div className="flex flex-wrap items-center gap-2 px-4 py-3 border-b border-surface-3 dark:border-ink-700">
-            {/* Time presets */}
-            <div className="flex items-center gap-1">
-              {TIME_PRESETS.map((p) => (
-                <button
-                  key={p.label}
-                  type="button"
-                  onClick={() => applyPreset(p)}
-                  className={cn(
-                    "px-2 py-1 text-xs rounded border transition-colors",
-                    filters.preset === p.label
-                      ? "bg-brand-100 text-brand-700 border-brand-300 dark:bg-brand-900 dark:text-brand-200 dark:border-brand-700"
-                      : "bg-surface-1 text-ink-600 border-surface-3 hover:border-ink-400 dark:bg-ink-700 dark:text-surface-4 dark:border-ink-600",
-                  )}
-                >
-                  {p.label}
-                </button>
-              ))}
-              <button
-                type="button"
-                onClick={() => setShowDatePicker((v) => !v)}
-                className={cn(
-                  "px-2 py-1 text-xs rounded border transition-colors",
-                  showDatePicker
-                    ? "bg-brand-100 text-brand-700 border-brand-300 dark:bg-brand-900 dark:text-brand-200 dark:border-brand-700"
-                    : "bg-surface-1 text-ink-600 border-surface-3 hover:border-ink-400 dark:bg-ink-700 dark:text-surface-4 dark:border-ink-600",
-                )}
+        <TableShell>
+          <TableToolbar>
+            <div className="flex flex-wrap items-center gap-3">
+              <TimeRangePicker value={timeRange} onChange={setTimeRange} />
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value as typeof statusFilter)}
+                className="h-8 px-2 text-sm border rounded bg-surface-1 dark:bg-ink-700 border-surface-3 dark:border-ink-600"
               >
-                <Calendar className="w-3 h-3 inline mr-1" />
-                {t("alerts.customRange")}
-              </button>
-            </div>
-
-            {/* Status filter */}
-            <Select
-              value={filters.status}
-              onChange={(e) =>
-                setFilters({ ...filters, status: e.target.value as AlertFilterState["status"] })
-              }
-              className="text-xs h-8"
-            >
-              <option value="all">{t("filter.all")}</option>
-              <option value="open">{t("filter.open")}</option>
-              <option value="resolved">{t("filter.resolved")}</option>
-            </Select>
-
-            {/* Source filter */}
-            <Select
-              value={filters.source}
-              onChange={(e) => setFilters({ ...filters, source: e.target.value })}
-              className="text-xs h-8"
-            >
-              <option value="">{t("filter.allSources")}</option>
-              <option value="rule">{t("filter.sourceRule")}</option>
-              <option value="probe">{t("filter.sourceProbe")}</option>
-              <option value="cert">{t("filter.sourceCert")}</option>
-              <option value="node_offline">{t("filter.sourceNodeOffline")}</option>
-              <option value="container">{t("filter.sourceContainer")}</option>
-            </Select>
-
-            {/* Clear filters */}
-            {hasFilters && (
-              <button
-                type="button"
-                onClick={clearFilters}
-                className="ml-auto flex items-center gap-1 px-2 py-1 text-xs text-ink-500 hover:text-ink-700 dark:text-ink-400 dark:hover:text-ink-200"
+                <option value="all">{t("filter.all")}</option>
+                <option value="open">{t("filter.open")}</option>
+                <option value="resolved">{t("filter.resolved")}</option>
+              </select>
+              <select
+                value={sourceFilter}
+                onChange={(e) => setSourceFilter(e.target.value)}
+                className="h-8 px-2 text-sm border rounded bg-surface-1 dark:bg-ink-700 border-surface-3 dark:border-ink-600"
               >
-                <X className="w-3 h-3" />
-                {t("filter.clear")}
-              </button>
-            )}
-          </div>
-
-          {/* Date range picker */}
-          {showDatePicker && (
-            <div className="flex flex-wrap items-end gap-2 px-4 py-3 bg-surface-2 dark:bg-ink-700/30 rounded-lg border border-surface-3 dark:border-ink-600">
-              <div className="flex items-center gap-2">
-                <label className="text-xs text-ink-500">
-                  {t("alerts.from")}
-                  <input
-                    type="datetime-local"
-                    value={customSince}
-                    onChange={(e) => setCustomSince(e.target.value)}
-                    className="block mt-1 px-2 py-1 text-sm border rounded bg-surface-1 dark:bg-ink-700 border-surface-3 dark:border-ink-600"
-                  />
-                </label>
-                <label className="text-xs text-ink-500">
-                  {t("alerts.to")}
-                  <input
-                    type="datetime-local"
-                    value={customUntil}
-                    onChange={(e) => setCustomUntil(e.target.value)}
-                    className="block mt-1 px-2 py-1 text-sm border rounded bg-surface-1 dark:bg-ink-700 border-surface-3 dark:border-ink-600"
-                  />
-                </label>
-              </div>
-              <Button size="sm" onClick={applyCustomRange}>
-                {t("action.apply")}
-              </Button>
+                {SOURCE_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {t(`filter.${opt.label}`)}
+                  </option>
+                ))}
+              </select>
             </div>
-          )}
+            <DotBadge tone="neutral">{filteredAlerts.length}</DotBadge>
+          </TableToolbar>
 
-          {/* Alert list */}
           {q.isPending ? (
-            <div className="p-4"><Skeleton className="h-48 w-full" /></div>
+            <Skeleton className="h-48 w-full" />
           ) : q.isError ? (
-            <div className="p-4"><ErrorState
-              message={t("alerts.historyError")}
-              onRetry={() => void q.refetch()}
-            /></div>
+            <ErrorState message={t("alerts.historyError")} onRetry={() => void q.refetch()} />
           ) : filteredAlerts.length === 0 ? (
-            <div className="p-4"><EmptyState title={t("alerts.noAlerts")} /></div>
+            <EmptyState title={t("alerts.noAlerts")} />
           ) : (
-            <div className="border-t border-surface-3 dark:border-ink-700">
-              <table className="w-full text-sm">
-                <thead className="bg-surface-2 dark:bg-ink-700/50">
-                  <tr>
-                    <th className="px-4 py-2 text-left text-xs text-ink-500 font-medium">{t("alerts.colTime")}</th>
-                    <th className="px-4 py-2 text-left text-xs text-ink-500 font-medium">{t("alerts.colSource")}</th>
-                    <th className="px-4 py-2 text-left text-xs text-ink-500 font-medium">{t("alerts.colSeverity")}</th>
-                    <th className="px-4 py-2 text-left text-xs text-ink-500 font-medium hidden md:table-cell">{t("alerts.colMessage")}</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-surface-3 dark:divide-ink-700">
-                  {filteredAlerts.map((alert) => (
-                    <tr key={alert.id} className="hover:bg-surface-2 dark:hover:bg-ink-700/30">
-                      <td className="px-4 py-2 text-xs text-ink-500">
-                        {new Date(alert.started_at_unix_nano / 1_000_000).toLocaleString()}
-                      </td>
-                      <td className="px-4 py-2">
-                        <span className="text-xs px-2 py-0.5 rounded bg-surface-3 dark:bg-ink-700 text-ink-600 dark:text-surface-4">
-                          {t(`filter.source${alert.source.charAt(0).toUpperCase() + alert.source.slice(1).replace("_", "")}`)}
-                        </span>
-                      </td>
-                      <td className="px-4 py-2">
-                        <span
-                          className={cn(
-                            "text-xs px-2 py-0.5 rounded font-medium",
-                            alert.severity === "critical"
-                              ? "bg-rose-100 text-rose-700 dark:bg-rose-900/50 dark:text-rose-400"
-                              : "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-400",
-                          )}
-                        >
-                          {alert.severity}
-                        </span>
-                      </td>
-                      <td className="px-4 py-2 text-xs text-ink-500 hidden md:table-cell max-w-md truncate">
+            <Table>
+              <THead>
+                <tr>
+                  <Th>{t("alerts.colTime")}</Th>
+                  <Th>{t("alerts.colSource")}</Th>
+                  <Th>{t("alerts.colSeverity")}</Th>
+                  <Th className="hidden md:table-cell">{t("alerts.colMessage")}</Th>
+                </tr>
+              </THead>
+              <TBody>
+                {filteredAlerts.map((alert) => (
+                  <Tr key={alert.id}>
+                    <Td className="whitespace-nowrap text-xs text-ink-500">
+                      {new Date(alert.started_at_unix_nano / 1_000_000).toLocaleString()}
+                    </Td>
+                    <Td>
+                      <span className="text-xs px-2 py-0.5 rounded bg-surface-3 dark:bg-ink-700 text-ink-600 dark:text-surface-4">
+                        {sourceLabel(alert.source)}
+                      </span>
+                    </Td>
+                    <Td>
+                      <span
+                        className={cn(
+                          "text-xs px-2 py-0.5 rounded font-medium",
+                          alert.severity === "critical"
+                            ? "bg-rose-100 text-rose-700 dark:bg-rose-900/50 dark:text-rose-400"
+                            : "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-400",
+                        )}
+                      >
+                        {t(`alerts.${alert.severity}`)}
+                      </span>
+                    </Td>
+                    <Td className="hidden md:table-cell">
+                      <span className="text-xs text-ink-500 max-w-xs truncate block" title={alert.message || alert.rule_name}>
                         {alert.message || alert.rule_name}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                      </span>
+                    </Td>
+                  </Tr>
+                ))}
+              </TBody>
+            </Table>
           )}
-        </Card>
+        </TableShell>
       )}
     </div>
   );
