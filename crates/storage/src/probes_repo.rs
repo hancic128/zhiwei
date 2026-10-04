@@ -127,20 +127,20 @@ pub struct ProbePatch {
 
 #[allow(clippy::type_complexity)]
 type ProbeRow = (
-    String,  // p.id
-    String,  // p.name
-    String,  // p.description
-    String,  // p.kind
-    String,  // p.target_json
-    String,  // p.expect_json
-    i64,     // p.interval_seconds
-    i64,     // p.timeout_ms
-    i64,     // p.failure_threshold
-    String,  // p.node_ids_json (JSON array, empty = any node)
-    String,  // p.location
-    i64,     // p.enabled
-    i64,     // p.created_at_unix_nano
-    i64,     // p.updated_at_unix_nano
+    String, // p.id
+    String, // p.name
+    String, // p.description
+    String, // p.kind
+    String, // p.target_json
+    String, // p.expect_json
+    i64,    // p.interval_seconds
+    i64,    // p.timeout_ms
+    i64,    // p.failure_threshold
+    String, // p.node_ids_json (JSON array, empty = any node)
+    String, // p.location
+    i64,    // p.enabled
+    i64,    // p.created_at_unix_nano
+    i64,    // p.updated_at_unix_nano
 );
 
 type StateRow = (String, String, i64, i64, i64, Option<f64>, String);
@@ -242,11 +242,10 @@ impl ProbesRepo {
         .await?;
 
         // Then get all probe states
-        let state_rows: Vec<StateRow> = sqlx::query_as(&format!(
-            "SELECT {STATE_COLS} FROM probe_state"
-        ))
-        .fetch_all(&self.pool)
-        .await?;
+        let state_rows: Vec<StateRow> =
+            sqlx::query_as(&format!("SELECT {STATE_COLS} FROM probe_state"))
+                .fetch_all(&self.pool)
+                .await?;
 
         let mut state_map: std::collections::HashMap<String, ProbeState> = state_rows
             .into_iter()
@@ -260,7 +259,9 @@ impl ProbesRepo {
             .into_iter()
             .map(|pr| {
                 let id = pr.0.clone();
-                let state = state_map.remove(&id).unwrap_or_else(|| ProbeState::unknown(&id, zhiwei_common::Timestamp::now().unix_nano()));
+                let state = state_map.remove(&id).unwrap_or_else(|| {
+                    ProbeState::unknown(&id, zhiwei_common::Timestamp::now().unix_nano())
+                });
                 ProbeWithState {
                     probe: probe_from_row(pr),
                     state,
@@ -282,7 +283,11 @@ impl ProbesRepo {
             let names: std::collections::HashMap<String, String> = rows
                 .into_iter()
                 .map(|(id, alias, hostname)| {
-                    let label = if alias.trim().is_empty() { hostname } else { alias };
+                    let label = if alias.trim().is_empty() {
+                        hostname
+                    } else {
+                        alias
+                    };
                     (id, label)
                 })
                 .collect();
@@ -319,12 +324,11 @@ impl ProbesRepo {
     ///
     /// Returns `sqlx::Error` if the query or label lookup fails.
     pub async fn find_probe(&self, id: &str) -> anyhow::Result<Option<Probe>> {
-        let row: Option<ProbeRow> = sqlx::query_as(&format!(
-            "SELECT {PROBE_COLS} FROM probes p WHERE p.id = ?"
-        ))
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row: Option<ProbeRow> =
+            sqlx::query_as(&format!("SELECT {PROBE_COLS} FROM probes p WHERE p.id = ?"))
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
         match row {
             Some(r) => {
                 let mut probe = probe_from_row(r);
@@ -559,7 +563,11 @@ impl ProbesRepo {
         };
 
         let changed = previous.state != new_state;
-        let last_change = if changed { now } else { previous.last_change_at_unix_nano };
+        let last_change = if changed {
+            now
+        } else {
+            previous.last_change_at_unix_nano
+        };
 
         sqlx::query(
             "INSERT INTO probe_state (probe_id, state, consecutive_failures, last_change_at_unix_nano,
@@ -636,15 +644,7 @@ impl ProbesRepo {
     ///
     /// Returns `sqlx::Error` if any underlying query fails.
     pub async fn probe_counts(&self) -> anyhow::Result<(i64, i64)> {
-        let rows: Vec<StateRow> = sqlx::query_as(&format!("SELECT {STATE_COLS} FROM probe_state"))
-            .fetch_all(&self.pool)
-            .await?;
         let probes = self.list_probes().await?;
-        let states: std::collections::HashMap<String, ProbeState> = rows
-            .into_iter()
-            .map(state_from_row)
-            .map(|s| (s.probe_id.clone(), s))
-            .collect();
 
         let mut total = 0i64;
         let mut healthy = 0i64;
@@ -676,8 +676,7 @@ impl ProbesRepo {
         bucket_ns: i64,
     ) -> anyhow::Result<Vec<(String, i64, i64, i64)>> {
         let bucket_ns = bucket_ns.max(1);
-        let sql = format!(
-            r"
+        let sql = r"
             SELECT r.probe_id AS grp,
                    (r.ts_unix_nano / ?) * ? AS bucket_start,
                    SUM(CASE WHEN r.state = 'ok' THEN 1 ELSE 0 END) AS ok_count,
@@ -687,7 +686,7 @@ impl ProbesRepo {
             GROUP BY grp, bucket_start
             ORDER BY grp, bucket_start
             "
-        );
+        .to_string();
         let rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(&sql)
             .bind(bucket_ns)
             .bind(bucket_ns)
@@ -757,7 +756,7 @@ mod tests {
         let now = 1_000_000_000;
         let mk = |name: &str, enabled: bool| ProbeInput {
             name: name.to_string(),
-            description: "".to_string(),
+            description: String::new(),
             kind: "http".into(),
             target_json: "{}".into(),
             expect_json: "{}".into(),

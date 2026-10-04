@@ -1,0 +1,12 @@
+#!/bin/sh
+# Pre-commit hook: run cargo fmt and cargo clippy
+
+set -e
+
+echo "Running cargo fmt check..."
+cargo fmt --all -- --check
+
+echo "Running cargo clippy..."
+cargo clippy --all-targets --all-features -- -D warnings
+
+echo "All checks passed!"

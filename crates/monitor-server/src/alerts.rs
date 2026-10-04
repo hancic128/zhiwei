@@ -975,10 +975,7 @@ async fn handle_probe_down(
     } else {
         transition.last_error.clone()
     };
-    let message = format!(
-        "Probe {} is down: {detail}",
-        probe.name
-    );
+    let message = format!("Probe {} is down: {detail}", probe.name);
 
     let opened = repo
         .open_probe_alert(

@@ -6,6 +6,7 @@ use sqlx::SqlitePool;
 ///
 /// Returns `sqlx::Error` if the `schema_version` table creation or any of the
 /// individual migrations fails.
+#[allow(clippy::cognitive_complexity)]
 pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(
         r"

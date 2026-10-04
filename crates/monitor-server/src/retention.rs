@@ -166,9 +166,10 @@ pub async fn retention_handler(State(state): State<AppState>, headers: HeaderMap
 /// `raw_days` and `hourly_days` define the data granularity window (10-second raw vs hourly aggregates)
 /// and cannot be changed without a code update — they affect storage layout.
 #[derive(serde::Deserialize)]
+#[allow(dead_code)]
 pub struct RetentionPatch {
-    pub raw_days: Option<i64>,
-    pub hourly_days: Option<i64>,
+    pub raw: Option<i64>,
+    pub hourly: Option<i64>,
     pub alert_retention_days: Option<i64>,
 }
 
