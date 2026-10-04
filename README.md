@@ -28,7 +28,9 @@ No Prometheus, Grafana, K8s, or Postgres required.
 ```sh
 ./scripts/dev.sh start     # Start monitor + ops + auto-enroll a local node
 ./scripts/dev.sh status    # Check process and log status
-./scripts/dev.sh stop
+./scripts/dev.sh stop      # Stop all processes
+./scripts/dev.sh reset     # Stop, recompile, and restart (preserve data)
+./scripts/dev.sh clean     # Stop and delete all data (including CA)
 ```
 
 Console at <http://127.0.0.1:8443/> — admin token at `data/admin.token`.
@@ -56,11 +58,16 @@ First monitor startup:
 ### Install Pre-built Binary
 
 ```sh
+# Install (default: node agent)
 curl -fsSL https://raw.githubusercontent.com/zhiwei/zhiwei/main/scripts/install.sh | sh
-```
+curl -fsSL https://raw.githubusercontent.com/zhiwei/zhiwei/main/scripts/install.sh | sh -s -- --bin monitor  # server
 
-Supports Linux (x86_64/aarch64 × musl/gnu) and macOS (arm64/x86_64).
-Use `-s -- --bin monitor` to install the server.
+# Upgrade to latest
+curl -fsSL https://raw.githubusercontent.com/zhiwei/zhiwei/main/scripts/install.sh | sh -s -- upgrade
+
+# Uninstall
+curl -fsSL https://raw.githubusercontent.com/zhiwei/zhiwei/main/scripts/install.sh | sh -s -- uninstall
+```
 
 ### Docker
 

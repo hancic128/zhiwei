@@ -1,5 +1,5 @@
 #!/bin/sh
-# ZhiWei binary installer.
+# ZhiWei binary installer / uninstaller / upgrader.
 #
 #   curl -fsSL https://raw.githubusercontent.com/zhiwei/zhiwei/main/scripts/install.sh | sh
 #
@@ -22,12 +22,15 @@
 #                       internal artifact server, self-built). Example:
 #                         - https://mirror.example.com/releases/<owner>/<repo>
 #
+# Commands:
+#   install    (default) Install binaries
+#   uninstall  Remove installed binaries
+#   upgrade    Download and replace with latest version
+#
 # Examples:
 #   ... | sh -s -- --bin monitor --version 0.0.1
-#
-# Custom artifact mirror (faster installs in restricted regions):
-#   ZHIWEI_BASE_URL=https://mirror.example.com/releases/<owner>/<repo> \
-#     ... | sh -s -- --bin node --version latest
+#   ... | sh -s -- uninstall --bin node
+#   ... | sh -s -- upgrade
 
 set -eu
 
@@ -36,6 +39,7 @@ BIN="${ZHIWEI_BIN:-node}"
 VERSION="${ZHIWEI_VERSION:-latest}"
 INSTALL_DIR="${ZHIWEI_INSTALL_DIR:-/usr/local/bin}"
 LIBC="${ZHIWEI_LIBC:-musl}"
+CMD="${ZHIWEI_CMD:-install}"
 
 # ---- Argument parsing (overrides the same-name env vars) ----
 while [ $# -gt 0 ]; do
@@ -45,8 +49,9 @@ while [ $# -gt 0 ]; do
     --dir) INSTALL_DIR="${2:?--dir requires a value}"; shift 2 ;;
     --libc) LIBC="${2:?--libc requires a value}"; shift 2 ;;
     -h|--help)
-      sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
+    install|uninstall|upgrade) CMD="$1"; shift ;;
     *) echo "unknown argument: $1 (use --help for usage)" >&2; exit 2 ;;
   esac
 done
@@ -126,7 +131,22 @@ fi
 tmpdir="$(mktemp -d 2>/dev/null || mktemp -d -t zhiwei)"
 trap 'rm -rf "$tmpdir"' EXIT INT TERM
 
-echo "ZhiWei installer" >&2
+# ---- Command dispatch ----
+case "$CMD" in
+  uninstall)
+    echo "ZhiWei uninstaller" >&2
+    cmd_uninstall
+    exit 0
+    ;;
+  upgrade)
+    VERSION="latest"
+    echo "ZhiWei upgrader" >&2
+    ;;
+  *)
+    echo "ZhiWei installer" >&2
+    ;;
+esac
+
 note "platform ${target}"
 note "target   ${binary} ${VERSION}"
 note "dir      ${INSTALL_DIR}"
@@ -217,3 +237,21 @@ case ":${PATH}:" in
   *":${INSTALL_DIR}:"*) ;;
   *) echo "" >&2; note "note     ${INSTALL_DIR} is not on PATH; invoke via absolute path or add it" ;;
 esac
+
+# ---- Commands: uninstall / upgrade ----
+cmd_uninstall() {
+  echo "Removing $binaries from $INSTALL_DIR ..." >&2
+  for one in $binaries; do
+    if [ -f "${INSTALL_DIR}/${one}" ]; then
+      if [ -w "$INSTALL_DIR" ]; then
+        rm -f "${INSTALL_DIR}/${one}"
+      else
+        sudo rm -f "${INSTALL_DIR}/${one}"
+      fi
+      echo "removed ${INSTALL_DIR}/${one}" >&2
+    else
+      note "${INSTALL_DIR}/${one} not found, skipping"
+    fi
+  done
+  echo "Uninstall complete." >&2
+}
