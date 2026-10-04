@@ -284,8 +284,9 @@ fn translate_message(source: &str, message: &str) -> String {
     if source == "container" {
         message
             .replace("容器 ", "Container ")
-            .replace("已停止", "stopped")
-            .replace("已启动", "started")
+            .replace("容器", "Container ")
+            .replace("已停止", " stopped")
+            .replace("已启动", " started")
     } else {
         message.to_string()
     }
