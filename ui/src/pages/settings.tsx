@@ -897,6 +897,7 @@ function McpSection() {
   const mcpConfig = `{
   "mcpServers": {
     "zhiwei-monitor": {
+      "type": "sse",
       "url": "${baseUrl}/mcp/sse",
       "headers": {
         "Authorization": "Bearer <YOUR_TOKEN>"

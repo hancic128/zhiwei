@@ -44,7 +44,7 @@ pub struct TodoQuery {
     pub recovered_cursor: Option<i64>,
 }
 
-fn default_page_size() -> i64 {
+const fn default_page_size() -> i64 {
     DEFAULT_PAGE_SIZE
 }
 
@@ -218,15 +218,15 @@ pub async fn todo_handler(
     let recovered = recovered_items(&resolved_alerts, &nodes);
 
     // Apply pagination: now list
-    let now_total = now_items.len() as i64;
+    let now_total = now_items.len().try_into().unwrap_or(i64::MAX);
     let (now_page, now_cursor) = paginate(now_items, query.now_cursor, page_size);
 
     // Apply pagination: watch list
-    let watch_total = watch_items.len() as i64;
+    let watch_total = watch_items.len().try_into().unwrap_or(i64::MAX);
     let (watch_page, watch_cursor) = paginate(watch_items, query.watch_cursor, page_size);
 
     // Apply pagination: recovered list
-    let recovered_total = recovered.len() as i64;
+    let recovered_total = recovered.len().try_into().unwrap_or(i64::MAX);
     let (recovered_page, recovered_cursor) = paginate(recovered, query.recovered_cursor, page_size);
 
     let summary = Summary {
@@ -260,7 +260,7 @@ pub async fn todo_handler(
     .into_response()
 }
 
-/// Apply cursor-based pagination: skip items until cursor, take page_size+1 to check if there's more.
+/// Apply cursor-based pagination: skip items until cursor, take `page_size+1` to check if there's more.
 fn paginate<T: Sortable>(
     mut items: Vec<T>,
     cursor: Option<i64>,

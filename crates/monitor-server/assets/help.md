@@ -161,6 +161,7 @@ Cursor、Cline、Claude Code 等能直接读写集群数据。
 {
   "mcpServers": {
     "zhiwei": {
+      "type": "sse",
       "url": "{{BASE_URL}}/mcp/sse",
       "headers": {
         "Authorization": "Bearer ait_xxxxxxxxxxxxxxxx"
