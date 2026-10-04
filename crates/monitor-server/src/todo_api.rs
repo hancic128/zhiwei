@@ -7,11 +7,12 @@
 //! Design: `docs/superpowers/specs/2026-09-19-product-structure-design.md` §4.
 
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
+use serde::Deserialize;
 use serde::Serialize;
 use zhiwei_storage::alerts_repo::Alert;
 use zhiwei_storage::node_repo::NodeRecord;
@@ -24,9 +25,20 @@ use crate::state::AppState;
 /// avoiding "console shows online / background already alerts" inconsistency.
 pub use crate::alerts::NODE_OFFLINE_AFTER_MS;
 
-/// Number of recovered-history entries kept — history is for trust, doesn't
-/// need to be long
-const RECOVERED_LIMIT: i64 = 5;
+/// Query parameters for todo endpoint pagination.
+#[derive(Debug, Deserialize)]
+pub struct TodoQuery {
+    /// Cursor: `since_unix_nano` of the last item in the previous page.
+    /// For recovered list, this is `resolved_at_unix_nano`.
+    pub cursor: Option<i64>,
+    /// Number of items per list (now, watch, recovered).
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+}
+
+fn default_limit() -> i64 {
+    5
+}
 
 /// Buckets: by "do I need to act now", not by severity
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,8 +142,12 @@ pub struct Summary {
 }
 
 /// `GET /v1/todo` — default page: combines "things to handle today" into one
-/// stream.
-pub async fn todo_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
+/// stream. Supports cursor-based pagination.
+pub async fn todo_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<TodoQuery>,
+) -> Response {
     if !read_auth_ok(&state, &headers).await {
         return err(
             StatusCode::UNAUTHORIZED,
@@ -141,6 +157,8 @@ pub async fn todo_handler(State(state): State<AppState>, headers: HeaderMap) -> 
 
     let now_ns = zhiwei_common::Timestamp::now().unix_nano();
     let now_epoch_ms = now_ns / 1_000_000;
+    let limit = query.limit.clamp(1, 100);
+    let cursor = query.cursor.unwrap_or(i64::MAX);
 
     let nodes = match state.storage.nodes().list_all().await {
         Ok(n) => n,
@@ -167,10 +185,11 @@ pub async fn todo_handler(State(state): State<AppState>, headers: HeaderMap) -> 
         .open_alerts()
         .await
         .unwrap_or_default();
+    // Use larger limit for pagination; we fetch all and slice on the backend side
     let resolved_alerts = state
         .storage
         .alerts()
-        .resolved_alerts(RECOVERED_LIMIT)
+        .resolved_alerts(1000) // Fetch enough for pagination
         .await
         .unwrap_or_default();
 
@@ -182,7 +201,12 @@ pub async fn todo_handler(State(state): State<AppState>, headers: HeaderMap) -> 
     sort_items(&mut now_items);
     sort_items(&mut watch_items);
 
-    let recovered = recovered_items(&resolved_alerts, &nodes);
+    let all_recovered = recovered_items(&resolved_alerts, &nodes);
+
+    // Apply cursor-based pagination: items with since_unix_nano < cursor (older)
+    let (now_page, now_has_more) = paginate(now_items, cursor, limit);
+    let (watch_page, watch_has_more) = paginate(watch_items, cursor, limit);
+    let (recovered_page, recovered_has_more) = paginate_recovered(all_recovered, cursor, limit);
 
     let summary = Summary {
         nodes_online: nodes
@@ -203,16 +227,50 @@ pub async fn todo_handler(State(state): State<AppState>, headers: HeaderMap) -> 
         "generated_at_unix_nano": now_ns,
         "summary": summary,
         "counts": {
-            "now": now_items.len(),
-            "watch": watch_items.len(),
-            "recovered": recovered.len(),
+            "now": now_page.len(),
+            "watch": watch_page.len(),
+            "recovered": recovered_page.len(),
             "silenced": silenced,
         },
-        "now": now_items,
-        "watch": watch_items,
-        "recovered": recovered,
+        "pagination": {
+            "has_more": {
+                "now": now_has_more,
+                "watch": watch_has_more,
+                "recovered": recovered_has_more,
+            },
+            "next_cursor": {
+                "now": now_page.last().map(|i| i.since_unix_nano),
+                "watch": watch_page.last().map(|i| i.since_unix_nano),
+                "recovered": recovered_page.last().map(|i| i.resolved_at_unix_nano.unwrap_or(i.since_unix_nano)),
+            },
+        },
+        "now": now_page,
+        "watch": watch_page,
+        "recovered": recovered_page,
     }))
     .into_response()
+}
+
+/// Paginate items by since_unix_nano cursor.
+fn paginate(mut items: Vec<TodoItem>, cursor: i64, limit: i64) -> (Vec<TodoItem>, bool) {
+    // Filter items with since_unix_nano < cursor (older than cursor)
+    items.retain(|i| i.since_unix_nano < cursor);
+    let has_more = items.len() > limit as usize;
+    items.truncate(usize::try_from(limit).unwrap_or(0));
+    (items, has_more)
+}
+
+/// Paginate recovered items by resolved_at_unix_nano cursor.
+fn paginate_recovered(mut items: Vec<TodoItem>, cursor: i64, limit: i64) -> (Vec<TodoItem>, bool) {
+    // Filter items with resolved_at_unix_nano < cursor (older than cursor)
+    items.retain(|i| {
+        i.resolved_at_unix_nano
+            .unwrap_or(i.since_unix_nano)
+            < cursor
+    });
+    let has_more = items.len() > limit as usize;
+    items.truncate(usize::try_from(limit).unwrap_or(0));
+    (items, has_more)
 }
 
 /// Whether a node last seen at `last_seen_unix_nano` is considered online at `now_epoch_ms`.

@@ -1007,17 +1007,34 @@ export interface TodoSummary {
   containers_failed: number;
 }
 
+export interface TodoPagination {
+  has_more: { now: boolean; watch: boolean; recovered: boolean };
+  next_cursor: { now: number | null; watch: number | null; recovered: number | null };
+}
+
 export interface TodoView {
   generated_at_unix_nano: number;
   summary: TodoSummary;
   counts: { now: number; watch: number; recovered: number; silenced: number };
+  pagination?: TodoPagination;
   now: TodoItem[];
   watch: TodoItem[];
   recovered: TodoItem[];
 }
 
+export interface TodoQuery {
+  cursor?: number;
+  limit?: number;
+}
+
 export const todoApi = {
-  get: () => request<TodoView>("/v1/todo"),
+  get: (query?: TodoQuery) => {
+    const params = new URLSearchParams();
+    if (query?.cursor !== undefined) params.set("cursor", String(query.cursor));
+    if (query?.limit !== undefined) params.set("limit", String(query.limit));
+    const qs = params.toString();
+    return request<TodoView>(`/v1/todo${qs ? `?${qs}` : ""}`);
+  },
 };
 
 // ---------- Service health ----------

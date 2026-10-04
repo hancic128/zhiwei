@@ -195,14 +195,40 @@ function TodoRow({ item, muted = false }: { item: TodoItem; muted?: boolean }) {
   );
 }
 
+function LoadMoreButton({
+  onClick,
+  loading,
+}: {
+  onClick: () => void;
+  loading: boolean;
+}) {
+  const { t } = useTranslation();
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={loading}
+      className="w-full py-2 text-sm text-ink-500 hover:text-ink-700 dark:text-ink-400 dark:hover:text-ink-200 border-t border-surface-3 dark:border-ink-700 disabled:opacity-50"
+    >
+      {loading ? t("action.refreshing") : t("todo.loadMore")}
+    </button>
+  );
+}
+
 function Bucket({
   title,
   items,
   emptyText,
+  hasMore,
+  onLoadMore,
+  loadingMore,
 }: {
   title: string;
   items: TodoItem[];
   emptyText: string;
+  hasMore?: boolean;
+  onLoadMore?: () => void;
+  loadingMore?: boolean;
 }) {
   return (
     <Card>
@@ -217,11 +243,16 @@ function Bucket({
           <p className="text-sm text-ink-400">{emptyText}</p>
         </CardBody>
       ) : (
-        <ul>
-          {items.map((i) => (
-            <TodoRow key={i.id} item={i} />
-          ))}
-        </ul>
+        <>
+          <ul>
+            {items.map((i) => (
+              <TodoRow key={i.id} item={i} />
+            ))}
+          </ul>
+          {hasMore && onLoadMore && (
+            <LoadMoreButton onClick={onLoadMore} loading={loadingMore ?? false} />
+          )}
+        </>
       )}
     </Card>
   );
@@ -285,7 +316,72 @@ function StatusCards({ summary }: { summary: TodoSummary }) {
 export function Todo() {
   const { t } = useTranslation();
   const [showRecovered, setShowRecovered] = React.useState(false);
-  const q = useQuery({ queryKey: ["todo"], queryFn: todoApi.get });
+  const [nowCursor, setNowCursor] = React.useState<number | undefined>(undefined);
+  const [watchCursor, setWatchCursor] = React.useState<number | undefined>(undefined);
+  const [recoveredCursor, setRecoveredCursor] = React.useState<number | undefined>(undefined);
+  const [loadedItems, setLoadedItems] = React.useState<{ now: TodoItem[]; watch: TodoItem[]; recovered: TodoItem[] }>({
+    now: [],
+    watch: [],
+    recovered: [],
+  });
+  const [hasMore, setHasMore] = React.useState({ now: false, watch: false, recovered: false });
+  const [loadingMore, setLoadingMore] = React.useState({ now: false, watch: false, recovered: false });
+
+  const q = useQuery({
+    queryKey: ["todo", nowCursor],
+    queryFn: () => todoApi.get({ cursor: nowCursor, limit: 5 }),
+    initialPageData: false,
+  });
+
+  // Initialize or append items
+  React.useEffect(() => {
+    if (q.data) {
+      if (nowCursor === undefined) {
+        // First load
+        setLoadedItems({
+          now: q.data.now,
+          watch: q.data.watch,
+          recovered: q.data.recovered,
+        });
+      } else {
+        // Load more
+        setLoadedItems(prev => ({
+          now: [...prev.now, ...q.data.now],
+          watch: [...prev.watch, ...q.data.watch],
+          recovered: [...prev.recovered, ...q.data.recovered],
+        }));
+      }
+      if (q.data.pagination) {
+        setHasMore({
+          now: q.data.pagination.has_more.now,
+          watch: q.data.pagination.has_more.watch,
+          recovered: q.data.pagination.has_more.recovered,
+        });
+      }
+    }
+  }, [q.data, nowCursor]);
+
+  const handleLoadMore = (bucket: "now" | "watch" | "recovered") => {
+    if (!q.data?.pagination) return;
+    setLoadingMore(prev => ({ ...prev, [bucket]: true }));
+
+    let nextCursor: number | undefined;
+    if (bucket === "now") {
+      nextCursor = q.data.pagination.next_cursor.now ?? undefined;
+      setNowCursor(nextCursor);
+    } else if (bucket === "watch") {
+      nextCursor = q.data.pagination.next_cursor.watch ?? undefined;
+      setWatchCursor(nextCursor);
+    } else {
+      nextCursor = q.data.pagination.next_cursor.recovered ?? undefined;
+      setRecoveredCursor(nextCursor);
+    }
+
+    // Refetch with new cursor
+    void q.refetch().finally(() => {
+      setLoadingMore(prev => ({ ...prev, [bucket]: false }));
+    });
+  };
 
   if (q.isPending) return <TableSkeleton rows={4} />;
   if (q.isError) {
@@ -298,6 +394,9 @@ export function Todo() {
   }
 
   const { summary, counts, now, watch, recovered } = q.data;
+  const displayNow = nowCursor === undefined ? now : loadedItems.now;
+  const displayWatch = nowCursor === undefined ? watch : loadedItems.watch;
+  const displayRecovered = nowCursor === undefined ? recovered : loadedItems.recovered;
   const allClear = counts.now === 0 && counts.watch === 0;
 
   return (
@@ -316,13 +415,19 @@ export function Todo() {
 
       <Bucket
         title={t("todo.bucketNow")}
-        items={now}
+        items={displayNow}
         emptyText={t("todo.noneNow")}
+        hasMore={hasMore.now}
+        onLoadMore={() => handleLoadMore("now")}
+        loadingMore={loadingMore.now}
       />
       <Bucket
         title={t("todo.bucketWatch")}
-        items={watch}
+        items={displayWatch}
         emptyText={t("todo.noneWatch")}
+        hasMore={hasMore.watch}
+        onLoadMore={() => handleLoadMore("watch")}
+        loadingMore={loadingMore.watch}
       />
 
       {counts.silenced > 0 && (
@@ -355,11 +460,19 @@ export function Todo() {
             </span>
           </button>
           {showRecovered && (
-            <ul className="border-t border-surface-3 dark:border-ink-700">
-              {recovered.map((i) => (
-                <TodoRow key={i.id} item={i} muted />
-              ))}
-            </ul>
+            <>
+              <ul className="border-t border-surface-3 dark:border-ink-700">
+                {displayRecovered.map((i) => (
+                  <TodoRow key={i.id} item={i} muted />
+                ))}
+              </ul>
+              {hasMore.recovered && (
+                <LoadMoreButton
+                  onClick={() => handleLoadMore("recovered")}
+                  loading={loadingMore.recovered}
+                />
+              )}
+            </>
           )}
         </Card>
       )}
