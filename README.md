@@ -9,6 +9,8 @@ No Prometheus, Grafana, K8s, or Postgres required.
 
 **One human plus one agent, managing N machines.**
 
+![ZhiWei Todo Page](./docs/img/todo.png)
+
 ## Features
 
 - **Multi-host telemetry**: CPU, memory, disk, network, processes, containers
@@ -67,20 +69,6 @@ docker build -t zhiwei-monitor .
 docker run -d -p 8443:8443 -v zhiwei-data:/var/lib/zhiwei zhiwei-monitor
 ```
 
-## Screenshots
-
-| Overview | Node detail |
-| --- | --- |
-| ![Overview](./docs/img/overview.png) | ![Node detail](./docs/img/node-detail.png) |
-
-| Certificates | Alerts |
-| --- | --- |
-| ![Certificates](./docs/img/certificates.png) | ![Alerts](./docs/img/alerts.png) |
-
-| Containers | Settings |
-| --- | --- |
-| ![Containers](./docs/img/containers.png) | ![Settings](./docs/img/settings.png) |
-
 ## Architecture
 
 ```mermaid
@@ -128,10 +116,8 @@ See [docs/DEPLOY.md](./docs/DEPLOY.md) for full deployment guide covering:
 - [docs/DEPLOY.md](./docs/DEPLOY.md) — deployment guide
 - [docs/ALERTS.md](./docs/ALERTS.md) — alert rules and notification channels
 - [docs/PROBES.md](./docs/PROBES.md) — service health probes
-- [docs/SERVICE-HEALTH.md](./docs/SERVICE-HEALTH.md) — service health design (current + planned)
 - [docs/BACKUP.md](./docs/BACKUP.md) — backup and restore
 - [docs/TROUBLESHOOTING.md](./docs/TROUBLESHOOTING.md) — common issues
-- [docs/roadmap.md](./docs/roadmap.md) — current status and upcoming work
 
 ## Configuration
 
