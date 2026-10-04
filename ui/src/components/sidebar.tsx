@@ -31,7 +31,7 @@ interface NavItem {
 const NAV: NavItem[] = [
   { to: "/", key: "todo", icon: Inbox, ready: true },
   { to: "/nodes", key: "nodes", icon: Server, ready: true },
-  { to: "/services", key: "services", icon: Activity, ready: true },
+  { to: "/probes", key: "probes", icon: Activity, ready: true },
   { to: "/containers", key: "containers", icon: Box, ready: true },
   { to: "/certificates", key: "certificates", icon: ShieldCheck, ready: true },
   { to: "/alerts", key: "alerts", icon: BellRing, ready: true },

@@ -2,34 +2,30 @@ import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { Activity } from "lucide-react";
-import { servicesApi, type ProbeView } from "@/api";
+import { probesApi, type ProbeView } from "@/api";
 import { DotBadge } from "@/components/ui/badge";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
 import { EmptyState, ErrorState, Skeleton } from "@/components/ui/feedback";
 import { cn, friendlyError, relativeTime } from "@/lib/utils";
 
 /**
- * Node detail page's "service probes": which probes run on this node and their current state.
- *
- * The services page is organized by service (forward view), here it's organized by node (reverse view) —
- * when troubleshooting a single machine, you need to know "what is it actually probing on whose behalf".
+ * Node detail page's "probes": which probes run on this node and their current state.
  * Only shows probes bound to this node; probes with empty `node_ids` execute on any node,
  * and listing them under a specific node would be misleading, so they're excluded.
  */
 export function NodeProbes({ nodeId, refreshMs }: { nodeId: string; refreshMs: number }) {
   const { t } = useTranslation();
   const q = useQuery({
-    queryKey: ["services"],
-    queryFn: servicesApi.list,
+    queryKey: ["probes"],
+    queryFn: probesApi.list,
     refetchInterval: refreshMs,
   });
 
   const probes: ProbeView[] = React.useMemo(
     () =>
       (q.data ?? [])
-        .flatMap((s) => s.probes)
         .filter((p) => p.node_ids.includes(nodeId))
-        .sort((a, b) => a.service_name.localeCompare(b.service_name)),
+        .sort((a, b) => a.name.localeCompare(b.name)),
     [q.data, nodeId],
   );
 
@@ -70,16 +66,16 @@ export function NodeProbes({ nodeId, refreshMs }: { nodeId: string; refreshMs: n
               <thead>
                 <tr className="border-b border-surface-3 dark:border-ink-700">
                   <th className="px-4 py-2 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">
-                    {t("services.colService")}
+                    {t("probes.colProbeName")}
                   </th>
                   <th className="px-4 py-2 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">
-                    {t("services.colState")}
+                    {t("probes.colState")}
                   </th>
                   <th className="hidden md:table-cell px-4 py-2 text-right text-xs font-semibold text-ink-500 uppercase tracking-wider">
-                    {t("services.colLatency")}
+                    {t("probes.colLatency")}
                   </th>
                   <th className="hidden lg:table-cell px-4 py-2 text-right text-xs font-semibold text-ink-500 uppercase tracking-wider">
-                    {t("services.colLastCheck")}
+                    {t("probes.colLastCheck")}
                   </th>
                 </tr>
               </thead>
@@ -91,7 +87,7 @@ export function NodeProbes({ nodeId, refreshMs }: { nodeId: string; refreshMs: n
                         {p.name}
                       </div>
                       <div className="text-xs text-ink-400 truncate max-w-[260px]">
-                        {p.service_name} · {p.kind}
+                        {p.description} · {p.kind}
                       </div>
                     </td>
                     <td className="px-4 py-3">

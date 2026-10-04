@@ -197,7 +197,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
                 <Route path="/" element={<Todo />} />
                 <Route path="/nodes" element={<Nodes />} />
                 <Route path="/nodes/:id" element={<NodeDetail />} />
-                <Route path="/services" element={<Services />} />
+                <Route path="/probes" element={<Services />} />
                 <Route path="/help" element={<HelpPage />} />
                 <Route path="/containers" element={<Containers />} />
                 {/* Logs menu removed: container logs are inline in the containers page, file logs via the containers page toolbar */}
@@ -221,7 +221,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
 const MOBILE_NAV = [
   { to: "/", key: "todo", icon: Inbox },
   { to: "/nodes", key: "nodes", icon: Server },
-  { to: "/services", key: "services", icon: Activity },
+  { to: "/probes", key: "probes", icon: Activity },
   { to: "/containers", key: "containers", icon: Box },
   { to: "/certificates", key: "certificates", icon: ShieldCheck },
   { to: "/alerts", key: "alerts", icon: BellRing },

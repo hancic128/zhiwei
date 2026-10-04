@@ -1086,9 +1086,8 @@ export interface ProbeStateView {
 
 export interface ProbeView {
   id: string;
-  service_id: string;
-  service_name: string;
   name: string;
+  description: string;
   kind: "http" | "tcp" | "tls" | string;
   target_json: string;
   expect_json: string;
@@ -1106,22 +1105,9 @@ export interface ProbeView {
   state: ProbeStateView;
 }
 
-export interface ServiceView {
-  id: string;
-  name: string;
-  description: string;
-  group_name: string;
-  tier: number;
-  enabled: boolean;
-  created_at_unix_nano: number;
-  updated_at_unix_nano: number;
-  health: ProbeStateName;
-  probes: ProbeView[];
-}
-
 export interface ProbeInputBody {
-  service_id: string;
   name: string;
+  description?: string;
   kind: string;
   target_json: string;
   expect_json: string;
@@ -1133,53 +1119,25 @@ export interface ProbeInputBody {
   enabled?: boolean;
 }
 
-export const servicesApi = {
-  list: () => request<ServiceView[]>("/v1/services"),
-  create: (body: {
-    name: string;
-    description?: string;
-    group_name?: string;
-    tier?: number;
-  }) =>
-    request<ServiceView>("/v1/services", {
+export const probesApi = {
+  list: () => request<ProbeView[]>("/v1/probes"),
+
+  create: (body: ProbeInputBody) =>
+    request<ProbeView>("/v1/probes", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
   update: (
     id: string,
-    body: Partial<{
-      name: string;
-      description: string;
-      group_name: string;
-      tier: number;
-      enabled: boolean;
-    }>,
-  ) =>
-    request<unknown>(`/v1/services/${id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }),
-  remove: (id: string) =>
-    request<unknown>(`/v1/services/${id}`, { method: "DELETE" }),
-
-  createProbe: (body: ProbeInputBody) =>
-    request<ProbeView>("/v1/probes", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }),
-  updateProbe: (
-    id: string,
-    body: Partial<Omit<ProbeInputBody, "service_id">>,
+    body: Partial<ProbeInputBody>,
   ) =>
     request<unknown>(`/v1/probes/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
-  removeProbe: (id: string) =>
+  remove: (id: string) =>
     request<unknown>(`/v1/probes/${id}`, { method: "DELETE" }),
   /** One-shot test when creating / editing a probe: monitor executes it immediately, not persisted */
   test: (body: {

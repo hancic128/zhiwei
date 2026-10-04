@@ -1,11 +1,11 @@
+/**
+ * Probes page — manage HTTP/TCP/TLS health checks.
+ */
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import type { TFunction } from "i18next";
 import {
   Activity,
-  AlertTriangle,
-  CheckCircle2,
   Globe,
   Network,
   Pencil,
@@ -15,14 +15,12 @@ import {
 } from "lucide-react";
 import {
   api,
-  servicesApi,
+  probesApi,
   trendApi,
   type ProbeTestResult,
   type ProbeView,
-  type ServiceView,
 } from "@/api";
 import { LineChart } from "@/components/chart";
-import { StatCards } from "@/components/stat-cards";
 import { DotBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
@@ -49,51 +47,16 @@ import {
   THead,
   Tr,
 } from "@/components/ui/table";
-import { useToast } from "@/components/ui/toast";
 import { Switch } from "@/components/ui/switch";
-import {
-  cn,
-  friendlyError,
-  formatTime,
-  nodeLabel,
-  relativeTime,
-} from "@/lib/utils";
-import { usePrefs } from "@/components/prefs-provider";
-
-/** Probe type icon (spec: icons always Lucide SVG, no emoji) */
-const KIND_ICON: Record<string, React.ElementType> = {
-  http: Globe,
-  tcp: Network,
-  tls: ShieldCheck,
-};
-
-/** State → DotBadge tone */
-function stateTone(state: string): "success" | "warn" | "danger" | "neutral" {
-  if (state === "ok") return "success";
-  if (state === "degraded") return "warn";
-  if (state === "down") return "danger";
-  return "neutral";
-}
-
-/** State → i18n key (unknown values fall back to "unknown" to avoid leaking raw strings) */
-function stateKey(state: string): string {
-  return ["ok", "degraded", "down"].includes(state) ? state : "unknown";
-}
-
-/** Latency display: under 10ms keep one decimal to avoid misleading "0 ms" readings */
-function formatLatency(ms: number | null | undefined): string {
-  if (ms === null || ms === undefined || !Number.isFinite(ms)) return "—";
-  return `${ms < 10 ? ms.toFixed(1) : ms.toFixed(0)} ms`;
-}
+import { useToast } from "@/components/ui/toast";
+import { cn, friendlyError } from "@/lib/utils";
 
 interface TargetShape {
   url?: string;
+  method?: string;
   host?: string;
   port?: number;
   sni?: string;
-  method?: string;
-  headers?: Record<string, string>;
-  body?: string;
 }
 
 interface ExpectShape {
@@ -115,7 +78,7 @@ function parseJson<T>(raw: string, fallback: T): T {
   }
 }
 
-/** Compact target display (table column) */
+/** Compact target display */
 function targetSummary(probe: ProbeView): string {
   const target = parseJson<TargetShape>(probe.target_json, {});
   if (probe.kind === "http") return target.url ?? "—";
@@ -124,14 +87,13 @@ function targetSummary(probe: ProbeView): string {
 }
 
 /**
- * Service health timeline: one line per probe, showing the percentage of
- * checks that returned "ok" within each time bucket (0–100%).
+ * Probe health timeline: one line per probe.
  */
-function ServicesTimeline() {
+function ProbesTimeline() {
   const { t } = useTranslation();
   const [range, setRange] = React.useState<TimeRange>(() => presetRange("3h"));
   const q = useQuery({
-    queryKey: ["services-timeline", range.from, range.to],
+    queryKey: ["probes-timeline", range.from, range.to],
     queryFn: () => trendApi.servicesTimeline(range.from, range.to, 60, "probe"),
     refetchInterval: 60000,
   });
@@ -144,8 +106,8 @@ function ServicesTimeline() {
   return (
     <Card>
       <CardHeader
-        title={t("services.timelineTitle")}
-        description={t("services.timelineSubtitleProbe")}
+        title={t("probes.timelineTitle")}
+        description={t("probes.timelineSubtitleProbe")}
         action={<TimeRangePicker value={range} onChange={setRange} />}
       />
       <CardBody compact>
@@ -180,7 +142,6 @@ function ServicesTimeline() {
 
 export function Services() {
   const { t } = useTranslation();
-  const { timezone: tz } = usePrefs();
   const qc = useQueryClient();
   const toast = useToast();
 
@@ -188,184 +149,111 @@ export function Services() {
   const [stateFilter, setStateFilter] = React.useState("all");
   const [nodeFilter, setNodeFilter] = React.useState("all");
   const [showDisabled, setShowDisabled] = React.useState(false);
-  const [serviceDialog, setServiceDialog] = React.useState<{
-    open: boolean;
-    service?: ServiceView;
-  }>({ open: false });
   const [probeDialog, setProbeDialog] = React.useState<{
     open: boolean;
-    serviceId?: string;
     probe?: ProbeView;
   }>({ open: false });
   const [pendingDelete, setPendingDelete] = React.useState<{
-    kind: "service" | "probe";
+    kind: "probe";
     id: string;
     name: string;
   } | null>(null);
 
-  const servicesQ = useQuery({
-    queryKey: ["services"],
-    queryFn: servicesApi.list,
-    refetchInterval: 15000,
+  const probesQ = useQuery({
+    queryKey: ["probes"],
+    queryFn: probesApi.list,
   });
-  const services: ServiceView[] = servicesQ.data ?? [];
 
-  const nodesQ = useQuery({ queryKey: ["nodes"], queryFn: api.nodes });
-  /** Node dropdown: sort by alias (fallback to hostname); recompute when nodes change */
+  const nodesQ = useQuery({
+    queryKey: ["nodes"],
+    queryFn: api.nodes,
+  });
+
   const nodeOptions = React.useMemo(
-    () =>
-      [...(nodesQ.data ?? [])].sort((a, b) =>
-        nodeLabel(a).localeCompare(nodeLabel(b)),
-      ),
+    () => [...(nodesQ.data ?? [])],
     [nodesQ.data],
   );
 
+  const nodeLabel = (n: { alias?: string; hostname: string }) =>
+    n.alias || n.hostname;
+
+  // Filter probes
+  const filtered = React.useMemo(() => {
+    let list = probesQ.data ?? [];
+    const needle = q.trim().toLowerCase();
+    if (needle) {
+      list = list.filter(
+        (p) =>
+          p.name.toLowerCase().includes(needle) ||
+          p.description.toLowerCase().includes(needle) ||
+          p.kind.toLowerCase().includes(needle),
+      );
+    }
+    if (stateFilter !== "all") {
+      list = list.filter((p) => p.state.state === stateFilter);
+    }
+    if (nodeFilter !== "all") {
+      if (nodeFilter === "__none__") {
+        list = list.filter((p) => p.node_ids.length === 0);
+      } else {
+        list = list.filter((p) => p.node_ids.includes(nodeFilter));
+      }
+    }
+    if (!showDisabled) {
+      list = list.filter((p) => p.enabled);
+    }
+    return list;
+  }, [probesQ.data, q, stateFilter, nodeFilter, showDisabled]);
+
   const toggleProbe = useMutation({
     mutationFn: (p: ProbeView) =>
-      servicesApi.updateProbe(p.id, { enabled: !p.enabled }),
-    onSuccess: (_data, p) => {
-      toast.push("success", t(p.enabled ? "services.disabled" : "services.enabled"));
-      void qc.invalidateQueries({ queryKey: ["services"] });
+      probesApi.update(p.id, { enabled: !p.enabled }),
+    onSuccess: () => {
+      toast.push("success", t("probes.updated"));
+      void qc.invalidateQueries({ queryKey: ["probes"] });
     },
     onError: (e) => toast.push("error", t(friendlyError(e))),
   });
 
   const removeEntity = useMutation({
-    mutationFn: (target: { kind: "service" | "probe"; id: string }) =>
-      target.kind === "service"
-        ? servicesApi.remove(target.id)
-        : servicesApi.removeProbe(target.id),
+    mutationFn: ({
+      id,
+    }: {
+      id: string;
+    }) => probesApi.remove(id),
     onSuccess: () => {
-      toast.push("success", t("services.deleted"));
-      setPendingDelete(null);
-      void qc.invalidateQueries({ queryKey: ["services"] });
-    },
-    onError: (e) => {
-      toast.push("error", t(friendlyError(e)));
+      toast.push("success", t("probes.deleted"));
+      void qc.invalidateQueries({ queryKey: ["probes"] });
+      void qc.invalidateQueries({ queryKey: ["todo"] });
       setPendingDelete(null);
     },
+    onError: (e) => toast.push("error", t(friendlyError(e))),
   });
 
-  // Flatten to a single-layer probe table: each probe carries service_id / service_name / enabled.
-  // service.enabled doesn't directly decide row visibility — as long as the probe is enabled it shows.
-  // A whole service being disabled just means "this group is greyed out"; probes should still be visible
-  // in the table (operators may need to inspect them).
-  const rows = React.useMemo(
-    () =>
-      services.flatMap((svc) =>
-        svc.probes.map<FlatRow>((p) => ({
-          probe: p,
-          service_id: svc.id,
-          service_name: svc.name,
-          service_enabled: svc.enabled,
-        })),
-      ),
-    [services],
-  );
-
-  // Top large cards count by **probe** dimension, only active ones: once a probe is disabled
-  // or its service group is disabled, its down state shouldn't count as cluster failure
-  // (it still shows in the list, greyed out).
-  const active = rows.filter((r) => r.probe.enabled && r.service_enabled);
-  const probesOk = active.filter((r) => r.probe.state.state === "ok").length;
-  const degradedCount = active.filter((r) => r.probe.state.state === "degraded")
-    .length;
-  const downCount = active.filter((r) => r.probe.state.state === "down").length;
-
-  const needle = q.trim().toLowerCase();
-  const filtered = React.useMemo(() => {
-    let list = rows.filter((r) => {
-      if (stateFilter !== "all" && r.probe.state.state !== stateFilter) {
-        return false;
-      }
-      if (nodeFilter !== "all") {
-        if (nodeFilter === "__none__") {
-          // "No node binding" filter: probe's node_ids is empty
-          if (r.probe.node_ids.length > 0) return false;
-        } else {
-          if (!r.probe.node_ids.includes(nodeFilter)) return false;
-        }
-      }
-      if (!needle) return true;
-      return (
-        r.service_name.toLowerCase().includes(needle) ||
-        r.probe.name.toLowerCase().includes(needle) ||
-        targetSummary(r.probe).toLowerCase().includes(needle)
-      );
-    });
-
-    // Default: hide disabled services and probes
-    if (!showDisabled) {
-      list = list.filter((r) => r.probe.enabled && r.service_enabled);
-    }
-
-    // Disabled services and probes sink to the bottom
-    return list.sort((a, b) => {
-      const aDisabled = !a.probe.enabled || !a.service_enabled;
-      const bDisabled = !b.probe.enabled || !b.service_enabled;
-      if (aDisabled !== bDisabled) {
-        return aDisabled ? 1 : -1;
-      }
-      // Otherwise preserve original order
-      return 0;
-    });
-  }, [rows, needle, stateFilter, nodeFilter, showDisabled]);
+  const KIND_ICON: Record<string, React.ElementType> = {
+    http: Globe,
+    tcp: Network,
+    tls: ShieldCheck,
+  };
 
   return (
     <>
-      <StatCards
-        cards={[
-          {
-            key: "all",
-            label: t("services.cardAll"),
-            value: active.length,
-            hint: t("services.cardAllHint"),
-            tone: "neutral",
-            icon: Activity,
-          },
-          {
-            key: "ok",
-            label: t("services.cardHealthy"),
-            value: probesOk,
-            hint: t("services.cardHealthyHint"),
-            tone: "success",
-            icon: CheckCircle2,
-          },
-          {
-            key: "degraded",
-            label: t("state.degraded"),
-            value: degradedCount,
-            hint: t("services.cardDegradedHint"),
-            tone: degradedCount > 0 ? "warn" : "neutral",
-          },
-          {
-            key: "down",
-            label: t("state.down"),
-            value: downCount,
-            hint: t("services.cardDownHint"),
-            tone: downCount > 0 ? "danger" : "neutral",
-            icon: AlertTriangle,
-          },
-        ]}
-      />
+      <ProbesTimeline />
 
-      <ServicesTimeline />
-
-      {/* Toolbar: title on left, actions on right (spec 7.3) */}
+      {/* Toolbar */}
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <h2 className="text-lg font-semibold text-ink-900 dark:text-surface-0">
-            {t("services.title")}
+            {t("probes.title")}
           </h2>
           <p className="text-sm text-ink-500 mt-0.5">
-            {t("services.subtitle")} · {t("services.total", { n: services.length })} ·{" "}
-            {t("services.probeCount", { n: rows.length })}
+            {t("probes.total", { n: filtered.length })}
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           <SearchInput
             className="w-48 md:w-64"
-            placeholder={t("services.searchPlaceholder")}
+            placeholder={t("probes.searchPlaceholder")}
             aria-label={t("action.search")}
             value={q}
             onChange={(e) => setQ(e.target.value)}
@@ -374,9 +262,9 @@ export function Services() {
             wrapperClassName="w-32"
             value={stateFilter}
             onChange={(e) => setStateFilter(e.target.value)}
-            aria-label={t("services.filterState")}
+            aria-label={t("probes.filterState")}
           >
-            <option value="all">{t("services.stateAll")}</option>
+            <option value="all">{t("probes.stateAll")}</option>
             <option value="ok">{t("state.ok")}</option>
             <option value="degraded">{t("state.degraded")}</option>
             <option value="down">{t("state.down")}</option>
@@ -385,10 +273,10 @@ export function Services() {
             wrapperClassName="w-40"
             value={nodeFilter}
             onChange={(e) => setNodeFilter(e.target.value)}
-            aria-label={t("services.filterNode")}
+            aria-label={t("probes.filterNode")}
           >
-            <option value="all">{t("services.nodeAll")}</option>
-            <option value="__none__">{t("services.anyNode")}</option>
+            <option value="all">{t("probes.nodeAll")}</option>
+            <option value="__none__">{t("probes.anyNode")}</option>
             {nodeOptions.map((n) => (
               <option key={n.id} value={n.id}>
                 {nodeLabel(n)}
@@ -399,51 +287,44 @@ export function Services() {
             <Switch
               checked={showDisabled}
               onCheckedChange={setShowDisabled}
-              aria-label={t("services.showDisabled")}
+              aria-label={t("probes.showDisabled")}
             />
             <span className="text-sm text-ink-600 dark:text-ink-300">
-              {t("services.showDisabled")}
+              {t("probes.showDisabled")}
             </span>
           </div>
-          <Button onClick={() => setServiceDialog({ open: true })}>
+          <Button onClick={() => setProbeDialog({ open: true })}>
             <Plus className="w-4 h-4" aria-hidden="true" />
-            {t("services.newService")}
+            {t("probes.newProbe")}
           </Button>
         </div>
       </div>
 
-      {servicesQ.isLoading ? (
+      {probesQ.isLoading ? (
         <Card>
           <CardBody>
             <Skeleton className="h-24 w-full" />
           </CardBody>
         </Card>
-      ) : servicesQ.isError ? (
+      ) : probesQ.isError ? (
         <Card>
           <ErrorState
-            message={t(friendlyError(servicesQ.error))}
-            onRetry={() => void servicesQ.refetch()}
-            retrying={servicesQ.isFetching}
-          />
-        </Card>
-      ) : services.length === 0 ? (
-        <Card>
-          <EmptyState
-            title={t("services.empty")}
-            description={t("services.emptyHint")}
+            message={t(friendlyError(probesQ.error))}
+            onRetry={() => void probesQ.refetch()}
+            retrying={probesQ.isFetching}
           />
         </Card>
       ) : filtered.length === 0 ? (
         <Card>
-          {needle || stateFilter !== "all" || nodeFilter !== "all" ? (
+          {q || stateFilter !== "all" || nodeFilter !== "all" ? (
             <SearchEmptyState
-              title={t("services.searchEmpty")}
-              description={t("services.searchEmptyHint")}
+              title={t("probes.searchEmpty")}
+              description={t("probes.searchEmptyHint")}
             />
           ) : (
             <EmptyState
-              title={t("services.filterEmpty")}
-              description={t("services.filterEmptyHint")}
+              title={t("probes.empty")}
+              description={t("probes.emptyHint")}
             />
           )}
         </Card>
@@ -452,38 +333,35 @@ export function Services() {
           <Table>
             <THead>
               <tr>
-                <Th>{t("services.colProbeName")}</Th>
-                <Th className="hidden sm:table-cell">{t("services.colKind")}</Th>
-                <Th className="hidden md:table-cell">{t("services.colTarget")}</Th>
-                <Th>{t("services.colNode")}</Th>
-                <Th>{t("services.colState")}</Th>
+                <Th>{t("probes.colProbeName")}</Th>
+                <Th className="hidden sm:table-cell">{t("probes.colKind")}</Th>
+                <Th className="hidden md:table-cell">{t("probes.colTarget")}</Th>
+                <Th>{t("probes.colState")}</Th>
                 <Th align="right" className="hidden lg:table-cell">
-                  {t("services.colLatency")}
+                  {t("probes.colLatency")}
                 </Th>
                 <Th className="hidden xl:table-cell">
-                  {t("services.colLastCheck")}
+                  {t("probes.colLastCheck")}
                 </Th>
-                <Th align="right">{t("services.colActions")}</Th>
+                <Th align="right">{t("probes.colActions")}</Th>
               </tr>
             </THead>
             <TBody>
-              {filtered.map((r) => {
-                const p = r.probe;
+              {filtered.map((p) => {
                 const Icon = KIND_ICON[p.kind] ?? Activity;
                 const state = p.state.state;
-                const dimmed = !p.enabled || !r.service_enabled;
+                const dimmed = !p.enabled;
                 return (
                   <Tr key={p.id} className={cn(dimmed && "opacity-60")}>
                     <Td>
                       <div className="text-sm font-medium text-ink-900 dark:text-surface-0 truncate max-w-[220px]">
                         {p.name}
                       </div>
-                      {/* "Service" column removed: parent service is now shown as a small line
-                          under the probe name. This frees a column while keeping search-by-service-name visible. */}
-                      <div className="text-xs text-ink-400 truncate max-w-[220px] flex items-center gap-1">
-                        <span className="truncate">{r.service_name}</span>
-                        <DotBadge tone="neutral">{t("services.enabled")}</DotBadge>
-                      </div>
+                      {p.description && (
+                        <div className="text-xs text-ink-400 truncate max-w-[220px]">
+                          {p.description}
+                        </div>
+                      )}
                     </Td>
                     <Td className="hidden sm:table-cell">
                       <span className="inline-flex items-center gap-1.5 text-xs text-ink-500">
@@ -497,48 +375,33 @@ export function Services() {
                       </span>
                     </Td>
                     <Td>
-                      <div
-                        className="text-xs text-ink-500 truncate max-w-[180px]"
-                        title={
-                          p.node_labels.length
-                            ? p.node_labels.join(", ")
-                            : t("services.anyNode")
-                        }
-                      >
-                        {p.node_labels.length
-                          ? p.node_labels.join(", ")
-                          : t("services.anyNode")}
-                      </div>
-                    </Td>
-                    <Td>
-                      <DotBadge tone={stateTone(state)} pulse={state === "ok"}>
-                        {t(`state.${stateKey(state)}`)}
+                      <DotBadge tone={state === "ok" ? "success" : state === "degraded" ? "warn" : "danger"}>
+                        {t(`state.${state}`)}
                       </DotBadge>
-                      {state !== "ok" && p.state.last_error && (
-                        <div className="mt-1 text-xs text-ink-400 max-w-[220px] truncate">
+                      {p.state.last_error && (
+                        <div
+                          className="mt-1 text-xs text-ink-400 truncate max-w-[200px]"
+                          title={p.state.last_error}
+                        >
                           {p.state.last_error}
                         </div>
                       )}
                     </Td>
                     <Td align="right" className="hidden lg:table-cell">
-                      <span className="text-sm tabular-nums text-ink-900 dark:text-surface-0">
-                        {formatLatency(p.state.last_latency_ms)}
+                      <span className="text-sm text-ink-500">
+                        {p.state.last_latency_ms != null
+                          ? `${p.state.last_latency_ms}ms`
+                          : "—"}
                       </span>
                     </Td>
                     <Td className="hidden xl:table-cell">
                       <span className="text-xs text-ink-500">
-                        {p.state.last_check_at_unix_nano > 0
-                          ? relativeTime(
-                              p.state.last_check_at_unix_nano / 1e6,
-                              t,
-                            )
-                          : t("services.never")}
+                        {p.state.last_check_at_unix_nano
+                          ? new Date(
+                              p.state.last_check_at_unix_nano / 1_000_000,
+                            ).toLocaleTimeString()
+                          : t("probes.never")}
                       </span>
-                      {p.state.last_check_at_unix_nano > 0 && (
-                        <div className="text-xs text-ink-400">
-                          {formatTime(p.state.last_check_at_unix_nano / 1e6, tz)}
-                        </div>
-                      )}
                     </Td>
                     <Td align="right">
                       <div className="flex items-center justify-end gap-1">
@@ -547,11 +410,7 @@ export function Services() {
                           variant="ghost"
                           aria-label={t("action.edit")}
                           onClick={() =>
-                            setProbeDialog({
-                              open: true,
-                              serviceId: r.service_id,
-                              probe: p,
-                            })
+                            setProbeDialog({ open: true, probe: p })
                           }
                         >
                           <Pencil className="w-4 h-4" aria-hidden="true" />
@@ -587,22 +446,8 @@ export function Services() {
         </Card>
       )}
 
-      {/* Service-level actions entry: header had no room, so it was moved above the list —
-          but after flattening there's no visible service hierarchy, and the "service" column is gone,
-          so this level only has the "new service" entry left. Rename / delete service has no UI entry
-          yet (ServiceDialog and removeEntity both support it; the trigger is missing).
-          To keep this change focused, we're not adding them now; can be added later if needed. */}
-
-      {serviceDialog.open && (
-        <ServiceDialog
-          service={serviceDialog.service}
-          onClose={() => setServiceDialog({ open: false })}
-        />
-      )}
-
-      {probeDialog.open && probeDialog.serviceId && (
+      {probeDialog.open && (
         <ProbeDialog
-          serviceId={probeDialog.serviceId}
           probe={probeDialog.probe}
           onClose={() => setProbeDialog({ open: false })}
         />
@@ -611,39 +456,23 @@ export function Services() {
       <ConfirmDialog
         open={!!pendingDelete}
         danger
-        title={
-          pendingDelete?.kind === "service"
-            ? t("services.deleteServiceTitle")
-            : t("services.deleteProbeTitle")
-        }
-        message={
-          pendingDelete?.kind === "service"
-            ? t("services.deleteServiceMessage", { name: pendingDelete?.name })
-            : t("services.deleteProbeMessage", { name: pendingDelete?.name })
-        }
-        confirmLabel={
-          pendingDelete?.kind === "service"
-            ? t("services.deleteServiceConfirm")
-            : t("services.deleteProbeConfirm")
-        }
+        title={t("probes.deleteProbeTitle")}
+        message={t("probes.deleteProbeMessage", {
+          name: pendingDelete?.name,
+        })}
+        confirmLabel={t("probes.deleteProbeConfirm")}
         cancelLabel={t("action.cancel")}
         loading={removeEntity.isPending}
         onCancel={() => setPendingDelete(null)}
         onConfirm={() =>
           pendingDelete &&
-          removeEntity.mutate({ kind: pendingDelete.kind, id: pendingDelete.id })
+          removeEntity.mutate({
+            id: pendingDelete.id,
+          })
         }
       />
     </>
   );
-}
-
-/** Flat table row: the probe itself + service context (id/name/enabled) */
-interface FlatRow {
-  probe: ProbeView;
-  service_id: string;
-  service_name: string;
-  service_enabled: boolean;
 }
 
 function Field({
@@ -666,89 +495,11 @@ function Field({
   );
 }
 
-// ---------- Service form ----------
-// tier field is no longer exposed in the frontend: the backend keeps the column and default
-// (tier=2); on create the backend fills it in. Old data with tier=1/2/3 won't be lost,
-// just has no UI to change it.
-
-function ServiceDialog({
-  service,
-  onClose,
-}: {
-  service?: ServiceView;
-  onClose: () => void;
-}) {
-  const { t } = useTranslation();
-  const qc = useQueryClient();
-  const toast = useToast();
-  const [name, setName] = React.useState(service?.name ?? "");
-  const [description, setDescription] = React.useState(
-    service?.description ?? "",
-  );
-
-  const save = useMutation({
-    mutationFn: () =>
-      service
-        ? servicesApi.update(service.id, { name, description })
-        : servicesApi.create({ name, description }),
-    onSuccess: () => {
-      toast.push("success", service ? t("services.updated") : t("services.created"));
-      void qc.invalidateQueries({ queryKey: ["services"] });
-      void qc.invalidateQueries({ queryKey: ["todo"] });
-      onClose();
-    },
-    onError: (e) => toast.push("error", t(friendlyError(e))),
-  });
-
-  return (
-    <Dialog
-      open
-      bodyClassName="space-y-4"
-      title={
-        service ? t("services.dialogEditService") : t("services.dialogCreateService")
-      }
-      onClose={onClose}
-      footer={
-        <>
-          <Button variant="secondary" onClick={onClose}>
-            {t("action.cancel")}
-          </Button>
-          <Button
-            loading={save.isPending}
-            disabled={!name.trim()}
-            onClick={() => save.mutate()}
-          >
-            {t("action.save")}
-          </Button>
-        </>
-      }
-    >
-      <Field label={t("services.formName")}>
-        <Input
-          value={name}
-          placeholder={t("services.formNamePlaceholder")}
-          onChange={(e) => setName(e.target.value)}
-        />
-      </Field>
-      <Field label={t("services.description")}>
-        <Input
-          value={description}
-          placeholder={t("services.formDescriptionPlaceholder")}
-          onChange={(e) => setDescription(e.target.value)}
-        />
-      </Field>
-    </Dialog>
-  );
-}
-
 // ---------- Probe form ----------
-
 function ProbeDialog({
-  serviceId,
   probe,
   onClose,
 }: {
-  serviceId: string;
   probe?: ProbeView;
   onClose: () => void;
 }) {
@@ -766,6 +517,7 @@ function ProbeDialog({
   );
 
   const [name, setName] = React.useState(probe?.name ?? "");
+  const [description, setDescription] = React.useState(probe?.description ?? "");
   const [kind, setKind] = React.useState(probe?.kind ?? "http");
   const [url, setUrl] = React.useState(target.url ?? "");
   const [method, setMethod] = React.useState(target.method ?? "GET");
@@ -779,9 +531,6 @@ function ProbeDialog({
     (expect.body_contains ?? []).join(", "),
   );
   const [banner, setBanner] = React.useState(expect.banner_contains ?? "");
-  const [maxLatency, setMaxLatency] = React.useState(
-    expect.max_latency_ms ? String(expect.max_latency_ms) : "",
-  );
   const [minDays, setMinDays] = React.useState(String(expect.min_days_valid ?? 30));
   const [tlsVerify, setTlsVerify] = React.useState(
     kind === "tls"
@@ -798,15 +547,13 @@ function ProbeDialog({
     String(probe?.failure_threshold ?? 3),
   );
   const [nodeIds, setNodeIds] = React.useState<string[]>(probe?.node_ids ?? []);
-  /** One-shot test result; invalidate when any target-affecting field changes (to avoid showing stale results) */
   const [testResult, setTestResult] = React.useState<ProbeTestResult | null>(null);
 
   const nodesQ = useQuery({ queryKey: ["nodes"], queryFn: api.nodes });
-  /** Sort by alias (fallback to hostname): checkbox list order must follow "alias first" */
   const nodeOptions = React.useMemo(
     () =>
       [...(nodesQ.data ?? [])].sort((a, b) =>
-        nodeLabel(a).localeCompare(nodeLabel(b)),
+        (a.alias || a.hostname).localeCompare(b.alias || b.hostname),
       ),
     [nodesQ.data],
   );
@@ -848,11 +595,10 @@ function ProbeDialog({
       expectJson.min_days_valid = Number(minDays);
       expectJson.verify = tlsVerify;
     }
-    if (maxLatency.trim()) expectJson.max_latency_ms = Number(maxLatency);
 
     return {
-      service_id: serviceId,
       name: name.trim(),
+      description: description.trim(),
       kind,
       target_json: JSON.stringify(targetJson),
       expect_json: JSON.stringify(expectJson),
@@ -868,8 +614,9 @@ function ProbeDialog({
     mutationFn: () => {
       const payload = buildPayload();
       return probe
-        ? servicesApi.updateProbe(probe.id, {
+        ? probesApi.update(probe.id, {
             name: payload.name,
+            description: payload.description,
             kind: payload.kind,
             target_json: payload.target_json,
             expect_json: payload.expect_json,
@@ -878,28 +625,24 @@ function ProbeDialog({
             failure_threshold: payload.failure_threshold,
             node_ids: payload.node_ids,
           })
-        : servicesApi.createProbe(payload);
+        : probesApi.create(payload);
     },
     onSuccess: () => {
       toast.push(
         "success",
-        probe ? t("services.updated") : t("services.probeCreated"),
+        probe ? t("probes.updated") : t("probes.probeCreated"),
       );
-      void qc.invalidateQueries({ queryKey: ["services"] });
+      void qc.invalidateQueries({ queryKey: ["probes"] });
       void qc.invalidateQueries({ queryKey: ["todo"] });
       onClose();
     },
     onError: (e) => toast.push("error", t(friendlyError(e))),
   });
 
-  /**
-   * One-shot test: sends only the current form's target / expect, not persisted. Executed once
-   * by the monitor side to confirm "is the address correct / does the expected config pass" before saving.
-   */
   const testProbe = useMutation({
     mutationFn: () => {
       const p = buildPayload();
-      return servicesApi.test({
+      return probesApi.test({
         kind: p.kind,
         target_json: p.target_json,
         expect_json: p.expect_json,
@@ -913,7 +656,6 @@ function ProbeDialog({
     },
   });
 
-  // When target / expect fields change, the previous test result is no longer valid
   React.useEffect(() => {
     setTestResult(null);
   }, [
@@ -925,7 +667,6 @@ function ProbeDialog({
     statusCodes,
     bodyContains,
     banner,
-    maxLatency,
     minDays,
     tlsVerify,
     timeoutMs,
@@ -939,346 +680,230 @@ function ProbeDialog({
     <Dialog
       open
       bodyClassName="space-y-4"
-      title={probe ? t("services.dialogEditProbe") : t("services.dialogCreateProbe")}
+      title={probe ? t("probes.dialogEditProbe") : t("probes.dialogCreateProbe")}
       onClose={onClose}
       footer={
         <>
-          {/* Test button on the left: it's a "verify before save" helper action, shouldn't compete with the primary button for visual position */}
           <Button
             variant="secondary"
             className="mr-auto"
-            loading={testProbe.isPending}
-            disabled={!targetValid}
             onClick={() => testProbe.mutate()}
+            disabled={!targetValid || testProbe.isPending}
           >
-            {testProbe.isPending
-              ? t("services.testing")
-              : t("services.testProbe")}
+            {testProbe.isPending ? t("probes.testing") : t("probes.testProbe")}
           </Button>
-          <Button variant="secondary" onClick={onClose}>
+          <Button variant="ghost" onClick={onClose}>
             {t("action.cancel")}
           </Button>
           <Button
-            loading={save.isPending}
-            disabled={!targetValid}
             onClick={() => save.mutate()}
+            disabled={!targetValid || save.isPending}
           >
-            {t("action.save")}
+            {save.isPending ? t("state.loading") : t("action.save")}
           </Button>
         </>
       }
     >
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <Field label={t("services.formProbeName")}>
-          <Input
-            value={name}
-            placeholder={t("services.formProbeNamePlaceholder")}
-            onChange={(e) => setName(e.target.value)}
-          />
-        </Field>
-        <Field label={t("services.formKind")}>
-          <Select
-            value={kind}
-            onChange={(e) => setKind(e.target.value)}
-          >
-            <option value="http">HTTP / HTTPS</option>
-            <option value="tcp">TCP</option>
-            <option value="tls">TLS</option>
-          </Select>
-        </Field>
-      </div>
+      <Field label={t("probes.formName")} hint={t("probes.formNamePlaceholder")}>
+        <Input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder={t("probes.formNamePlaceholder")}
+        />
+      </Field>
 
-      {kind === "http" ? (
+      <Field label={t("probes.description")} hint={t("probes.formDescriptionPlaceholder")}>
+        <Input
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          placeholder={t("probes.formDescriptionPlaceholder")}
+        />
+      </Field>
+
+      <Field label={t("probes.formKind")}>
+        <Select value={kind} onChange={(e) => setKind(e.target.value)}>
+          <option value="http">HTTP</option>
+          <option value="tcp">TCP</option>
+          <option value="tls">TLS</option>
+        </Select>
+      </Field>
+
+      {kind === "http" && (
         <>
-          <Field label={t("services.formUrl")}>
+          <Field label={t("probes.formUrl")}>
             <Input
               value={url}
-              placeholder="https://example.com/healthz"
               onChange={(e) => setUrl(e.target.value)}
+              placeholder="https://example.com/health"
             />
           </Field>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <Field label={t("services.formMethod")}>
-              <Select
-                value={method}
-                onChange={(e) => setMethod(e.target.value)}
-              >
-                {["GET", "HEAD", "POST"].map((v) => (
-                  <option key={v} value={v}>
-                    {v}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-            <Field
-              label={t("services.formExpectStatus")}
-              hint={t("services.formExpectStatusHint")}
-            >
+          <Field label={t("probes.formMethod")}>
+            <Select value={method} onChange={(e) => setMethod(e.target.value)}>
+              <option value="GET">GET</option>
+              <option value="POST">POST</option>
+              <option value="PUT">PUT</option>
+              <option value="DELETE">DELETE</option>
+            </Select>
+          </Field>
+          <Field label={t("probes.formExpectStatus")} hint={t("probes.formExpectStatusHint")}>
+            <Input
+              value={statusCodes}
+              onChange={(e) => setStatusCodes(e.target.value)}
+              placeholder="200, 201"
+            />
+          </Field>
+          <Field label={t("probes.formExpectBody")} hint={t("probes.formExpectBodyHint")}>
+            <Input
+              value={bodyContains}
+              onChange={(e) => setBodyContains(e.target.value)}
+              placeholder='"ok", "healthy"'
+            />
+          </Field>
+          <Field label={t("probes.formTlsVerify")}>
+            <Switch checked={tlsVerify} onCheckedChange={setTlsVerify} aria-label={t("probes.formTlsVerify")} />
+          </Field>
+        </>
+      )}
+
+      {kind === "tcp" && (
+        <>
+          <div className="grid grid-cols-2 gap-4">
+            <Field label={t("probes.formHost")}>
               <Input
-                value={statusCodes}
-                placeholder="200, 204"
-                onChange={(e) => setStatusCodes(e.target.value)}
+                value={host}
+                onChange={(e) => setHost(e.target.value)}
+                placeholder="example.com"
               />
             </Field>
-            <Field
-              label={t("services.formExpectBody")}
-              hint={t("services.formExpectBodyHint")}
-            >
+            <Field label={t("probes.formPort")}>
               <Input
-                value={bodyContains}
-                placeholder='"status":"ok"'
-                onChange={(e) => setBodyContains(e.target.value)}
+                type="number"
+                value={port}
+                onChange={(e) => setPort(e.target.value)}
+                placeholder="443"
               />
             </Field>
           </div>
+          <Field label={t("probes.formBanner")} hint={t("probes.formExpectBodyHint")}>
+            <Input
+              value={banner}
+              onChange={(e) => setBanner(e.target.value)}
+              placeholder={t("probes.formBanner")}
+            />
+          </Field>
         </>
-      ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <Field label={t("services.formHost")}>
-            <Input
-              value={host}
-              placeholder="127.0.0.1"
-              onChange={(e) => setHost(e.target.value)}
-            />
-          </Field>
-          <Field label={t("services.formPort")}>
-            <Input
-              value={port}
-              inputMode="numeric"
-              placeholder={kind === "tls" ? "443" : "8080"}
-              onChange={(e) => setPort(e.target.value)}
-            />
-          </Field>
-          {kind === "tls" ? (
-            <Field label={t("services.formMinDays")}>
-              <Input
-                value={minDays}
-                inputMode="numeric"
-                onChange={(e) => setMinDays(e.target.value)}
-              />
-            </Field>
-          ) : (
-            <Field label={t("services.formBanner")}>
-              <Input
-                value={banner}
-                placeholder="PostgreSQL"
-                onChange={(e) => setBanner(e.target.value)}
-              />
-            </Field>
-          )}
-        </div>
       )}
 
       {kind === "tls" && (
-        <Field label={t("services.formSni")}>
-          <Input
-            value={sni}
-            placeholder={host}
-            onChange={(e) => setSni(e.target.value)}
-          />
-        </Field>
+        <>
+          <div className="grid grid-cols-2 gap-4">
+            <Field label={t("probes.formHost")}>
+              <Input
+                value={host}
+                onChange={(e) => setHost(e.target.value)}
+                placeholder="example.com"
+              />
+            </Field>
+            <Field label={t("probes.formPort")}>
+              <Input
+                type="number"
+                value={port}
+                onChange={(e) => setPort(e.target.value)}
+                placeholder="443"
+              />
+            </Field>
+          </div>
+          <Field label={t("probes.formSni")}>
+            <Input
+              value={sni}
+              onChange={(e) => setSni(e.target.value)}
+              placeholder={t("probes.formSni")}
+            />
+          </Field>
+          <Field label={t("probes.formMinDays")}>
+            <Input
+              type="number"
+              value={minDays}
+              onChange={(e) => setMinDays(e.target.value)}
+            />
+          </Field>
+          <Field label={t("probes.formTlsVerify")}>
+            <Switch checked={tlsVerify} onCheckedChange={setTlsVerify} aria-label={t("probes.formTlsVerify")} />
+          </Field>
+        </>
       )}
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <Field label={t("services.formInterval")}>
+      <div className="grid grid-cols-3 gap-4">
+        <Field label={t("probes.formInterval")}>
           <Input
+            type="number"
             value={interval}
-            inputMode="numeric"
             onChange={(e) => setInterval(e.target.value)}
           />
         </Field>
-        <Field label={t("services.formTimeout")}>
+        <Field label={t("probes.formTimeout")}>
           <Input
+            type="number"
             value={timeoutMs}
-            inputMode="numeric"
             onChange={(e) => setTimeoutMs(e.target.value)}
           />
         </Field>
-        <Field label={t("services.formThreshold")}>
+        <Field label={t("probes.formThreshold")}>
           <Input
+            type="number"
             value={threshold}
-            inputMode="numeric"
             onChange={(e) => setThreshold(e.target.value)}
           />
         </Field>
       </div>
 
-      <Field label={t("services.formMaxLatency")}>
-        <Input
-          value={maxLatency}
-          inputMode="numeric"
-          placeholder="500"
-          onChange={(e) => setMaxLatency(e.target.value)}
-        />
+      <Field label={t("probes.formNode")}>
+        {nodesQ.isLoading ? (
+          <p className="text-sm text-ink-400">{t("probes.formNodeLoading")}</p>
+        ) : nodeOptions.length === 0 ? (
+          <p className="text-sm text-ink-400">{t("probes.formNodeNone")}</p>
+        ) : (
+          <div className="space-y-1">
+            <p className="text-xs text-ink-400">{t("probes.formNodeAny")}</p>
+            {nodeOptions.map((n) => (
+              <label key={n.id} className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={nodeIds.includes(n.id)}
+                  onChange={() => toggleNode(n.id)}
+                />
+                <span className="text-sm">{n.alias || n.hostname}</span>
+              </label>
+            ))}
+          </div>
+        )}
       </Field>
 
-      {/*
-        Execution nodes: multi-select, can also select none.
-        None selected = no node binding (runs on every online node) — this is the default mode;
-        Selecting nodes means "run only on these nodes", for multi-host comparison or probing
-        from a specific internal machine.
-
-        Not wrapped in Field: it renders as <label>, wrapping the checkbox list inside causes
-        "clicking the label text" to select the first node (the inner label is also read twice).
-      */}
-      <div className="block">
-        <span className="text-sm font-medium text-ink-700 dark:text-surface-4">
-          {t("services.formNode")}
-        </span>
-        <div className="mt-1 rounded-lg border border-surface-3 dark:border-ink-700 max-h-44 overflow-y-auto scrollbar-thin divide-y divide-surface-2 dark:divide-ink-700">
-          {nodesQ.isLoading ? (
-            <p className="px-3 py-2 text-sm text-ink-400">
-              {t("services.formNodeLoading")}
-            </p>
-          ) : nodeOptions.length === 0 ? (
-            <p className="px-3 py-2 text-sm text-ink-400">
-              {t("services.formNodeNone")}
-            </p>
-          ) : (
-            nodeOptions.map((n) => {
-              const label = nodeLabel(n);
-              return (
-                <label
-                  key={n.id}
-                  className="flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-surface-1 dark:hover:bg-ink-800"
-                >
-                  <input
-                    type="checkbox"
-                    checked={nodeIds.includes(n.id)}
-                    onChange={() => toggleNode(n.id)}
-                    className="w-4 h-4 rounded border-surface-3"
-                  />
-                  <span className="truncate text-ink-700 dark:text-surface-4">
-                    {label}
-                  </span>
-                  {label !== n.hostname && (
-                    <span className="truncate text-xs text-ink-400">
-                      {n.hostname}
-                    </span>
-                  )}
-                </label>
-              );
-            })
-          )}
-        </div>
-        <p className="mt-1 text-xs text-ink-400">
-          {nodeIds.length === 0
-            ? t("services.formNodeAny")
-            : t("services.formNodeBound", { n: nodeIds.length })}
-        </p>
-      </div>
-
-      {/* Not wrapped in Field: avoids outer label and inner checkbox label being read twice */}
-      <div className="block">
-        <span className="text-sm font-medium text-ink-700 dark:text-surface-4">
-          {t("services.formTlsVerify")}
-        </span>
-        <label className="mt-1 flex items-center gap-2 h-9 text-sm text-ink-700 dark:text-surface-4">
-          <input
-            type="checkbox"
-            checked={tlsVerify}
-            onChange={(e) => setTlsVerify(e.target.checked)}
-            className="w-4 h-4 rounded border-surface-3"
-          />
-          {t("services.formTlsVerify")}
-        </label>
-      </div>
-
-      {/* Test result: reason comes from the backend, wording is picked here to work in both Chinese and English */}
       {testResult && (
         <div
           className={cn(
-            "rounded-lg border px-3 py-2",
+            "p-3 rounded text-sm",
             testResult.state === "ok"
-              ? "border-emerald-200 dark:border-emerald-700/40"
+              ? "bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-400"
               : testResult.state === "degraded"
-                ? "border-amber-200 dark:border-amber-700/40"
-                : "border-rose-200 dark:border-rose-700/40",
+                ? "bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-400"
+                : "bg-rose-50 dark:bg-rose-900/20 text-rose-700 dark:text-rose-400",
           )}
         >
-          <div className="flex flex-wrap items-center gap-2">
-            <DotBadge
-              tone={
-                testResult.state === "ok"
-                  ? "success"
-                  : testResult.state === "degraded"
-                    ? "warn"
-                    : "danger"
-              }
-            >
-              {t(
-                testResult.state === "ok"
-                  ? "services.testPassed"
-                  : testResult.state === "degraded"
-                    ? "services.testDegraded"
-                    : "services.testFailed",
-              )}
-            </DotBadge>
-            {testResult.latency_ms !== null && (
-              <span className="text-xs text-ink-400 tabular-nums">
-                {formatLatency(testResult.latency_ms)}
-              </span>
-            )}
-            {testResult.status_code !== null && (
-              <span className="text-xs text-ink-400 tabular-nums">
-                HTTP {testResult.status_code}
-              </span>
-            )}
-          </div>
-          <p className="mt-1 text-sm text-ink-700 dark:text-surface-4 break-all">
-            {testReasonText(testResult, t)}
+          <p className="font-medium">
+            {testResult.state === "ok"
+              ? t("probes.testPassed")
+              : testResult.state === "degraded"
+                ? t("probes.testDegraded")
+                : t("probes.testFailed")}
           </p>
+          {testResult.latency_ms != null && (
+            <p className="text-xs mt-1">
+              Latency: {testResult.latency_ms}ms
+            </p>
+          )}
         </div>
       )}
-      <p className="text-xs text-ink-400">{t("services.testHint")}</p>
     </Dialog>
   );
-}
-
-/** Convert backend reason/args into human text; unknown reason codes are passed through for diagnosis */
-function testReasonText(r: ProbeTestResult, t: TFunction): string {
-  const arg = (k: string) => (r.args?.[k] == null ? "" : String(r.args[k]));
-  const expected = Array.isArray(r.args?.expected)
-    ? (r.args.expected as unknown[]).join(", ")
-    : "";
-  switch (r.reason) {
-    case "ok":
-      return t("services.testReasonOk");
-    case "timeout":
-      return t("services.testReasonTimeout", { ms: arg("ms") });
-    case "connect":
-      return t("services.testReasonConnect", {
-        target: arg("target"),
-        detail: arg("detail"),
-      });
-    case "bad_url":
-      return t("services.testReasonBadUrl");
-    case "status":
-      return t("services.testReasonStatus", {
-        got: r.status_code ?? arg("got"),
-        expected,
-      });
-    case "body":
-      return t("services.testReasonBody", { needle: arg("needle") });
-    case "latency":
-      return t("services.testReasonLatency", {
-        ms: arg("ms"),
-        threshold: arg("threshold"),
-      });
-    case "banner":
-      return t("services.testReasonBanner", { needle: arg("needle") });
-    case "tls":
-      return t("services.testReasonTls", { detail: arg("detail") });
-    case "cert_expired":
-      return t("services.testReasonCertExpired", { days: arg("days") });
-    case "cert_days":
-      return t("services.testReasonCertDays", {
-        days: arg("days"),
-        min: arg("min"),
-      });
-    case "unsupported":
-      return t("services.testReasonUnsupported", { kind: arg("kind") });
-    default:
-      return t("services.testReasonUnknown", { reason: r.reason });
-  }
 }
