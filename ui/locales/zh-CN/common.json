@@ -982,10 +982,13 @@
     "subtitle": "控制数据保留时长",
     "rawTitle": "原始遥测",
     "rawDays": "{{n}} 天",
+    "rawHint": "10秒精度，超期自动删除",
     "hourlyTitle": "小时聚合",
     "hourlyDays": "{{n}} 天",
+    "hourlyHint": "1小时精度，超期自动删除",
     "alertTitle": "已解决告警",
     "alertDays": "{{n}} 天",
-    "alertDaysHint": "早于此时间的已解决告警将自动清理"
+    "alertDaysHint": "早于此时间的已解决告警将自动清理",
+    "daysUnit": "天"
   }
 }

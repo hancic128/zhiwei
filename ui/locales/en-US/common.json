@@ -983,10 +983,13 @@
     "subtitle": "Control how long data is kept",
     "rawTitle": "Raw telemetry",
     "rawDays": "{{n}} days",
+    "rawHint": "10-second resolution, auto-deleted after this period",
     "hourlyTitle": "Hourly aggregates",
     "hourlyDays": "{{n}} days",
+    "hourlyHint": "1-hour resolution, auto-deleted after this period",
     "alertTitle": "Resolved alerts",
     "alertDays": "{{n}} days",
-    "alertDaysHint": "Resolved alerts older than this are automatically purged"
+    "alertDaysHint": "Resolved alerts older than this are automatically purged",
+    "daysUnit": "days"
   }
 }

@@ -74,7 +74,8 @@ function RetentionSection() {
   const toast = useToast();
   const q = useQuery({ queryKey: ["retention"], queryFn: retentionApi.get });
   const update = useMutation({
-    mutationFn: (alertDays: number) => retentionApi.update({ alert_retention_days: alertDays }),
+    mutationFn: (params: { raw_days?: number; hourly_days?: number; alert_retention_days?: number }) =>
+      retentionApi.update(params),
     onSuccess: () => {
       toast.push("success", t("settings.retentionSaved"));
       void q.refetch();
@@ -82,19 +83,29 @@ function RetentionSection() {
     onError: (e) => toast.push("error", t(friendlyError(e))),
   });
 
-  const [editDays, setEditDays] = React.useState<number | null>(null);
+  const [editRaw, setEditRaw] = React.useState<number | null>(null);
+  const [editHourly, setEditHourly] = React.useState<number | null>(null);
+  const [editAlert, setEditAlert] = React.useState<number | null>(null);
 
   React.useEffect(() => {
     if (q.data) {
-      setEditDays(q.data.alert_retention_days);
+      setEditRaw(q.data.raw_days);
+      setEditHourly(q.data.hourly_days);
+      setEditAlert(q.data.alert_retention_days);
     }
   }, [q.data]);
 
   const handleSave = () => {
-    if (editDays !== null) {
-      update.mutate(editDays);
-    }
+    update.mutate({
+      raw_days: editRaw ?? undefined,
+      hourly_days: editHourly ?? undefined,
+      alert_retention_days: editAlert ?? undefined,
+    });
   };
+
+  const isDirty = editRaw !== q.data?.raw_days ||
+    editHourly !== q.data?.hourly_days ||
+    editAlert !== q.data?.alert_retention_days;
 
   return (
     <Card>
@@ -118,29 +129,51 @@ function RetentionSection() {
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
               <div>
                 <p className="text-xs text-ink-400">{t("retention.rawTitle")}</p>
-                <p className="font-medium">{t("retention.rawDays", { n: q.data.raw_days })}</p>
-              </div>
-              <div>
-                <p className="text-xs text-ink-400">{t("retention.hourlyTitle")}</p>
-                <p className="font-medium">{t("retention.hourlyDays", { n: q.data.hourly_days })}</p>
-              </div>
-              <div>
-                <p className="text-xs text-ink-400">{t("retention.alertTitle")}</p>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 mt-1">
                   <input
                     type="number"
                     min="1"
                     max="3650"
-                    value={editDays ?? ""}
-                    onChange={(e) => setEditDays(parseInt(e.target.value) || null)}
+                    value={editRaw ?? ""}
+                    onChange={(e) => setEditRaw(parseInt(e.target.value) || null)}
                     className="w-20 px-2 py-1 text-sm border rounded bg-surface-1 dark:bg-ink-700 border-surface-3 dark:border-ink-600"
                   />
-                  <span className="text-ink-500">{t("retention.daysUnit", { n: editDays ?? 0 })}</span>
+                  <span className="text-ink-500">{t("retention.daysUnit")}</span>
+                </div>
+                <p className="text-xs text-ink-400 mt-1">{t("retention.rawHint")}</p>
+              </div>
+              <div>
+                <p className="text-xs text-ink-400">{t("retention.hourlyTitle")}</p>
+                <div className="flex items-center gap-2 mt-1">
+                  <input
+                    type="number"
+                    min="1"
+                    max="3650"
+                    value={editHourly ?? ""}
+                    onChange={(e) => setEditHourly(parseInt(e.target.value) || null)}
+                    className="w-20 px-2 py-1 text-sm border rounded bg-surface-1 dark:bg-ink-700 border-surface-3 dark:border-ink-600"
+                  />
+                  <span className="text-ink-500">{t("retention.daysUnit")}</span>
+                </div>
+                <p className="text-xs text-ink-400 mt-1">{t("retention.hourlyHint")}</p>
+              </div>
+              <div>
+                <p className="text-xs text-ink-400">{t("retention.alertTitle")}</p>
+                <div className="flex items-center gap-2 mt-1">
+                  <input
+                    type="number"
+                    min="1"
+                    max="3650"
+                    value={editAlert ?? ""}
+                    onChange={(e) => setEditAlert(parseInt(e.target.value) || null)}
+                    className="w-20 px-2 py-1 text-sm border rounded bg-surface-1 dark:bg-ink-700 border-surface-3 dark:border-ink-600"
+                  />
+                  <span className="text-ink-500">{t("retention.daysUnit")}</span>
                 </div>
                 <p className="text-xs text-ink-400 mt-1">{t("retention.alertDaysHint")}</p>
               </div>
             </div>
-            {editDays !== q.data.alert_retention_days && (
+            {isDirty && (
               <div className="flex justify-end">
                 <Button
                   onClick={handleSave}

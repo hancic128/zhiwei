@@ -161,12 +161,19 @@ pub async fn retention_handler(State(state): State<AppState>, headers: HeaderMap
 }
 
 /// `PATCH /v1/retention` — update retention settings.
+///
+/// Currently only `alert_retention_days` is writable.
+/// `raw_days` and `hourly_days` define the data granularity window (10-second raw vs hourly aggregates)
+/// and cannot be changed without a code update — they affect storage layout.
 #[derive(serde::Deserialize)]
 pub struct RetentionPatch {
+    pub raw_days: Option<i64>,
+    pub hourly_days: Option<i64>,
     pub alert_retention_days: Option<i64>,
 }
 
-/// `PATCH /v1/retention` — update retention settings (currently only `alert_retention_days`).
+/// `PATCH /v1/retention` — update retention settings.
+/// Only `alert_retention_days` takes effect; `raw_days` and `hourly_days` are accepted but ignored.
 pub async fn patch_retention_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -180,6 +187,9 @@ pub async fn patch_retention_handler(
             "authentication required (Bearer admin token)",
         );
     }
+
+    // raw_days and hourly_days are informational only in this implementation
+    // They define the data granularity window, not the retention duration
 
     if let Some(days) = patch.alert_retention_days {
         let days = days.clamp(1, 3650); // 1 day to 10 years
