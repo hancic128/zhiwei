@@ -113,7 +113,7 @@ export function NodeProbes({ nodeId, refreshMs }: { nodeId: string; refreshMs: n
                       >
                         {p.state.last_latency_ms === null
                           ? "—"
-                          : `${p.state.last_latency_ms < 10 ? p.state.last_latency_ms.toFixed(1) : Math.round(p.state.last_latency_ms)} ms`}
+                          : `${p.state.last_latency_ms.toFixed(1)} ms`}
                       </span>
                     </td>
                     <td className="hidden lg:table-cell px-4 py-3 text-right">

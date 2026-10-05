@@ -336,11 +336,12 @@ export function Services() {
                 <Th>{t("probes.colProbeName")}</Th>
                 <Th className="hidden sm:table-cell">{t("probes.colKind")}</Th>
                 <Th className="hidden md:table-cell">{t("probes.colTarget")}</Th>
+                <Th className="hidden lg:table-cell">{t("probes.colNode")}</Th>
                 <Th>{t("probes.colState")}</Th>
-                <Th align="right" className="hidden lg:table-cell">
+                <Th align="right" className="hidden xl:table-cell">
                   {t("probes.colLatency")}
                 </Th>
-                <Th className="hidden xl:table-cell">
+                <Th className="hidden 2xl:table-cell">
                   {t("probes.colLastCheck")}
                 </Th>
                 <Th align="right">{t("probes.colActions")}</Th>
@@ -374,6 +375,11 @@ export function Services() {
                         {targetSummary(p)}
                       </span>
                     </Td>
+                    <Td className="hidden lg:table-cell">
+                      <span className="text-xs text-ink-500 truncate max-w-[120px]" title={p.node_labels.join(", ") || "—"}>
+                        {p.node_labels.join(", ") || "—"}
+                      </span>
+                    </Td>
                     <Td>
                       <DotBadge tone={state === "ok" ? "success" : state === "degraded" ? "warn" : "danger"}>
                         {t(`state.${state}`)}
@@ -387,14 +393,14 @@ export function Services() {
                         </div>
                       )}
                     </Td>
-                    <Td align="right" className="hidden lg:table-cell">
+                    <Td align="right" className="hidden xl:table-cell">
                       <span className="text-sm text-ink-500">
                         {p.state.last_latency_ms != null
-                          ? `${p.state.last_latency_ms}ms`
+                          ? `${p.state.last_latency_ms.toFixed(1)} ms`
                           : "—"}
                       </span>
                     </Td>
-                    <Td className="hidden xl:table-cell">
+                    <Td className="hidden 2xl:table-cell">
                       <span className="text-xs text-ink-500">
                         {p.state.last_check_at_unix_nano
                           ? new Date(
@@ -899,7 +905,7 @@ function ProbeDialog({
           </p>
           {testResult.latency_ms != null && (
             <p className="text-xs mt-1">
-              Latency: {testResult.latency_ms}ms
+              Latency: {testResult.latency_ms.toFixed(1)} ms
             </p>
           )}
         </div>

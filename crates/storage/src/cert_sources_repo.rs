@@ -217,15 +217,53 @@ impl CertSourcesRepo {
     }
 
     /// Delete a source by id. Returns whether a row was actually removed.
+    /// Also removes certificates belonging to this source from `node_inventory`.
     ///
     /// # Errors
     ///
     /// Returns `sqlx::Error` if the delete fails.
     pub async fn delete(&self, id: &str) -> anyhow::Result<bool> {
+        // Delete the source
         let r = sqlx::query("DELETE FROM cert_sources WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
             .await?;
+
+        // Remove certificates belonging to this source from node_inventory
+        // Certificates store source_id in their JSON, we need to filter them out
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT node_id, certificates_json FROM node_inventory WHERE certificates_json != '[]'",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        for (node_id, certs_json) in rows {
+            // Filter out certificates matching this source
+            let filtered: serde_json::Value = serde_json::from_str(&certs_json)
+                .map(|arr: Vec<serde_json::Value>| {
+                    serde_json::json!(arr
+                        .into_iter()
+                        .filter(|c| {
+                            let cert_source_id =
+                                c.get("source_id").and_then(|v| v.as_str()).unwrap_or("");
+                            cert_source_id != id
+                        })
+                        .collect::<Vec<_>>())
+                })
+                .unwrap_or(serde_json::json!([]));
+
+            let filtered_json = serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".into());
+
+            // Update the row if certificates were removed
+            if filtered_json != certs_json {
+                sqlx::query("UPDATE node_inventory SET certificates_json = ? WHERE node_id = ?")
+                    .bind(&filtered_json)
+                    .bind(&node_id)
+                    .execute(&self.pool)
+                    .await?;
+            }
+        }
+
         Ok(r.rows_affected() > 0)
     }
 }

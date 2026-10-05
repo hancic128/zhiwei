@@ -457,8 +457,8 @@ function AlertHistorySection() {
                         {t(`alerts.${alert.severity}`)}
                       </span>
                     </Td>
-                    <Td className="hidden md:table-cell">
-                      <span className="text-xs text-ink-500 max-w-xs truncate block" title={alert.message || alert.rule_name}>
+                    <Td className="hidden md:table-cell min-w-[200px] max-w-[400px]">
+                      <span className="text-xs text-ink-500 break-words" title={alert.message || alert.rule_name}>
                         {alert.message || alert.rule_name}
                       </span>
                     </Td>
