@@ -240,10 +240,7 @@ impl NodeRepo {
     ///     must be deleted first. `telemetry_hourly` / `probe_results` / `cert_sources` / alerts /
     ///     `alert_state` have no FKs, but must also be cleared when node is deleted -- without the
     ///     node, historical metrics and "auto-close alerts" make no sense.
-    ///   - **`probes.node_ids_json` is a string array**: need to remove this node's id from all probes,
-    ///     can't just DELETE directly, otherwise remaining probes will keep treating it as a bound node.
-    ///     Here we modify the JSON array in the database with a SQL expression, a single UPDATE
-    ///     removes all references.
+    ///   - **`probes.node_id` is a single node binding**: delete probes bound to this node.
     ///   - **commands deleted together**: issued commands are all "targeting this node", meaningless
     ///     without the node. The only thing to preserve is `audit_log`, but `audit_log` has no `node_id` column.
     ///
@@ -253,42 +250,11 @@ impl NodeRepo {
     pub async fn delete(&self, id: &str) -> anyhow::Result<bool> {
         let mut tx = self.pool.begin().await?;
 
-        // Remove node id from all probes' node_ids_json. Node deletion is low-frequency,
-        // doing it in application layer is more intuitive than writing nested json_remove expressions.
-        let affected_probes: Vec<(String, String)> = {
-            use sqlx::Row;
-            let rows = sqlx::query(
-                "SELECT id, node_ids_json FROM probes
-                 WHERE EXISTS (SELECT 1 FROM json_each(node_ids_json) WHERE json_each.value = ?)",
-            )
+        // Delete probes bound to this node
+        sqlx::query("DELETE FROM probes WHERE node_id = ?")
             .bind(id)
-            .fetch_all(&mut *tx)
-            .await?;
-            rows.into_iter()
-                .map(|row| {
-                    let probe_id: String = row.try_get("id")?;
-                    let raw: String = row.try_get("node_ids_json")?;
-                    Ok::<_, anyhow::Error>((probe_id, raw))
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        let now = Utc::now().timestamp_nanos_opt().unwrap_or(0);
-        for (probe_id, raw) in affected_probes {
-            let updated: Vec<String> = serde_json::from_str::<Vec<String>>(&raw)
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|n| n != id)
-                .collect();
-            let updated_json = serde_json::to_string(&updated).unwrap_or_else(|_| "[]".into());
-            sqlx::query(
-                "UPDATE probes SET node_ids_json = ?, updated_at_unix_nano = ? WHERE id = ?",
-            )
-            .bind(updated_json)
-            .bind(now)
-            .bind(probe_id)
             .execute(&mut *tx)
             .await?;
-        }
 
         // telemetry_batches / node_inventory have FK references, must be deleted first.
         // audit_log is preserved: operational audit is for post-incident review, should still be visible after node deletion.
@@ -328,7 +294,7 @@ mod delete_tests {
     //! Key invariants:
     //!   1. Node row is actually deleted;
     //!   2. All tables referencing `node_id` are cleaned up;
-    //!   3. The node id is removed from probes' `node_ids_json` array, other nodes' bindings unaffected;
+    //!   3. Probes bound to this node are deleted (single `node_id` column);
     //!   4. `audit_log` is preserved -- it's an audit requirement, shouldn't be wiped with the node;
     //!   5. Deleting a non-existent node returns false (and doesn't error).
 
@@ -428,10 +394,10 @@ mod delete_tests {
         .execute(pool)
         .await
         .unwrap();
-        // Probe binds two nodes: n1 (to be deleted) + n2 (to keep)
+        // Probe bound to node n1 (to be deleted)
         sqlx::query(
-            "INSERT INTO probes (id, service_id, name, kind, target_json, expect_json, interval_seconds, timeout_ms, failure_threshold, node_ids_json, location, enabled, created_at_unix_nano, updated_at_unix_nano)
-             VALUES ('pr1', 'svc1', 'http', 'http', '{}', '{}', 60, 5000, 3, '[\"n1\",\"n2\"]', '', 1, 0, 0)",
+            "INSERT INTO probes (id, name, kind, target_json, expect_json, interval_seconds, timeout_ms, failure_threshold, node_id, location, enabled, description, created_at_unix_nano, updated_at_unix_nano)
+             VALUES ('pr1', 'http', 'http', '{}', '{}', 60, 5000, 3, 'n1', '', 1, '', 0, 0)",
         )
         .execute(pool)
         .await
@@ -498,16 +464,15 @@ mod delete_tests {
             "audit_log must be preserved -- it's an audit requirement"
         );
 
-        // n1 is removed from probe's node_ids_json, n2 remains
-        let raw: String = sqlx::query_scalar("SELECT node_ids_json FROM probes WHERE id = 'pr1'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        let ids: Vec<String> = serde_json::from_str(&raw).unwrap();
+        // n1 probe should be deleted along with node deletion
+        let probe_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM probes WHERE node_id = 'n1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(
-            ids,
-            vec!["n2".to_string()],
-            "n1 should be removed from probe binding, only n2 remains"
+            probe_count, 0,
+            "probe bound to deleted node should be removed"
         );
     }
 

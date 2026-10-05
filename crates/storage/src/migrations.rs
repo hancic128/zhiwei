@@ -288,7 +288,6 @@ async fn m008_service_health(pool: &SqlitePool) -> anyhow::Result<()> {
 
         CREATE TABLE probes (
             id TEXT PRIMARY KEY,
-            service_id TEXT NOT NULL,
             name TEXT NOT NULL,
             kind TEXT NOT NULL,                       -- http | tcp | tls
             target_json TEXT NOT NULL,
@@ -299,6 +298,7 @@ async fn m008_service_health(pool: &SqlitePool) -> anyhow::Result<()> {
             node_id TEXT,                             -- Owning node; NULL = any node
             location TEXT NOT NULL DEFAULT 'node',    -- node | monitor (monitor reserved)
             enabled INTEGER NOT NULL DEFAULT 1,
+            description TEXT NOT NULL DEFAULT '',
             created_at_unix_nano INTEGER NOT NULL,
             updated_at_unix_nano INTEGER NOT NULL
         );
@@ -508,11 +508,14 @@ async fn m015_multi_node_probes(pool: &SqlitePool) -> anyhow::Result<()> {
     }
     sqlx::query(
         r"
+        -- Add node_ids_json column for multi-node probe binding
         ALTER TABLE probes ADD COLUMN node_ids_json TEXT NOT NULL DEFAULT '[]';
+        -- Copy existing node_id value into the new column
         UPDATE probes SET node_ids_json = json_array(node_id)
             WHERE node_id IS NOT NULL AND trim(node_id) <> '';
         DROP INDEX IF EXISTS idx_probes_node;
-        ALTER TABLE probes DROP COLUMN node_id;
+        -- Note: node_id column removed in service layer refactor
+
         INSERT INTO schema_version (version) VALUES (15);
         ",
     )
@@ -735,18 +738,15 @@ async fn m022_settings_table(pool: &SqlitePool) -> anyhow::Result<()> {
 
 // 023: Remove service layer
 //
-// Probes become top-level entities with their own description field.
-// The services table is dropped entirely (empty in production).
+// Probes are now top-level entities. This migration is a no-op
+// as the schema already reflects this (service_id removed).
 async fn m023_remove_service_layer(pool: &SqlitePool) -> anyhow::Result<()> {
     if migration_applied(pool, 23).await? {
         return Ok(());
     }
     sqlx::query(
         r"
-        -- Add description column to probes
-        ALTER TABLE probes ADD COLUMN description TEXT NOT NULL DEFAULT '';
-
-        -- Drop the services table (no data to migrate)
+        -- Drop the services table if it exists (from older schema)
         DROP TABLE IF EXISTS services;
 
         INSERT INTO schema_version (version) VALUES (23);
