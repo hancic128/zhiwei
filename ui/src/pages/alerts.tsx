@@ -39,6 +39,7 @@ import {
   THead,
   Tr,
 } from "@/components/ui/table";
+import { TablePager, PAGE_SIZES } from "@/components/ui/pager";
 import { useToast } from "@/components/ui/toast";
 import { cn, friendlyError } from "@/lib/utils";
 
@@ -350,13 +351,21 @@ function AlertHistorySection() {
   });
   const [statusFilter, setStatusFilter] = React.useState<"all" | "open" | "resolved">("all");
   const [sourceFilter, setSourceFilter] = React.useState("");
+  const [page, setPage] = React.useState(1);
+  const [pageSize, setPageSize] = React.useState(PAGE_SIZES[1]);
+
+  // Reset page when filters change
+  React.useEffect(() => {
+    setPage(1);
+  }, [timeRange, statusFilter, sourceFilter]);
 
   const queryParams: AlertQuery = {
     since: timeRange.from,
     until: timeRange.to,
     ...(statusFilter !== "all" ? { status: statusFilter } : {}),
     ...(sourceFilter ? { sources: sourceFilter } : {}),
-    limit: 100,
+    limit: pageSize,
+    offset: (page - 1) * pageSize,
   };
 
   const q = useQuery({
@@ -373,9 +382,19 @@ function AlertHistorySection() {
     return true;
   });
 
+  // Total from resolved query (open alerts don't paginate)
+  const total = q.data?.total ?? filteredAlerts.length;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+
   const sourceLabel = (source: string) => {
     const opt = SOURCE_OPTIONS.find((o) => o.value === source);
     return opt ? t(`filter.${opt.label}`) : source;
+  };
+
+  // Truncate message for display
+  const truncateMessage = (msg: string, maxLen = 80) => {
+    if (msg.length <= maxLen) return msg;
+    return msg.slice(0, maxLen) + "…";
   };
 
   return (
@@ -415,7 +434,7 @@ function AlertHistorySection() {
                 ))}
               </select>
             </div>
-            <DotBadge tone="neutral">{filteredAlerts.length}</DotBadge>
+            <DotBadge tone="neutral">{total}</DotBadge>
           </TableToolbar>
 
           {q.isPending ? (
@@ -425,47 +444,67 @@ function AlertHistorySection() {
           ) : filteredAlerts.length === 0 ? (
             <EmptyState title={t("alerts.noAlerts")} />
           ) : (
-            <Table>
-              <THead>
-                <tr>
-                  <Th>{t("alerts.colTime")}</Th>
-                  <Th>{t("alerts.colSource")}</Th>
-                  <Th>{t("alerts.colSeverity")}</Th>
-                  <Th className="hidden md:table-cell">{t("alerts.colMessage")}</Th>
-                </tr>
-              </THead>
-              <TBody>
-                {filteredAlerts.map((alert) => (
-                  <Tr key={alert.id}>
-                    <Td className="whitespace-nowrap text-xs text-ink-500">
-                      {new Date(alert.started_at_unix_nano / 1_000_000).toLocaleString()}
-                    </Td>
-                    <Td>
-                      <span className="text-xs px-2 py-0.5 rounded bg-surface-3 dark:bg-ink-700 text-ink-600 dark:text-surface-4">
-                        {sourceLabel(alert.source)}
-                      </span>
-                    </Td>
-                    <Td>
-                      <span
-                        className={cn(
-                          "text-xs px-2 py-0.5 rounded font-medium",
-                          alert.severity === "critical"
-                            ? "bg-rose-100 text-rose-700 dark:bg-rose-900/50 dark:text-rose-400"
-                            : "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-400",
-                        )}
-                      >
-                        {t(`alerts.${alert.severity}`)}
-                      </span>
-                    </Td>
-                    <Td className="hidden md:table-cell min-w-[200px] max-w-[400px]">
-                      <span className="text-xs text-ink-500 break-words" title={alert.message || alert.rule_name}>
-                        {alert.message || alert.rule_name}
-                      </span>
-                    </Td>
-                  </Tr>
-                ))}
-              </TBody>
-            </Table>
+            <>
+              <Table>
+                <THead>
+                  <tr>
+                    <Th>{t("alerts.colTime")}</Th>
+                    <Th>{t("alerts.colSource")}</Th>
+                    <Th>{t("alerts.colSeverity")}</Th>
+                    <Th className="hidden md:table-cell">{t("alerts.colMessage")}</Th>
+                  </tr>
+                </THead>
+                <TBody>
+                  {filteredAlerts.map((alert) => (
+                    <Tr key={alert.id}>
+                      <Td className="whitespace-nowrap text-xs text-ink-500">
+                        {new Date(alert.started_at_unix_nano / 1_000_000).toLocaleString()}
+                      </Td>
+                      <Td>
+                        <span className="text-xs px-2 py-0.5 rounded bg-surface-3 dark:bg-ink-700 text-ink-600 dark:text-surface-4">
+                          {sourceLabel(alert.source)}
+                        </span>
+                      </Td>
+                      <Td>
+                        <span
+                          className={cn(
+                            "text-xs px-2 py-0.5 rounded font-medium",
+                            alert.severity === "critical"
+                              ? "bg-rose-100 text-rose-700 dark:bg-rose-900/50 dark:text-rose-400"
+                              : "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-400",
+                          )}
+                        >
+                          {t(`alerts.${alert.severity}`)}
+                        </span>
+                      </Td>
+                      <Td className="hidden md:table-cell min-w-[200px] max-w-[300px]">
+                        <span
+                          className="text-xs text-ink-500"
+                          title={alert.message || alert.rule_name}
+                        >
+                          {truncateMessage(alert.message || alert.rule_name)}
+                        </span>
+                      </Td>
+                    </Tr>
+                  ))}
+                </TBody>
+              </Table>
+              <TablePager
+                page={page}
+                pageCount={pageCount}
+                pageSize={pageSize}
+                onPage={setPage}
+                onPageSize={(size) => {
+                  setPageSize(size);
+                  setPage(1);
+                }}
+                left={
+                  <span className="text-xs text-ink-500">
+                    {t("pager.total", { n: total })}
+                  </span>
+                }
+              />
+            </>
           )}
         </TableShell>
       )}

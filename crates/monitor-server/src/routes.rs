@@ -2355,6 +2355,8 @@ struct AlertsQuery {
     sources: Option<String>,
     #[serde(default = "default_alerts_limit")]
     limit: i64,
+    #[serde(default)]
+    offset: Option<i64>,
 }
 
 const fn default_alerts_limit() -> i64 {
@@ -2365,6 +2367,7 @@ const fn default_alerts_limit() -> i64 {
 struct AlertsView {
     open: Vec<zhiwei_storage::alerts_repo::Alert>,
     resolved: Vec<zhiwei_storage::alerts_repo::Alert>,
+    total: Option<i64>,
 }
 
 async fn alerts_handler(
@@ -2385,12 +2388,15 @@ async fn alerts_handler(
         status: query.status.clone(),
         sources: query.sources.clone(),
         limit: Some(query.limit),
+        offset: query.offset,
     };
 
-    let open_alerts = if query.status.as_deref() == Some("resolved") {
-        vec![]
+    let (open_alerts, total) = if query.status.as_deref() == Some("resolved") {
+        (vec![], None)
     } else {
-        repo.open_alerts().await.unwrap_or_default()
+        repo.open_alerts_with_total()
+            .await
+            .map_or_else(|_| (vec![], None), |(alerts, total)| (alerts, Some(total)))
     };
 
     let resolved_alerts = if query.status.as_deref() == Some("open") {
@@ -2399,11 +2405,13 @@ async fn alerts_handler(
         repo.query_alerts_filtered(&alert_query)
             .await
             .unwrap_or_default()
+            .0
     };
 
     Json(AlertsView {
         open: open_alerts,
         resolved: resolved_alerts,
+        total,
     })
     .into_response()
 }

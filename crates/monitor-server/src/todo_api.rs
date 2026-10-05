@@ -209,6 +209,7 @@ pub async fn todo_handler(
             status: query.status.clone(),
             sources: query.sources.clone(),
             limit: Some(1000),
+            offset: None,
         };
         state
             .storage
@@ -216,6 +217,7 @@ pub async fn todo_handler(
             .query_alerts_filtered(&alert_query)
             .await
             .unwrap_or_default()
+            .0
     };
 
     let (mut now_items, mut watch_items, silenced) =

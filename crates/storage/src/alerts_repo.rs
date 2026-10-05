@@ -234,6 +234,8 @@ pub struct AlertQuery {
     pub sources: Option<String>,
     /// Maximum number of results (default 500)
     pub limit: Option<i64>,
+    /// Offset for pagination
+    pub offset: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -1159,6 +1161,20 @@ impl AlertsRepo {
             .await
     }
 
+    /// Unresolved alerts with total count.
+    ///
+    /// # Errors
+    ///
+    /// Returns `sqlx::Error` if the query fails.
+    pub async fn open_alerts_with_total(&self) -> anyhow::Result<(Vec<Alert>, i64)> {
+        let total: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM alerts WHERE resolved_at_unix_nano IS NULL")
+                .fetch_one(&self.pool)
+                .await?;
+        let alerts = self.open_alerts().await?;
+        Ok((alerts, total))
+    }
+
     /// Resolved historical alerts
     ///
     /// # Errors
@@ -1172,12 +1188,15 @@ impl AlertsRepo {
         .await
     }
 
-    /// Query alerts with optional filters.
+    /// Query alerts with optional filters. Returns alerts and total count.
     ///
     /// # Errors
     ///
     /// Returns `sqlx::Error` if the query fails.
-    pub async fn query_alerts_filtered(&self, query: &AlertQuery) -> anyhow::Result<Vec<Alert>> {
+    pub async fn query_alerts_filtered(
+        &self,
+        query: &AlertQuery,
+    ) -> anyhow::Result<(Vec<Alert>, i64)> {
         let mut conditions: Vec<String> = Vec::new();
 
         // Status filter
@@ -1207,22 +1226,30 @@ impl AlertsRepo {
         }
 
         let limit = query.limit.unwrap_or(500).clamp(1, 1000);
-        let tail = if conditions.is_empty() {
-            format!("ORDER BY started_at_unix_nano DESC LIMIT {limit}")
+        let offset = query.offset.unwrap_or(0).max(0);
+        let where_clause = if conditions.is_empty() {
+            String::new()
         } else {
-            format!(
-                "WHERE {} ORDER BY started_at_unix_nano DESC LIMIT {}",
-                conditions.join(" AND "),
-                limit
-            )
+            format!("WHERE {}", conditions.join(" AND "))
         };
 
-        // Build query with params
+        // Get total count
+        let count_sql = format!("SELECT COUNT(*) FROM alerts {where_clause}");
+        let mut count_builder = sqlx::query_scalar::<_, i64>(&count_sql);
+        if let Some(since) = query.since_ms {
+            count_builder = count_builder.bind(since * 1_000_000);
+        }
+        if let Some(until) = query.until_ms {
+            count_builder = count_builder.bind(until * 1_000_000);
+        }
+        let total: i64 = count_builder.fetch_one(&self.pool).await?;
+
+        // Get paginated results
         let sql = format!(
             r"SELECT id, rule_id, rule_name, node_id, hostname, severity, metric, op, threshold,
                       value, message, started_at_unix_nano, resolved_at_unix_nano,
                       silenced_until_unix_nano, source, source_ref
-               FROM alerts {tail}"
+               FROM alerts {where_clause} ORDER BY started_at_unix_nano DESC LIMIT {limit} OFFSET {offset}",
         );
 
         // Execute with bound parameters
@@ -1236,7 +1263,7 @@ impl AlertsRepo {
             query_builder = query_builder.bind(until * 1_000_000);
         }
         let rows: Vec<AlertRow> = query_builder.fetch_all(&self.pool).await?;
-        Ok(rows.into_iter().map(alert_from_row).collect())
+        Ok((rows.into_iter().map(alert_from_row).collect(), total))
     }
 
     /// Delete resolved alerts older than the specified timestamp (milliseconds).

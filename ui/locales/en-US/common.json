@@ -296,7 +296,8 @@
     "perPage": "{{n}} / page",
     "pageOf": "Page {{page}} / {{pages}}",
     "prev": "Previous page",
-    "next": "Next page"
+    "next": "Next page",
+    "total": "{{n}} total"
   },
   "detail": {
     "back": "Nodes",

@@ -658,6 +658,7 @@ export interface Alert {
 export interface AlertsView {
   open: Alert[];
   resolved: Alert[];
+  total?: number;
 }
 
 export interface AlertQuery {
@@ -666,6 +667,7 @@ export interface AlertQuery {
   status?: "open" | "resolved" | "all";
   sources?: string;
   limit?: number;
+  offset?: number;
 }
 
 export interface AlertRule {
@@ -708,6 +710,7 @@ export const alertsApi = {
     if (query?.status !== undefined) params.set("status", query.status);
     if (query?.sources !== undefined) params.set("sources", query.sources);
     if (query?.limit !== undefined) params.set("limit", String(query.limit));
+    if (query?.offset !== undefined) params.set("offset", String(query.offset));
     const qs = params.toString();
     return request<AlertsView>(`/v1/alerts${qs ? `?${qs}` : ""}`);
   },
