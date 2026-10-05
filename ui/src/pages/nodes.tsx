@@ -2,7 +2,7 @@ import * as React from "react";
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { HelpCircle, Pencil, Plus, Server, Trash2, Upload } from "lucide-react";
+import { HelpCircle, Pencil, Plus, Server, Trash2 } from "lucide-react";
 import { api, osLabel, primaryIp, trendApi, upgradeApi, type NodeView } from "@/api";
 import { EnrollTokenDialog } from "@/components/enroll-token-dialog";
 import { NodeMetaDialog, TagList } from "@/components/node-meta-dialog";
@@ -95,8 +95,6 @@ export function Nodes() {
   /** When deletion is blocked by 409 (pending commands exist), switch dialog to "force delete" confirmation */
   const [forceDelete, setForceDelete] = React.useState(false);
   const [deleting, setDeleting] = React.useState(false);
-  /** Upgrade dialog state: selected nodes for batch upgrade (null = dialog closed) */
-  const [upgradeNodes, setUpgradeNodes] = React.useState<NodeView[] | null>(null);
   /** Single node upgrade dialog */
   const [upgradeNode, setUpgradeNode] = React.useState<NodeView | null>(null);
   const [upgrading, setUpgrading] = React.useState(false);
@@ -247,48 +245,6 @@ export function Nodes() {
       }}
     />
 
-    {/* Batch upgrade dialog */}
-    <ConfirmDialog
-      open={upgradeNodes !== null}
-      title={t("nodes.upgradeTitle")}
-      message={t("nodes.upgradeMessage", {
-        count: upgradeNodes?.length ?? 0,
-        version: latestUpgrade?.version ?? "",
-      })}
-      confirmLabel={t("nodes.upgradeConfirm")}
-      cancelLabel={t("action.cancel")}
-      loading={upgrading}
-      onCancel={() => !upgrading && setUpgradeNodes(null)}
-      onConfirm={async () => {
-        if (!upgradeNodes || !latestUpgrade) return;
-        setUpgrading(true);
-        const baseUrl = `${window.location.protocol}//${window.location.host}`;
-        const downloadUrl = `${baseUrl}/v1/upgrade/${latestUpgrade.version}`;
-        let success = 0;
-        let failed = 0;
-        for (const node of upgradeNodes) {
-          try {
-            await api.execCommand(node.id, "upgrade_agent", {
-              version: latestUpgrade.version,
-              download_url: downloadUrl,
-              sha256: latestUpgrade.sha256,
-              restart: true,
-            });
-            success++;
-          } catch {
-            failed++;
-          }
-        }
-        toast.push(
-          "success",
-          t("nodes.upgradeResults", { success, failed }),
-        );
-        setUpgradeNodes(null);
-        setUpgrading(false);
-        void qc.invalidateQueries({ queryKey: ["nodes"] });
-      }}
-    />
-
     {/* Single node upgrade dialog */}
     <ConfirmDialog
       open={upgradeNode !== null}
@@ -362,21 +318,6 @@ export function Nodes() {
             {t("nodes.onboardHelp")}
           </Button>
         </Tooltip>
-        {latestUpgrade && (
-          <Tooltip content={t("nodes.batchUpgradeHint", { version: latestUpgrade.version })}>
-            <Button
-              variant="primary"
-              disabled={!upgradeNodes || upgradeNodes.length === 0}
-              onClick={() => setUpgradeNodes(upgradeNodes)}
-            >
-              <Upload className="w-4 h-4" aria-hidden="true" />
-              {t("nodes.batchUpgrade", {
-                version: latestUpgrade.version,
-                count: upgradeNodes?.length ?? 0,
-              })}
-            </Button>
-          </Tooltip>
-        )}
       </TableToolbar>
 
       {nodesQ.isLoading ? (
@@ -404,18 +345,9 @@ export function Nodes() {
           <Table>
             <THead>
               <tr>
-                <Th className="w-8">
-                  <input
-                    type="checkbox"
-                    className="rounded border-ink-300 dark:border-ink-600"
-                    checked={upgradeNodes?.length === nodes.length}
-                    onChange={(e) =>
-                      setUpgradeNodes(e.target.checked ? nodes : [])
-                    }
-                  />
-                </Th>
                 <Th>{t("nodes.colHost")}</Th>
                 <Th className="hidden md:table-cell">{t("nodes.colStatus")}</Th>
+                <Th className="hidden lg:table-cell">{t("nodes.colAgent")}</Th>
                 <Th className="hidden lg:table-cell">{t("nodes.colOs")}</Th>
                 <Th className="hidden xl:table-cell">{t("nodes.colIp")}</Th>
                 <Th align="right">{t("nodes.colMem")}</Th>
@@ -458,23 +390,6 @@ export function Nodes() {
                       </div>
                     </Td>
 
-                    <Td>
-                      <input
-                        type="checkbox"
-                        className="rounded border-ink-300 dark:border-ink-600"
-                        checked={upgradeNodes?.some((n) => n.id === node.id) ?? false}
-                        onChange={(e) => {
-                          if (e.target.checked) {
-                            setUpgradeNodes([...(upgradeNodes ?? []), node]);
-                          } else {
-                            setUpgradeNodes(
-                              (upgradeNodes ?? []).filter((n) => n.id !== node.id),
-                            );
-                          }
-                        }}
-                      />
-                    </Td>
-
                     <Td className="hidden md:table-cell">
                       <div className="flex flex-col gap-0.5">
                         <div className="flex items-center gap-1.5">
@@ -497,6 +412,30 @@ export function Nodes() {
                             {formatUptime(node.host_info.uptime_seconds, t)}
                           </span>
                         ) : null}
+                      </div>
+                    </Td>
+
+                    <Td className="hidden lg:table-cell">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs tabular-nums text-ink-500 dark:text-surface-4">
+                          {node.host_info?.agent_version || "—"}
+                        </span>
+                        {latestUpgrade && needsUpgrade(node, latestUpgrade.version) && (
+                          <button
+                            type="button"
+                            onClick={() => setUpgradeNode(node)}
+                            className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-100 text-amber-700 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-400 dark:hover:bg-amber-900/60 cursor-pointer transition-colors"
+                            title={t("nodes.upgradeNode", { version: latestUpgrade.version })}
+                          >
+                            <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                              <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                              <path d="M3 3v5h5" />
+                              <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+                              <path d="M16 16h5v5" />
+                            </svg>
+                            {latestUpgrade.version}
+                          </button>
+                        )}
                       </div>
                     </Td>
 
@@ -555,28 +494,9 @@ export function Nodes() {
                     </Td>
 
                     <Td align="right">
-                      {/* Actions column: edit (alias/tags) + delete + upgrade.
-                          Delete uses rose color to align with "dangerous command" semantics.
-                          Upgrade icon: RefreshCw, shown only when node agent version < latest upgrade. */}
+                      {/* Actions column: edit (alias/tags) + delete.
+                          Delete uses rose color to align with "dangerous command" semantics. */}
                       <div className="inline-flex items-center gap-1">
-                        {latestUpgrade && needsUpgrade(node, latestUpgrade.version) && (
-                          <Tooltip content={t("nodes.upgradeNode", { version: latestUpgrade.version })}>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="w-7 h-7 text-brand-600 hover:bg-brand-50 hover:text-brand-700 dark:text-brand-400 dark:hover:bg-brand-950/40 dark:hover:text-brand-300"
-                              aria-label={t("nodes.upgradeNode", { version: latestUpgrade.version })}
-                              onClick={() => setUpgradeNode(node)}
-                            >
-                              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                                <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-                                <path d="M3 3v5h5" />
-                                <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
-                                <path d="M16 16h5v5" />
-                              </svg>
-                            </Button>
-                          </Tooltip>
-                        )}
                         <Tooltip content={t("nodeMeta.edit")}>
                           <Button
                             variant="ghost"

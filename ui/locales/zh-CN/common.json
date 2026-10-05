@@ -240,6 +240,7 @@
     "subtitle": "已完成入网的主机",
     "colHost": "主机",
     "colStatus": "状态",
+    "colAgent": "Agent",
     "colCpu": "CPU",
     "colMem": "内存",
     "colDisk": "磁盘",

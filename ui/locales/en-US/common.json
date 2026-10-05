@@ -240,6 +240,7 @@
     "subtitle": "Enrolled hosts",
     "colHost": "Host",
     "colStatus": "Status",
+    "colAgent": "Agent",
     "colCpu": "CPU",
     "colMem": "Memory",
     "colDisk": "Disk",
