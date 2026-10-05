@@ -23,6 +23,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::Parser;
+use sysinfo::{Networks, System};
 use tracing_subscriber::EnvFilter;
 use zhiwei_common::KeyPair as EdKeyPair;
 use zhiwei_proto::common::{EnrollRequest, EnrollResponse};
@@ -196,8 +197,7 @@ async fn main() -> anyhow::Result<()> {
         let id = node_id.clone();
         tokio::spawn(async move { probes::run_loop(m, s, id).await });
     }
-    let interval = args.interval.max(1);
-    let inventory_interval = args.inventory_interval.max(interval);
+
     // Cert scan locations: the **union** of the default globs and the user-provided
     // ZHIWEI_CERT_GLOBS / --cert-globs. The old behavior was "user input fully
     // replaces defaults" — but the default globs already cover Let's Encrypt,
@@ -209,33 +209,91 @@ async fn main() -> anyhow::Result<()> {
     // `certs::scan_entries` (first writer wins); we don't dedup here.
     let cert_globs: Vec<String> = certs::merge_globs(&args.cert_globs);
 
-    // Send a snapshot right after startup (so the console has data immediately), then on schedule
+    telemetry_loop(
+        &monitor,
+        state,
+        &node_id,
+        args.interval,
+        args.inventory_interval,
+        &cert_globs,
+    )
+    .await
+}
+
+/// Run the telemetry + inventory loop. sysinfo `System` and `Networks` are created once
+/// and reused (`refresh_all` instead of `new_all` each round) to avoid O(n) per-tick cost.
+async fn telemetry_loop(
+    monitor: &str,
+    state: std::sync::Arc<NodeState>,
+    node_id: &str,
+    interval: u64,
+    inventory_interval: u64,
+    cert_globs: &[String],
+) -> anyhow::Result<()> {
+    // sysinfo needs two samples with a gap between them to compute CPU usage.
+    // Create once and reuse — refresh_all is much cheaper than new_all.
+    let mut sys = System::new_all();
+    sys.refresh_all();
+    tokio::time::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL).await;
+    sys.refresh_all();
+
+    let mut networks = Networks::new_with_refreshed_list();
+
+    let interval = interval.max(1);
+    let inventory_interval = inventory_interval.max(interval);
     let mut next_inventory = std::time::Instant::now();
 
     loop {
-        match collect_and_send(&monitor, &state, &node_id).await {
-            Ok(()) => tracing::debug!("batch ok"),
-            Err(e) => tracing::warn!(error = %e, "batch failed"),
-        }
-
-        // Period elapsed, or the console clicked "re-snapshot now"
-        // (after containers start/stop you want new state visible immediately)
-        let forced = state
-            .inventory_due
-            .swap(false, std::sync::atomic::Ordering::Relaxed);
-        if forced || std::time::Instant::now() >= next_inventory {
-            match send_inventory(&monitor, &state, &node_id, &cert_globs).await {
-                Ok(()) => {
-                    next_inventory =
-                        std::time::Instant::now() + Duration::from_secs(inventory_interval);
-                    tracing::debug!("inventory ok");
-                }
-                Err(e) => tracing::warn!(error = %e, "inventory failed"),
-            }
-        }
-
-        tokio::time::sleep(Duration::from_secs(interval)).await;
+        run_telemetry_tick(
+            &mut sys,
+            &mut networks,
+            monitor,
+            &state,
+            node_id,
+            cert_globs,
+            interval,
+            inventory_interval,
+            &mut next_inventory,
+        )
+        .await;
     }
+}
+
+#[allow(clippy::cognitive_complexity)]
+async fn run_telemetry_tick(
+    sys: &mut System,
+    networks: &mut Networks,
+    monitor: &str,
+    state: &std::sync::Arc<NodeState>,
+    node_id: &str,
+    cert_globs: &[String],
+    interval: u64,
+    inventory_interval: u64,
+    next_inventory: &mut std::time::Instant,
+) {
+    sys.refresh_all();
+    networks.refresh(true);
+
+    match collect_and_send(monitor, state, node_id, sys, networks).await {
+        Ok(()) => tracing::debug!("batch ok"),
+        Err(e) => tracing::warn!(error = %e, "batch failed"),
+    }
+
+    let forced = state
+        .inventory_due
+        .swap(false, std::sync::atomic::Ordering::Relaxed);
+    if forced || std::time::Instant::now() >= *next_inventory {
+        match send_inventory(monitor, state, node_id, cert_globs, sys).await {
+            Ok(()) => {
+                *next_inventory =
+                    std::time::Instant::now() + Duration::from_secs(inventory_interval);
+                tracing::debug!("inventory ok");
+            }
+            Err(e) => tracing::warn!(error = %e, "inventory failed"),
+        }
+    }
+
+    tokio::time::sleep(Duration::from_secs(interval)).await;
 }
 
 struct NodeState {
@@ -418,8 +476,14 @@ async fn enroll_post(monitor: &str, token: &str, body: &[u8]) -> anyhow::Result<
     Ok(resp)
 }
 
-async fn collect_and_send(monitor: &str, state: &NodeState, node_id: &str) -> anyhow::Result<()> {
-    let batch = build_batch(node_id, &state.signing_key)?;
+async fn collect_and_send(
+    monitor: &str,
+    state: &NodeState,
+    node_id: &str,
+    sys: &sysinfo::System,
+    networks: &sysinfo::Networks,
+) -> anyhow::Result<()> {
+    let batch = build_batch(node_id, &state.signing_key, sys, networks)?;
     let mut buf = Vec::new();
     prost::Message::encode(&batch, &mut buf)?;
     let t = transport(monitor, state)?;
@@ -603,8 +667,9 @@ fn resolve_node_name(explicit: &str) -> String {
 }
 
 /// Collect basic host info: OS / kernel / arch / CPU / memory / uptime / per-interface IPs.
-fn build_host_info(node_name: &str) -> HostInfo {
-    use sysinfo::{Networks, System};
+/// Takes a pre-created System (which already has two samples for CPU usage).
+fn build_host_info(node_name: &str, sys: &sysinfo::System) -> HostInfo {
+    use sysinfo::Networks;
 
     let hostname = node_name.to_string();
     let os_name = System::name().unwrap_or_default();
@@ -613,7 +678,6 @@ fn build_host_info(node_name: &str) -> HostInfo {
     let kernel_version = System::kernel_version().unwrap_or_default();
     let arch = System::cpu_arch();
 
-    let sys = System::new_all();
     let cpu_brand = sys
         .cpus()
         .first()
@@ -661,12 +725,12 @@ fn build_host_info(node_name: &str) -> HostInfo {
     }
 }
 
-fn build_batch(node_id: &str, key: &EdKeyPair) -> anyhow::Result<TelemetryBatch> {
-    use sysinfo::{Disks, Networks, System};
-
-    let mut sys = System::new_all();
-    sys.refresh_all();
-
+fn build_batch(
+    node_id: &str,
+    key: &EdKeyPair,
+    sys: &sysinfo::System,
+    networks: &sysinfo::Networks,
+) -> anyhow::Result<TelemetryBatch> {
     let mut metrics = vec![
         Metric {
             name: "host.cpu.usage".into(),
@@ -706,7 +770,6 @@ fn build_batch(node_id: &str, key: &EdKeyPair) -> anyhow::Result<TelemetryBatch>
         }
     }
 
-    let networks = Networks::new_with_refreshed_list();
     let network = networks
         .iter()
         .map(|(name, data)| NetworkInterface {
@@ -718,7 +781,7 @@ fn build_batch(node_id: &str, key: &EdKeyPair) -> anyhow::Result<TelemetryBatch>
         })
         .collect();
 
-    let disks = Disks::new_with_refreshed_list();
+    let disks = sysinfo::Disks::new_with_refreshed_list();
     let (max_disk_usage, disk_used_bytes, disk_total_bytes) = fullest_disk_stats(&disks);
     metrics.push(Metric {
         name: "host.disk.usage".into(),
@@ -767,15 +830,15 @@ fn build_batch(node_id: &str, key: &EdKeyPair) -> anyhow::Result<TelemetryBatch>
 // ---------- inventory (snapshot) ----------
 
 /// Build the snapshot report: host info + containers + processes. Low-frequency uploads; server keeps only the latest.
+/// Takes a pre-created System (already has two samples for CPU usage).
 async fn build_inventory(
     node_id: &str,
     key: &EdKeyPair,
     cert_globs: &[String],
     node_name: &str,
     cert_sources: &[certs::CertSourceSpec],
+    sys: &sysinfo::System,
 ) -> anyhow::Result<InventoryReport> {
-    use sysinfo::System;
-
     let containers = match docker::list_containers().await {
         Ok(Some(list)) => list,
         // No Docker (or socket unavailable) → report empty list, indicating no container runtime on this host
@@ -786,12 +849,8 @@ async fn build_inventory(
         }
     };
 
-    // sysinfo needs "two samples with a gap between them" to compute CPU usage;
-    // otherwise every process's cpu_usage() is 0.
-    let mut sys = System::new_all();
-    tokio::time::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL).await;
-    sys.refresh_all();
-    let processes = Some(snapshot_processes(&sys));
+    // Processes from the already-sampled sysinfo (CPU usage valid from first sample)
+    let processes = Some(snapshot_processes(sys));
 
     // Console-configured paths take priority (same path: first source wins); fall back to local baseline
     let certificates = certs::scan_with_sources(cert_sources, cert_globs);
@@ -799,7 +858,7 @@ async fn build_inventory(
     let mut report = InventoryReport {
         node_id: node_id.into(),
         ts_unix_nano: zhiwei_common::Timestamp::now().unix_nano(),
-        host_info: Some(build_host_info(node_name)),
+        host_info: Some(build_host_info(node_name, sys)),
         containers,
         processes,
         certificates,
@@ -817,6 +876,7 @@ async fn send_inventory(
     state: &NodeState,
     node_id: &str,
     cert_globs: &[String],
+    sys: &sysinfo::System,
 ) -> anyhow::Result<()> {
     // Pull cert path config before each snapshot: if unreachable, fall back to local
     // baseline — don't let "monitor glitched for a moment" become "this machine's certs vanished"
@@ -827,6 +887,7 @@ async fn send_inventory(
         cert_globs,
         &state.node_name,
         &cert_sources,
+        sys,
     )
     .await?;
     let mut buf = Vec::new();
