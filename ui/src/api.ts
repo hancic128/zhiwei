@@ -229,6 +229,18 @@ export const api = {
       },
     ),
 
+  /** Execute a command on a node (signed by ops-server) */
+  execCommand: (
+    nodeId: string,
+    action: string,
+    params: Record<string, unknown> = {},
+  ) =>
+    request<{ command_id: string }>("/v1/exec", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ node_id: nodeId, action, params }),
+    }),
+
   /** Permanent node deletion: clears all telemetry / inventory / probe results / alerts.
    * Backend returns 204 on success; this endpoint only cares whether an error was thrown.
    *

@@ -167,6 +167,7 @@ fn parse_action(s: &str) -> Option<Action> {
         "refresh_inventory" => Some(Action::RefreshInventory),
         "scan_certs" => Some(Action::ScanCerts),
         "upgrade_agent" => Some(Action::UpgradeAgent),
+        "rollback_agent" => Some(Action::RollbackAgent),
         _ => None,
     }
 }

@@ -18,6 +18,7 @@ enum Action {
   ACTION_SCAN_CERTS = 10;        // scan certificates under a path (params: ScanCertsParams)
   ACTION_CONTAINER_REMOVE = 11;  // remove a container (params: ContainerActionParams, force defaults to false)
   ACTION_UPGRADE_AGENT = 12;     // upgrade node-agent binary (params: UpgradeAgentParams)
+  ACTION_ROLLBACK_AGENT = 13;    // rollback node-agent binary (params: RollbackAgentParams)
 }
 
 // Commands are signed by ops-server's private key; nodes verify them with
@@ -92,4 +93,13 @@ message UpgradeAgentParams {
   string download_url = 2;       // URL to download the binary from
   string sha256 = 3;             // SHA256 checksum of the binary
   bool restart = 4;              // whether to restart after upgrade (default true)
+}
+
+// ACTION_ROLLBACK_AGENT params.
+//
+// Rolls back the node-agent binary to the previous version from backup.
+// The agent restores from the backup directory and optionally restarts.
+message RollbackAgentParams {
+  string restore_version = 1;    // version to restore (from backup)
+  bool restart = 2;              // whether to restart after rollback (default true)
 }

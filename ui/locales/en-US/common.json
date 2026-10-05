@@ -275,7 +275,13 @@
     "filterTag": "Filter by tag",
     "tagAll": "All tags",
     "onboardHelp": "Onboarding help",
-    "onboardHelpHint": "Generate an enroll command and copy it — paste it on the target host"
+    "onboardHelpHint": "Generate an enroll command and copy it — paste it on the target host",
+    "batchUpgrade": "Upgrade {{count}} to {{version}}",
+    "batchUpgradeHint": "Upgrade selected nodes to {{version}}",
+    "upgradeTitle": "Upgrade agents",
+    "upgradeMessage": "Upgrade agent on {{count}} node(s) to version {{version}}? The agents will download the new binary, replace themselves, and restart.",
+    "upgradeConfirm": "Upgrade",
+    "upgradeResults": "{{success}} upgraded, {{failed}} failed"
   },
   "nodeMeta": {
     "title": "Edit node",
@@ -354,6 +360,10 @@
     "upgradeAgentMessage": "Upgrade agent on {{name}} to version {{version}}? The agent will download the new binary, replace itself, and restart.",
     "upgradeAgentOk": "Agent upgraded successfully",
     "upgradeAgentFailed": "Agent upgrade failed",
+    "rollbackAgent": "Rollback agent",
+    "rollbackAgentMessage": "Rollback agent on {{name}} to version {{version}}? The agent will restore from backup and restart.",
+    "rollbackAgentOk": "Agent rolled back successfully",
+    "rollbackAgentFailed": "Agent rollback failed",
     "copied": "Copied",
     "nodeKey": "Node identity (Ed25519 public key)",
     "copyKey": "Copy node public key",

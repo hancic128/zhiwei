@@ -275,7 +275,13 @@
     "filterTag": "按标签过滤",
     "tagAll": "全部标签",
     "onboardHelp": "接入帮助",
-    "onboardHelpHint": "生成一条入网命令并自动复制，粘贴到目标机器执行即可"
+    "onboardHelpHint": "生成一条入网命令并自动复制，粘贴到目标机器执行即可",
+    "batchUpgrade": "升级 {{count}} 台到 {{version}}",
+    "batchUpgradeHint": "升级所选节点到 {{version}}",
+    "upgradeTitle": "升级 Agent",
+    "upgradeMessage": "将 {{count}} 个节点上的 Agent 升级到 {{version}}？Agent 会下载新程序、替换自身并重启。",
+    "upgradeConfirm": "升级",
+    "upgradeResults": "成功 {{success}} 台，失败 {{failed}} 台"
   },
   "nodeMeta": {
     "title": "编辑节点信息",
@@ -354,6 +360,10 @@
     "upgradeAgentMessage": "将 {{name}} 上的 Agent 升级到 {{version}}？Agent 会下载新程序、替换自身并重启。",
     "upgradeAgentOk": "Agent 升级成功",
     "upgradeAgentFailed": "Agent 升级失败",
+    "rollbackAgent": "回滚 Agent",
+    "rollbackAgentMessage": "将 {{name}} 上的 Agent 回滚到 {{version}}？Agent 会从备份恢复并重启。",
+    "rollbackAgentOk": "Agent 回滚成功",
+    "rollbackAgentFailed": "Agent 回滚失败",
     "copied": "已复制",
     "nodeKey": "节点身份（Ed25519 公钥）",
     "copyKey": "复制节点公钥",

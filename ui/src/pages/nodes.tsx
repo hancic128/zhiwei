@@ -2,8 +2,8 @@ import * as React from "react";
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { HelpCircle, Pencil, Plus, Server, Trash2 } from "lucide-react";
-import { api, osLabel, primaryIp, trendApi, type NodeView } from "@/api";
+import { HelpCircle, Pencil, Plus, Server, Trash2, Upload } from "lucide-react";
+import { api, osLabel, primaryIp, trendApi, upgradeApi, type NodeView } from "@/api";
 import { EnrollTokenDialog } from "@/components/enroll-token-dialog";
 import { NodeMetaDialog, TagList } from "@/components/node-meta-dialog";
 import { LineChart } from "@/components/chart";
@@ -87,11 +87,22 @@ export function Nodes() {
   /** When deletion is blocked by 409 (pending commands exist), switch dialog to "force delete" confirmation */
   const [forceDelete, setForceDelete] = React.useState(false);
   const [deleting, setDeleting] = React.useState(false);
+  /** Upgrade dialog state: selected nodes for batch upgrade (null = dialog closed) */
+  const [upgradeNodes, setUpgradeNodes] = React.useState<NodeView[] | null>(null);
+  const [upgrading, setUpgrading] = React.useState(false);
   const toast = useToast();
   const qc = useQueryClient();
 
   const nodesQ = useQuery({ queryKey: ["nodes"], queryFn: api.nodes });
   const nodes: NodeView[] = nodesQ.data ?? [];
+
+  // Fetch latest upgrade package info
+  const latestUpgradeQ = useQuery({
+    queryKey: ["latestUpgrade"],
+    queryFn: () => upgradeApi.latest().catch(() => null),
+    staleTime: 60_000,
+  });
+  const latestUpgrade = latestUpgradeQ.data;
 
   const memOf = (n: NodeView) => {
     const used = n.latest?.mem_used_bytes ?? null;
@@ -225,6 +236,49 @@ export function Nodes() {
         }
       }}
     />
+
+    {/* Batch upgrade dialog */}
+    <ConfirmDialog
+      open={upgradeNodes !== null}
+      title={t("nodes.upgradeTitle")}
+      message={t("nodes.upgradeMessage", {
+        count: upgradeNodes?.length ?? 0,
+        version: latestUpgrade?.version ?? "",
+      })}
+      confirmLabel={t("nodes.upgradeConfirm")}
+      cancelLabel={t("action.cancel")}
+      loading={upgrading}
+      onCancel={() => !upgrading && setUpgradeNodes(null)}
+      onConfirm={async () => {
+        if (!upgradeNodes || !latestUpgrade) return;
+        setUpgrading(true);
+        const baseUrl = `${window.location.protocol}//${window.location.host}`;
+        const downloadUrl = `${baseUrl}/v1/upgrade/${latestUpgrade.version}`;
+        let success = 0;
+        let failed = 0;
+        for (const node of upgradeNodes) {
+          try {
+            await api.execCommand(node.id, "upgrade_agent", {
+              version: latestUpgrade.version,
+              download_url: downloadUrl,
+              sha256: latestUpgrade.sha256,
+              restart: true,
+            });
+            success++;
+          } catch {
+            failed++;
+          }
+        }
+        toast.push(
+          "success",
+          t("nodes.upgradeResults", { success, failed }),
+        );
+        setUpgradeNodes(null);
+        setUpgrading(false);
+        void qc.invalidateQueries({ queryKey: ["nodes"] });
+      }}
+    />
+
     <StatCards cards={cards} />
 
     {!nodesQ.isLoading && nodes.length === 0 && (
@@ -264,6 +318,21 @@ export function Nodes() {
             {t("nodes.onboardHelp")}
           </Button>
         </Tooltip>
+        {latestUpgrade && (
+          <Tooltip content={t("nodes.batchUpgradeHint", { version: latestUpgrade.version })}>
+            <Button
+              variant="primary"
+              disabled={!upgradeNodes || upgradeNodes.length === 0}
+              onClick={() => setUpgradeNodes(upgradeNodes)}
+            >
+              <Upload className="w-4 h-4" aria-hidden="true" />
+              {t("nodes.batchUpgrade", {
+                version: latestUpgrade.version,
+                count: upgradeNodes?.length ?? 0,
+              })}
+            </Button>
+          </Tooltip>
+        )}
       </TableToolbar>
 
       {nodesQ.isLoading ? (
@@ -291,6 +360,16 @@ export function Nodes() {
           <Table>
             <THead>
               <tr>
+                <Th className="w-8">
+                  <input
+                    type="checkbox"
+                    className="rounded border-ink-300 dark:border-ink-600"
+                    checked={upgradeNodes?.length === nodes.length}
+                    onChange={(e) =>
+                      setUpgradeNodes(e.target.checked ? nodes : [])
+                    }
+                  />
+                </Th>
                 <Th>{t("nodes.colHost")}</Th>
                 <Th className="hidden md:table-cell">{t("nodes.colStatus")}</Th>
                 <Th className="hidden lg:table-cell">{t("nodes.colOs")}</Th>
@@ -333,6 +412,23 @@ export function Nodes() {
                           />
                         </Link>
                       </div>
+                    </Td>
+
+                    <Td>
+                      <input
+                        type="checkbox"
+                        className="rounded border-ink-300 dark:border-ink-600"
+                        checked={upgradeNodes?.some((n) => n.id === node.id) ?? false}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setUpgradeNodes([...(upgradeNodes ?? []), node]);
+                          } else {
+                            setUpgradeNodes(
+                              (upgradeNodes ?? []).filter((n) => n.id !== node.id),
+                            );
+                          }
+                        }}
+                      />
                     </Td>
 
                     <Td className="hidden md:table-cell">

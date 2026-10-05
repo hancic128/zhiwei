@@ -73,6 +73,14 @@ const fn default_restart_true() -> bool {
     true
 }
 
+/// `ACTION_ROLLBACK_AGENT` parameters (JSON, matches proto's `RollbackAgentParams`)
+#[derive(Debug, serde::Deserialize)]
+struct RollbackAgentArgs {
+    restore_version: String,
+    #[serde(default = "default_restart_true")]
+    restart: bool,
+}
+
 /// Seconds to block on long-poll (monitor side limit is 25s, using same value here).
 ///
 /// Previously "pull every 10 seconds": clicking delete container / test cert path took up to 10 seconds
@@ -99,6 +107,7 @@ const fn action_allowed(action: Action) -> bool {
             | Action::RefreshInventory
             | Action::ScanCerts
             | Action::UpgradeAgent
+            | Action::RollbackAgent
     )
 }
 
@@ -293,6 +302,9 @@ async fn execute(cmd: &Command, state: &NodeState) -> anyhow::Result<Vec<u8>> {
 
         // Remote upgrade: download new binary, verify, backup, replace, restart
         Action::UpgradeAgent => execute_upgrade_agent(cmd).await,
+
+        // Remote rollback: restore from backup, restart
+        Action::RollbackAgent => execute_rollback_agent(cmd).await,
 
         Action::Unspecified => bail!("unimplemented action"),
     }
@@ -562,6 +574,83 @@ fn sha256_file(path: &str) -> anyhow::Result<String> {
     }
 
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Rollback the node-agent binary to a previous version from backup.
+///
+/// Restores the binary from /var/lib/zhiwei-agent/backup/node-agent.{version}
+/// and optionally restarts the agent via systemd.
+#[allow(clippy::cognitive_complexity)]
+async fn execute_rollback_agent(cmd: &Command) -> anyhow::Result<Vec<u8>> {
+    let p: RollbackAgentArgs =
+        serde_json::from_str(&cmd.params_json).context("failed to parse rollback_agent params")?;
+
+    info!(
+        restore_version = %p.restore_version,
+        "Starting agent rollback"
+    );
+
+    // 1. Get the current binary path
+    let current_exe = std::env::current_exe().context("failed to get current executable path")?;
+
+    // 2. Backup directory
+    let backup_dir = std::path::PathBuf::from("/var/lib/zhiwei-agent/backup");
+    let backup_path = backup_dir.join(format!("node-agent.{}", p.restore_version));
+
+    // 3. Check if backup exists
+    if !backup_path.exists() {
+        anyhow::bail!(
+            "backup not found for version {} at {}",
+            p.restore_version,
+            backup_path.display()
+        );
+    }
+
+    // 4. Backup current version before rollback (so we can rollback again if needed)
+    let rollback_backup_path =
+        backup_dir.join(format!("node-agent.rollback.{}", p.restore_version));
+    if !rollback_backup_path.exists() {
+        std::fs::copy(&current_exe, &rollback_backup_path)
+            .context("failed to backup current binary before rollback")?;
+        info!(backup_path = %rollback_backup_path.display(), "Current binary backed up before rollback");
+    }
+
+    // 5. Restore from backup
+    std::fs::copy(&backup_path, &current_exe).context("failed to restore from backup")?;
+
+    // 6. Ensure executable permission
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&current_exe)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&current_exe, perms)?;
+    }
+
+    info!("Binary restored from backup successfully");
+
+    // 7. Restart agent via systemd if requested
+    if p.restart {
+        let output = tokio::process::Command::new("systemctl")
+            .args(["restart", "node-agent"])
+            .output()
+            .await
+            .context("failed to restart node-agent via systemctl")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("systemctl restart failed: {stderr}");
+        }
+
+        info!("Agent restart triggered via systemd");
+    }
+
+    Ok(format!(
+        "rolled back to {}, previous version backed up at {}",
+        p.restore_version,
+        rollback_backup_path.display()
+    )
+    .into_bytes())
 }
 
 async fn submit_result(
