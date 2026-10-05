@@ -110,3 +110,14 @@ jobs:
             zhiwei-${{ matrix.target }}.tar.gz.sha256
           fail_on_unmatched_files: true
 
+      # Publish to GitHub Packages (hancic128-artifacts)
+      - name: Push to GitHub Packages
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: zhiwei-${{ matrix.target }}
+          path: |
+            zhiwei-${{ matrix.target }}.tar.gz
+            zhiwei-${{ matrix.target }}.tar.gz.sha256
+          retention-days: 30
+
