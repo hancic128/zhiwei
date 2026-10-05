@@ -48,7 +48,7 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 
 clap = { workspace = true }
-sysinfo = "0.37"
+sysinfo = "0.39"
 glob = "0.3"
 webpki-roots = "1"
 x509-parser = { workspace = true }
