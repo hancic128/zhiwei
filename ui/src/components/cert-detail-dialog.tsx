@@ -31,13 +31,16 @@ export function CertDetailDialog({
   const [copied, setCopied] = React.useState<string | null>(null);
   const days = daysLeft(cert.not_after_unix_nano);
 
+  // Detect wildcard certificate
+  const isWildcard = cert.domains.some((d) => d.startsWith("*."));
+
   const copy = async (label: string, value: string) => {
     if (!(await copyText(value))) return;
     setCopied(label);
     window.setTimeout(() => setCopied(null), 1500);
   };
 
-  const rows: Array<{ label: string; value: React.ReactNode; copyValue?: string }> = [
+  const rows: Array<{ label: string; value: React.ReactNode; copyValue?: string } | null> = [
     { label: t("certs.detail.primary"), value: cert.domains[0] || cert.subject || "—" },
     { label: t("certs.detail.subject"), value: cert.subject || "—" },
     { label: t("certs.detail.issuer"), value: cert.issuer || "—" },
@@ -57,6 +60,11 @@ export function CertDetailDialog({
         ),
       copyValue: cert.domains.join("\n"),
     },
+    // Show wildcard indicator if applicable
+    isWildcard ? {
+      label: t("certs.detail.type"),
+      value: <DotBadge tone="warn">{t("certs.wildcard")}</DotBadge>,
+    } : null,
     {
       label: t("certs.detail.notBefore"),
       value: cert.not_before_unix_nano
@@ -120,7 +128,7 @@ export function CertDetailDialog({
         </div>
 
         <dl className="divide-y divide-surface-2 dark:divide-ink-700 border-y border-surface-2 dark:border-ink-700">
-          {rows.map((row) => (
+          {rows.filter((r): r is NonNullable<typeof r> => r !== null).map((row) => (
             <div key={row.label} className="flex items-start justify-between gap-4 py-3">
               <dt className="text-xs text-ink-500 shrink-0 pt-0.5">{row.label}</dt>
               <dd className="text-sm text-ink-900 dark:text-surface-0 text-right min-w-0 break-all">

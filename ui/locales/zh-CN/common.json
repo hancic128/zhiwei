@@ -590,11 +590,13 @@
       "subject": "主体",
       "issuer": "签发者",
       "domains": "覆盖域名（SAN）",
+      "type": "证书类型",
       "notBefore": "生效时间",
       "notAfter": "到期时间",
       "serial": "序列号",
       "path": "证书路径"
     },
+    "wildcard": "通配符证书",
     "sources": {
       "title": "证书路径",
       "subtitle": "指定节点上的目录 / 文件 / glob，节点每 5 分钟扫一次；可单独设通知开关",

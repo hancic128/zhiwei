@@ -590,11 +590,13 @@
       "subject": "Subject",
       "issuer": "Issuer",
       "domains": "Covered domains (SAN)",
+      "type": "Certificate type",
       "notBefore": "Valid from",
       "notAfter": "Expires at",
       "serial": "Serial",
       "path": "Certificate path"
     },
+    "wildcard": "Wildcard certificate",
     "sources": {
       "title": "Certificate paths",
       "subtitle": "Directories / files / globs on a chosen node; scanned every 5 minutes, with its own notify toggle",
