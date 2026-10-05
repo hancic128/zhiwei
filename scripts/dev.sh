@@ -125,8 +125,15 @@ cmd_start() {
     echo
   fi
 
-  local bt_token
-  bt_token="$(grep -o 'zhi-bt-[a-f0-9]*' "$MONITOR_LOG" 2>/dev/null | tail -1 || true)"
+  # Wait for monitor to start and print bootstrap token
+  local bt_token=""
+  local retries=10
+  while [ $retries -gt 0 ]; do
+    bt_token="$(grep -o 'zhi-bt-[a-f0-9]*' "$MONITOR_LOG" 2>/dev/null | tail -1 || true)"
+    [ -n "$bt_token" ] && break
+    sleep 1
+    retries=$((retries - 1))
+  done
   if [ -n "$bt_token" ]; then
     say "Bootstrap token: $bt_token (valid 10 minutes)"
     echo
