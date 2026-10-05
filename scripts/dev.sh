@@ -117,23 +117,21 @@ cmd_start() {
     fi
   fi
 
-  # Print tokens after monitor starts
-  if [ -f "$TOKEN_FILE" ]; then
-    echo
-    say "Admin token (stored at $TOKEN_FILE):"
-    cat "$TOKEN_FILE"
-    echo
-  fi
-
-  # Wait for monitor to start and print bootstrap token
+  # Wait for monitor to start and print tokens
   local bt_token=""
+  local admin_token=""
   local retries=10
   while [ $retries -gt 0 ]; do
     bt_token="$(grep -o 'zhi-bt-[a-f0-9]*' "$MONITOR_LOG" 2>/dev/null | tail -1 || true)"
-    [ -n "$bt_token" ] && break
+    admin_token="$(grep -o '\[ADMIN TOKEN\] [a-f0-9]*' "$MONITOR_LOG" 2>/dev/null | tail -1 | sed 's/\[ADMIN TOKEN\] //' || true)"
+    [ -n "$bt_token" ] && [ -n "$admin_token" ] && break
     sleep 1
     retries=$((retries - 1))
   done
+  if [ -n "$admin_token" ]; then
+    say "Admin token: $admin_token"
+    echo
+  fi
   if [ -n "$bt_token" ]; then
     say "Bootstrap token: $bt_token (valid 10 minutes)"
     echo
