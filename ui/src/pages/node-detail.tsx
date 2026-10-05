@@ -18,6 +18,7 @@ import {
   RotateCw,
   Skull,
   Trash2,
+  Upload,
   Zap,
 } from "lucide-react";
 import {
@@ -27,6 +28,7 @@ import {
   hostAddresses,
   METRICS,
   osLabel,
+  upgradeApi,
   waitForCommand,
   type ProcessInfo,
 } from "@/api";
@@ -84,6 +86,7 @@ type PendingAction =
   | { kind: "restart" }
   | { kind: "shutdown" }
   | { kind: "deleteNode" }
+  | { kind: "upgrade"; version: string; sha256: string }
   /** Upgrade after 409: first void the node's pending commands (write audit) then delete */
   | { kind: "forceDeleteNode" };
 
@@ -131,6 +134,14 @@ export function NodeDetail() {
     placeholderData: keepPreviousData,
   });
   const node = nodesQ.data?.find((n) => n.id === id);
+
+  // Fetch latest upgrade package info (for upgrade button)
+  const latestUpgradeQ = useQuery({
+    queryKey: ["latestUpgrade"],
+    queryFn: () => upgradeApi.latest().catch(() => null),
+    staleTime: 60_000, // Cache for 1 minute
+  });
+  const latestUpgrade = latestUpgradeQ.data;
 
   /**
    * All curves are always polled (including absolute disk values); switching "ratio / absolute"
@@ -317,6 +328,33 @@ export function NodeDetail() {
     }
   };
 
+  /** Send upgrade_agent command */
+  const runUpgradeCommand = async (version: string, sha256: string) => {
+    setBusy(true);
+    try {
+      // Get monitor base URL from current location
+      const baseUrl = `${window.location.protocol}//${window.location.host}`;
+      const downloadUrl = `${baseUrl}/v1/upgrade/${version}`;
+      const { command_id } = await commandsApi.exec(id, "upgrade_agent", {
+        version,
+        download_url: downloadUrl,
+        sha256,
+        restart: true,
+      });
+      const row = await waitForCommand(command_id);
+      if (!row) toast.push("warn", t("detail.cmdPending"));
+      else if (row.result_ok) {
+        toast.push("success", row.result_text || t("detail.upgradeAgentOk"));
+        void qc.invalidateQueries({ queryKey: ["nodes"] });
+      } else toast.push("error", row.result_error || t("detail.upgradeAgentFailed"));
+    } catch (e) {
+      toast.push("error", t(friendlyError(e)));
+    } finally {
+      setBusy(false);
+      setPending(null);
+    }
+  };
+
   /** Node deletion: on success, navigate back to list + invalidate nodes cache. Failure only shows toast.
    *  404 is treated as "deleted by someone else" and handled as success, redirect to list to avoid leaving
    *  user confused staring at a corpse.
@@ -401,6 +439,16 @@ export function NodeDetail() {
           label: t("detail.deleteNodeForceConfirm"),
           danger: true,
         };
+      case "upgrade":
+        return {
+          title: t("detail.upgradeAgent"),
+          message: t("detail.upgradeAgentMessage", {
+            version: pending.version,
+            name: node?.hostname ?? id,
+          }),
+          label: t("detail.upgradeAgent"),
+          danger: false,
+        };
       default:
         return null;
     }
@@ -476,6 +524,24 @@ export function NodeDetail() {
           <Power className="w-4 h-4" aria-hidden="true" />
         </Button>
       </Tooltip>
+      {latestUpgrade && (
+        <Tooltip content={t("detail.upgradeAgent", { version: latestUpgrade.version })}>
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label={t("detail.upgradeAgent", { version: latestUpgrade.version })}
+            onClick={() =>
+              setPending({
+                kind: "upgrade",
+                version: latestUpgrade.version,
+                sha256: latestUpgrade.sha256,
+              })
+            }
+          >
+            <Upload className="w-4 h-4" aria-hidden="true" />
+          </Button>
+        </Tooltip>
+      )}
       <Tooltip content={t("detail.deleteNode")}>
         <Button
           variant="ghost"
@@ -1005,6 +1071,8 @@ export function NodeDetail() {
               void runCommand("kill_process", { pid: pending.pid, signal: "kill" });
             else if (pending.kind === "restart") void runCommand("restart_host", {});
             else if (pending.kind === "shutdown") void runCommand("shutdown_host", {});
+            else if (pending.kind === "upgrade")
+              void runUpgradeCommand(pending.version, pending.sha256);
             else void runDeleteNode(pending.kind === "forceDeleteNode");
           }}
         />

@@ -894,6 +894,36 @@ export async function waitForCommand(
   }
 }
 
+// ---------- Agent Upgrade ----------
+
+export interface UpgradePackage {
+  version: string;
+  sha256: string;
+  size_bytes: number;
+  uploaded_at: string;
+}
+
+export interface UpgradeInfo {
+  version: string;
+  download_url: string;
+  sha256: string;
+  size_bytes: number;
+}
+
+/**
+ * Agent upgrade package API.
+ * Note: These endpoints are on the ops-server (loopback), proxied through monitor.
+ */
+export const upgradeApi = {
+  /** List all available upgrade packages */
+  list: () =>
+    request<{ packages: UpgradePackage[]; latest: string | null }>(
+      "/v1/upgrade-packages",
+    ),
+  /** Get latest upgrade package info */
+  latest: () => request<UpgradeInfo>("/v1/upgrade-packages/latest"),
+};
+
 // ---------- CA / Settings ----------
 
 export interface CaView {
