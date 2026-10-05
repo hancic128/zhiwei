@@ -226,7 +226,8 @@ cmd_stop() {
 
 cmd_reset() {
   cmd_stop
-  # Recompile and restart, preserving data
+  # Delete all data (CA, nodes, settings), then restart fresh
+  rm -rf "$DATA_DIR"
   cmd_start
 }
 
