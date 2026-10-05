@@ -200,6 +200,12 @@ fn commands_routes() -> Router<AppState> {
         .route("/v1/exec", post(exec_handler))
         .route("/v1/commands/history", get(command_history_handler))
         .route("/v1/commands/:id", get(command_detail_handler))
+        // Upgrade packages: proxy to ops-server
+        .route("/v1/upgrade-packages", get(upgrade_packages_handler))
+        .route(
+            "/v1/upgrade-packages/latest",
+            get(upgrade_packages_latest_handler),
+        )
         // Upgrade package download (nodes download binaries from here)
         .route("/v1/upgrade/:version", get(upgrade_binary_handler))
 }
@@ -4843,4 +4849,123 @@ async fn upgrade_binary_handler(
             )
         }
     }
+}
+
+// ---------- Upgrade packages proxy (forward to ops-server) ----------
+
+/// Proxy GET /v1/upgrade-packages to ops-server.
+async fn upgrade_packages_handler(State(state): State<AppState>) -> Response {
+    proxy_to_ops(&state.ops_endpoint, "/upgrade-packages", "GET", None).await
+}
+
+/// Proxy GET /v1/upgrade-packages/latest to ops-server.
+async fn upgrade_packages_latest_handler(State(state): State<AppState>) -> Response {
+    proxy_to_ops(&state.ops_endpoint, "/upgrade-packages/latest", "GET", None).await
+}
+
+/// Forward an HTTP request to ops-server and return the response.
+async fn proxy_to_ops(
+    ops_endpoint: &str,
+    path: &str,
+    method: &str,
+    body: Option<String>,
+) -> Response {
+    use http_body_util::BodyExt;
+
+    let Some(authority) = ops_endpoint.strip_prefix("http://") else {
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "ops endpoint must use http://",
+        );
+    };
+
+    let (host_port, ops_base_path) = authority
+        .find('/')
+        .map_or((authority, "/"), |i| (&authority[..i], &authority[i..]));
+
+    let (host, port) = match host_port.split_once(':') {
+        Some((h, p)) => (h, p.parse::<u16>().unwrap_or(8444)),
+        None => (host_port, 8444),
+    };
+
+    let target_path = format!("{ops_base_path}{path}");
+
+    let stream = match tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        tokio::net::TcpStream::connect((host, port)),
+    )
+    .await
+    {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                format!("can't connect to ops-server: {e}"),
+            )
+        }
+        Err(_) => {
+            return err(
+                StatusCode::GATEWAY_TIMEOUT,
+                "ops-server connection timed out",
+            )
+        }
+    };
+
+    let io = hyper_util::rt::TokioIo::new(stream);
+    let (mut sender, conn) = match hyper::client::conn::http1::handshake(io).await {
+        Ok((s, c)) => (s, c),
+        Err(e) => return err(StatusCode::BAD_GATEWAY, format!("handshake failed: {e}")),
+    };
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+
+    let req = match (method, &body) {
+        ("GET", None) => hyper::Request::builder()
+            .method("GET")
+            .uri(&target_path)
+            .header("Host", host)
+            .body(http_body_util::Full::new(bytes::Bytes::new()))
+            .map_err(|e| format!("failed to build request: {e}")),
+        ("POST", Some(b)) => hyper::Request::builder()
+            .method("POST")
+            .uri(&target_path)
+            .header("Host", host)
+            .header("Content-Type", "application/json")
+            .body(http_body_util::Full::new(bytes::Bytes::from(b.clone())))
+            .map_err(|e| format!("failed to build request: {e}")),
+        _ => return err(StatusCode::METHOD_NOT_ALLOWED, "unsupported method"),
+    };
+
+    let req = match req {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+
+    let resp =
+        match tokio::time::timeout(std::time::Duration::from_secs(3), sender.send_request(req))
+            .await
+        {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => return err(StatusCode::BAD_GATEWAY, format!("request failed: {e}")),
+            Err(_) => return err(StatusCode::GATEWAY_TIMEOUT, "request timed out"),
+        };
+
+    let status = resp.status();
+    let body_bytes = match resp.into_body().collect().await {
+        Ok(b) => b.to_bytes(),
+        Err(e) => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                format!("failed to read response: {e}"),
+            )
+        }
+    };
+
+    (
+        status,
+        [(header::CONTENT_TYPE, "application/json")],
+        body_bytes.to_vec(),
+    )
+        .into_response()
 }
