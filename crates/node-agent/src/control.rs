@@ -59,6 +59,20 @@ struct ScanCertsArgs {
     path: String,
 }
 
+/// `ACTION_UPGRADE_AGENT` parameters (JSON, matches proto's `UpgradeAgentParams`)
+#[derive(Debug, serde::Deserialize)]
+struct UpgradeAgentArgs {
+    version: String,
+    download_url: String,
+    sha256: String,
+    #[serde(default = "default_restart_true")]
+    restart: bool,
+}
+
+const fn default_restart_true() -> bool {
+    true
+}
+
 /// Seconds to block on long-poll (monitor side limit is 25s, using same value here).
 ///
 /// Previously "pull every 10 seconds": clicking delete container / test cert path took up to 10 seconds
@@ -84,6 +98,7 @@ const fn action_allowed(action: Action) -> bool {
             | Action::ContainerRemove
             | Action::RefreshInventory
             | Action::ScanCerts
+            | Action::UpgradeAgent
     )
 }
 
@@ -276,6 +291,9 @@ async fn execute(cmd: &Command, state: &NodeState) -> anyhow::Result<Vec<u8>> {
         // results returned as JSON receipt, UI directly lists matched certs or failure reasons
         Action::ScanCerts => execute_scan_certs(cmd),
 
+        // Remote upgrade: download new binary, verify, backup, replace, restart
+        Action::UpgradeAgent => execute_upgrade_agent(cmd).await,
+
         Action::Unspecified => bail!("unimplemented action"),
     }
 }
@@ -419,6 +437,131 @@ async fn run_shutdown(args: &[&str]) -> anyhow::Result<Vec<u8>> {
         }
     }
     bail!("shutdown/reboot dispatch failed: {last}")
+}
+
+/// Upgrade the node-agent binary.
+///
+/// Downloads the new binary from the given URL, verifies its SHA256 checksum,
+/// backs up the current version, atomically replaces it, and optionally restarts
+/// the agent via systemd.
+#[allow(clippy::cognitive_complexity)]
+async fn execute_upgrade_agent(cmd: &Command) -> anyhow::Result<Vec<u8>> {
+    let p: UpgradeAgentArgs =
+        serde_json::from_str(&cmd.params_json).context("failed to parse upgrade_agent params")?;
+
+    info!(
+        version = %p.version,
+        url = %p.download_url,
+        "Starting agent upgrade"
+    );
+
+    // 1. Download the new binary to a temporary location
+    let temp_path = format!("/tmp/node-agent-{}.bin", p.version);
+    download_file(&p.download_url, &temp_path).await?;
+
+    // 2. Verify SHA256 checksum
+    let hash = sha256_file(&temp_path)?;
+    if hash != p.sha256 {
+        let _ = std::fs::remove_file(&temp_path);
+        anyhow::bail!("SHA256 mismatch: expected {}, got {}", p.sha256, hash);
+    }
+
+    // 3. Get the current binary path
+    let current_exe = std::env::current_exe().context("failed to get current executable path")?;
+
+    // 4. Backup directory
+    let backup_dir = std::path::PathBuf::from("/var/lib/zhiwei-agent/backup");
+    std::fs::create_dir_all(&backup_dir).context("failed to create backup directory")?;
+    let backup_path = backup_dir.join(format!("node-agent.{}", p.version));
+
+    // 5. Backup current version (keep the version we're upgrading FROM)
+    // If we're already at the target version, this is a no-op
+    if !backup_path.exists() {
+        std::fs::copy(&current_exe, &backup_path).context("failed to backup current binary")?;
+        info!(backup_path = %backup_path.display(), "Current binary backed up");
+    }
+
+    // 6. Atomically replace the binary
+    // On Unix, rename() is atomic if src and dst are on the same filesystem
+    std::fs::rename(&temp_path, &current_exe).context("failed to replace binary")?;
+
+    // 7. Ensure executable permission
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&current_exe)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&current_exe, perms)?;
+    }
+
+    info!("Binary replaced successfully");
+
+    // 8. Restart agent via systemd if requested
+    if p.restart {
+        let output = tokio::process::Command::new("systemctl")
+            .args(["restart", "node-agent"])
+            .output()
+            .await
+            .context("failed to restart node-agent via systemctl")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("systemctl restart failed: {stderr}");
+        }
+
+        info!("Agent restart triggered via systemd");
+    }
+
+    Ok(format!(
+        "upgraded to {}, backup at {}",
+        p.version,
+        backup_path.display()
+    )
+    .into_bytes())
+}
+
+/// Download a file from URL to local path using the agent's HTTP client.
+async fn download_file(url: &str, dest_path: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+
+    let response = reqwest::get(url)
+        .await
+        .with_context(|| format!("failed to download from {url}"))?;
+
+    if !response.status().is_success() {
+        anyhow::bail!("download failed with status {}: {}", response.status(), url);
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .context("failed to read response body")?;
+
+    let mut file = std::fs::File::create(dest_path)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+
+    Ok(())
+}
+
+/// Calculate SHA256 hash of a file.
+fn sha256_file(path: &str) -> anyhow::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+
+    loop {
+        let n = file.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+    }
+
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 async fn submit_result(

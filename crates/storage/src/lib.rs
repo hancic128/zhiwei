@@ -13,6 +13,7 @@ pub mod commands_repo;
 pub mod inventory_repo;
 pub mod migrations;
 pub mod node_repo;
+pub mod node_versions_repo;
 pub mod probes_repo;
 pub mod settings_repo;
 pub mod telemetry_repo;
@@ -23,11 +24,17 @@ use sqlx::SqlitePool;
 use std::path::Path;
 use std::str::FromStr;
 
+type SqlxPool = SqlitePool;
+
 pub use alerts_repo::AlertsRepo;
 pub use cert_sources_repo::CertSourcesRepo;
 pub use commands_repo::CommandsRepo;
 pub use inventory_repo::InventoryRepo;
 pub use node_repo::NodeRepo;
+pub use node_versions_repo::{
+    get_node_version, get_upgrade_history, record_upgrade_finish, record_upgrade_start,
+    set_node_version, NodeVersion, UpgradeHistoryEntry, UpgradeStatus,
+};
 pub use probes_repo::ProbesRepo;
 pub use settings_repo::SettingsRepo;
 pub use telemetry_repo::TelemetryRepo;
@@ -109,5 +116,97 @@ impl Storage {
     #[must_use]
     pub fn settings(&self) -> SettingsRepo {
         SettingsRepo::new(self.pool.clone())
+    }
+
+    #[must_use]
+    pub fn node_versions(&self) -> NodeVersionsRepo {
+        NodeVersionsRepo::new(self.pool.clone())
+    }
+}
+
+/// Repository for node agent version tracking and upgrade history.
+#[derive(Clone)]
+pub struct NodeVersionsRepo {
+    pool: SqlxPool,
+}
+
+#[allow(clippy::cast_possible_truncation)]
+impl NodeVersionsRepo {
+    #[must_use]
+    pub const fn new(pool: SqlxPool) -> Self {
+        Self { pool }
+    }
+
+    /// Get the current version of a node.
+    ///
+    /// # Errors
+    /// Returns error if database query fails.
+    #[allow(clippy::missing_errors_doc)]
+    pub async fn get(&self, node_id: &str) -> anyhow::Result<Option<NodeVersion>> {
+        node_versions_repo::get_node_version(&self.pool, node_id).await
+    }
+
+    /// Set or update the current version of a node.
+    ///
+    /// # Errors
+    /// Returns error if database operation fails.
+    /// # Panics
+    /// Panics if system time is before UNIX epoch (should not happen).
+    #[allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
+    pub async fn set(&self, node_id: &str, version: &str) -> anyhow::Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as i64;
+        node_versions_repo::set_node_version(&self.pool, node_id, version, now).await
+    }
+
+    /// Record an upgrade start in history.
+    ///
+    /// # Errors
+    /// Returns error if database operation fails.
+    pub async fn record_upgrade_start(
+        &self,
+        node_id: &str,
+        from_version: Option<&str>,
+        to_version: &str,
+    ) -> anyhow::Result<i64> {
+        node_versions_repo::record_upgrade_start(&self.pool, node_id, from_version, to_version)
+            .await
+    }
+
+    /// Record upgrade completion (success or failure).
+    ///
+    /// # Errors
+    /// Returns error if database operation fails.
+    pub async fn record_upgrade_finish(
+        &self,
+        node_id: &str,
+        to_version: &str,
+        status: UpgradeStatus,
+        error: Option<&str>,
+    ) -> anyhow::Result<()> {
+        node_versions_repo::record_upgrade_finish(&self.pool, node_id, to_version, status, error)
+            .await
+    }
+
+    /// Get upgrade history for a node.
+    ///
+    /// # Errors
+    /// Returns error if database query fails.
+    pub async fn history(
+        &self,
+        node_id: &str,
+        limit: i64,
+    ) -> anyhow::Result<Vec<UpgradeHistoryEntry>> {
+        node_versions_repo::get_upgrade_history(&self.pool, node_id, limit).await
+    }
+
+    /// Get the latest version info across all nodes.
+    ///
+    /// # Errors
+    /// Returns error if database query fails.
+    pub async fn get_all(&self) -> anyhow::Result<Vec<NodeVersion>> {
+        node_versions_repo::get_all_node_versions(&self.pool).await
     }
 }

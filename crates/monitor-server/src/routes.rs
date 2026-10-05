@@ -200,6 +200,8 @@ fn commands_routes() -> Router<AppState> {
         .route("/v1/exec", post(exec_handler))
         .route("/v1/commands/history", get(command_history_handler))
         .route("/v1/commands/:id", get(command_detail_handler))
+        // Upgrade package download (nodes download binaries from here)
+        .route("/v1/upgrade/:version", get(upgrade_binary_handler))
 }
 
 /// Validate the node request signature (replacing the old mTLS client certificates).
@@ -4779,5 +4781,66 @@ mod channel_patch_tests {
         let merged = merge_channel_patch(feishu, &body(r#"{"receive_id":""}"#)).unwrap();
         let msg = validate(&merged).unwrap_err();
         assert!(msg.contains("receive ID"), "{msg}");
+    }
+}
+
+// ============================================================================
+// Upgrade package download
+// ============================================================================
+
+/// Path to the upgrade packages directory (set via environment or default).
+fn upgrade_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(
+        std::env::var("ZHIWEI_UPGRADE_DIR").unwrap_or_else(|_| "/opt/zhiwei/agent-upgrades".into()),
+    )
+}
+
+/// Serve the upgrade binary for a specific version.
+/// Authenticated via node Ed25519 signature (same as other node endpoints).
+#[allow(clippy::cognitive_complexity)]
+async fn upgrade_binary_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(version): axum::extract::Path<String>,
+) -> Response {
+    // Verify node authentication (same as telemetry endpoint)
+    let (node_id, _pub_key) = match verify_node(
+        &state,
+        &headers,
+        "GET",
+        &format!("/v1/upgrade/{version}"),
+        &[],
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err((status, msg)) => return err(status, msg),
+    };
+
+    let upgrade_dir = upgrade_dir();
+    let binary_path = upgrade_dir.join(&version).join("node-agent");
+
+    // Check if file exists
+    match tokio::fs::read(&binary_path).await {
+        Ok(data) => {
+            tracing::debug!(node_id = %node_id, version = %version, size = data.len(), "serving upgrade binary");
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/octet-stream")],
+                data,
+            )
+                .into_response()
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::warn!(node_id = %node_id, version = %version, "upgrade binary not found");
+            err(StatusCode::NOT_FOUND, "upgrade package not found")
+        }
+        Err(e) => {
+            tracing::error!(node_id = %node_id, version = %version, error = %e, "failed to read upgrade binary");
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to read upgrade package",
+            )
+        }
     }
 }

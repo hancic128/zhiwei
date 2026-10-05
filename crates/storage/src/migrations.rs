@@ -45,6 +45,7 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
     m022_settings_table(pool).await?;
     m023_remove_service_layer(pool).await?;
     m024_retention_settings(pool).await?;
+    m025_node_versions(pool).await?;
 
     Ok(())
 }
@@ -770,6 +771,46 @@ async fn m024_retention_settings(pool: &SqlitePool) -> anyhow::Result<()> {
         INSERT OR IGNORE INTO settings (key, value) VALUES ('hourly_retention_days', '730');
 
         INSERT INTO schema_version (version) VALUES (24);
+        ",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// 025: Node agent versions tracking
+//
+// Tracks which version each node is running and upgrade history for auditing
+// and rollback support.
+async fn m025_node_versions(pool: &SqlitePool) -> anyhow::Result<()> {
+    if migration_applied(pool, 25).await? {
+        return Ok(());
+    }
+    sqlx::query(
+        r"
+        -- Current version per node (updated on upgrade or enrollment)
+        CREATE TABLE node_versions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            node_id TEXT NOT NULL,
+            version TEXT NOT NULL,
+            upgraded_at_unix_nano INTEGER NOT NULL,
+            UNIQUE(node_id)
+        );
+
+        -- Upgrade history for auditing and rollback support
+        CREATE TABLE upgrade_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            node_id TEXT NOT NULL,
+            from_version TEXT,
+            to_version TEXT NOT NULL,
+            status TEXT NOT NULL,              -- success | failed | rollback_success | rollback_failed
+            error TEXT,
+            created_at_unix_nano INTEGER NOT NULL,
+            finished_at_unix_nano INTEGER
+        );
+        CREATE INDEX idx_upgrade_history_node ON upgrade_history(node_id, created_at_unix_nano DESC);
+
+        INSERT INTO schema_version (version) VALUES (25);
         ",
     )
     .execute(pool)

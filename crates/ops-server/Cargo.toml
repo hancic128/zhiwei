@@ -32,3 +32,5 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
+sha2 = "0.10"
+chrono = { workspace = true }

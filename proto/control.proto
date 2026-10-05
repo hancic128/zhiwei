@@ -17,6 +17,7 @@ enum Action {
   ACTION_REFRESH_INVENTORY = 9;  // force an immediate inventory snapshot (no params)
   ACTION_SCAN_CERTS = 10;        // scan certificates under a path (params: ScanCertsParams)
   ACTION_CONTAINER_REMOVE = 11;  // remove a container (params: ContainerActionParams, force defaults to false)
+  ACTION_UPGRADE_AGENT = 12;     // upgrade node-agent binary (params: UpgradeAgentParams)
 }
 
 // Commands are signed by ops-server's private key; nodes verify them with
@@ -79,4 +80,16 @@ message ContainerActionParams {
 // receipt payload as JSON so the console "test" button can render them.
 message ScanCertsParams {
   string path = 1;
+}
+
+// ACTION_UPGRADE_AGENT params.
+//
+// Upgrades the node-agent binary. The agent downloads the new binary,
+// verifies its SHA256 checksum, backs up the current version, replaces it,
+// and optionally restarts.
+message UpgradeAgentParams {
+  string version = 1;            // target version (e.g. "v1.2.3")
+  string download_url = 2;       // URL to download the binary from
+  string sha256 = 3;             // SHA256 checksum of the binary
+  bool restart = 4;              // whether to restart after upgrade (default true)
 }
