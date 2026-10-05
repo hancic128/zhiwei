@@ -280,7 +280,10 @@
     "batchUpgradeHint": "Upgrade selected nodes to {{version}}",
     "upgradeTitle": "Upgrade agents",
     "upgradeMessage": "Upgrade agent on {{count}} node(s) to version {{version}}? The agents will download the new binary, replace themselves, and restart.",
+    "upgradeSingleMessage": "Upgrade agent on node {{node}} to version {{version}}? The agent will download the new binary, replace itself, and restart.",
     "upgradeConfirm": "Upgrade",
+    "upgradeSuccess": "Upgrade command sent. The node will download and restart automatically.",
+    "upgradeNode": "Upgrade to {{version}}",
     "upgradeResults": "{{success}} upgraded, {{failed}} failed"
   },
   "nodeMeta": {
@@ -1001,12 +1004,18 @@
     "rawTitle": "Raw telemetry",
     "rawDays": "{{n}} days",
     "rawHint": "10-second resolution, auto-deleted after this period",
+    "rawDescription": "Raw 10-second telemetry data retention in days. Reduce to save disk space at cost of losing recent granularity.",
+    "rawWhenEffective": "Next retention run (every 10 minutes). Existing raw data older than new value will be deleted.",
     "hourlyTitle": "Hourly aggregates",
     "hourlyDays": "{{n}} days",
     "hourlyHint": "1-hour resolution, auto-deleted after this period",
+    "hourlyDescription": "Hourly aggregate data retention in days. Aggregates preserve trends when raw data expires.",
+    "hourlyWhenEffective": "Next retention run (every 10 minutes).",
     "alertTitle": "Resolved alerts",
     "alertDays": "{{n}} days",
     "alertDaysHint": "Resolved alerts older than this are automatically purged",
+    "alertDescription": "Resolved alert history retention in days. Keep longer for audit and trend analysis.",
+    "alertWhenEffective": "Next retention run (every 10 minutes).",
     "daysUnit": "days"
   }
 }

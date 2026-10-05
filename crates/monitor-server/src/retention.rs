@@ -272,18 +272,18 @@ pub async fn patch_retention_handler(
     Json(serde_json::json!({
         "raw_retention_days": {
             "value": raw_days,
-            "description": "Raw 10-second telemetry data retention in days. Reduce to save disk space at cost of losing recent granularity.",
-            "when_effective": "Next retention run (every 10 minutes). Existing raw data older than new value will be deleted."
+            "description": "retention.rawDescription",
+            "when_effective": "retention.rawWhenEffective"
         },
         "hourly_retention_days": {
             "value": hourly_days,
-            "description": "Hourly aggregate data retention in days. Aggregates preserve trends when raw data expires.",
-            "when_effective": "Next retention run (every 10 minutes)."
+            "description": "retention.hourlyDescription",
+            "when_effective": "retention.hourlyWhenEffective"
         },
         "alert_retention_days": {
             "value": alert_days,
-            "description": "Resolved alert history retention in days. Keep longer for audit and trend analysis.",
-            "when_effective": "Next retention run (every 10 minutes)."
+            "description": "retention.alertDescription",
+            "when_effective": "retention.alertWhenEffective"
         }
     }))
     .into_response()

@@ -280,7 +280,10 @@
     "batchUpgradeHint": "升级所选节点到 {{version}}",
     "upgradeTitle": "升级 Agent",
     "upgradeMessage": "将 {{count}} 个节点上的 Agent 升级到 {{version}}？Agent 会下载新程序、替换自身并重启。",
+    "upgradeSingleMessage": "将节点 {{node}} 的 Agent 升级到 {{version}}？Agent 会下载新程序、替换自身并重启。",
     "upgradeConfirm": "升级",
+    "upgradeSuccess": "升级命令已发送，节点将自动下载并重启",
+    "upgradeNode": "升级到 {{version}}",
     "upgradeResults": "成功 {{success}} 台，失败 {{failed}} 台"
   },
   "nodeMeta": {
@@ -1000,12 +1003,18 @@
     "rawTitle": "原始遥测",
     "rawDays": "{{n}} 天",
     "rawHint": "10秒精度，超期自动删除",
+    "rawDescription": "原始10秒精度遥测数据的保留天数。减少可节省磁盘空间，但会失去近期粒度。",
+    "rawWhenEffective": "下次保留任务运行（每10分钟）时生效。超过新值的已有原始数据将被删除。",
     "hourlyTitle": "小时聚合",
     "hourlyDays": "{{n}} 天",
     "hourlyHint": "1小时精度，超期自动删除",
+    "hourlyDescription": "小时聚合数据的保留天数。原始数据过期后，聚合数据保留趋势信息。",
+    "hourlyWhenEffective": "下次保留任务运行（每10分钟）时生效。",
     "alertTitle": "已解决告警",
     "alertDays": "{{n}} 天",
     "alertDaysHint": "早于此时间的已解决告警将自动清理",
+    "alertDescription": "已解决告警历史的保留天数。保留更长时间便于审计和趋势分析。",
+    "alertWhenEffective": "下次保留任务运行（每10分钟）时生效。",
     "daysUnit": "天"
   }
 }

@@ -126,10 +126,6 @@ export function HelpPage() {
   return (
     <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_200px]">
       <article className="space-y-8 min-w-0">
-        <h1 className="text-xl font-semibold text-ink-900 dark:text-surface-0">
-          {t("help.title")}
-        </h1>
-
         {q.isLoading ? (
           <>
             <Skeleton className="h-8 w-1/2" />

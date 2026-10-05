@@ -141,8 +141,8 @@ function RetentionSection() {
                   <span className="text-ink-500">{t("retention.daysUnit")}</span>
                 </div>
                 <p className="text-xs text-ink-400 mt-1">{t("retention.rawHint")}</p>
-                <p className="text-xs text-ink-500 mt-1">{q.data.raw_retention_days.description}</p>
-                <p className="text-xs text-brand-600 dark:text-brand-400 mt-1">{q.data.raw_retention_days.when_effective}</p>
+                <p className="text-xs text-ink-500 mt-1">{t(q.data.raw_retention_days.description)}</p>
+                <p className="text-xs text-brand-600 dark:text-brand-400 mt-1">{t(q.data.raw_retention_days.when_effective)}</p>
               </div>
               <div>
                 <p className="text-xs text-ink-400">{t("retention.hourlyTitle")}</p>
@@ -158,8 +158,8 @@ function RetentionSection() {
                   <span className="text-ink-500">{t("retention.daysUnit")}</span>
                 </div>
                 <p className="text-xs text-ink-400 mt-1">{t("retention.hourlyHint")}</p>
-                <p className="text-xs text-ink-500 mt-1">{q.data.hourly_retention_days.description}</p>
-                <p className="text-xs text-brand-600 dark:text-brand-400 mt-1">{q.data.hourly_retention_days.when_effective}</p>
+                <p className="text-xs text-ink-500 mt-1">{t(q.data.hourly_retention_days.description)}</p>
+                <p className="text-xs text-brand-600 dark:text-brand-400 mt-1">{t(q.data.hourly_retention_days.when_effective)}</p>
               </div>
               <div>
                 <p className="text-xs text-ink-400">{t("retention.alertTitle")}</p>
@@ -175,8 +175,8 @@ function RetentionSection() {
                   <span className="text-ink-500">{t("retention.daysUnit")}</span>
                 </div>
                 <p className="text-xs text-ink-400 mt-1">{t("retention.alertDaysHint")}</p>
-                <p className="text-xs text-ink-500 mt-1">{q.data.alert_retention_days.description}</p>
-                <p className="text-xs text-brand-600 dark:text-brand-400 mt-1">{q.data.alert_retention_days.when_effective}</p>
+                <p className="text-xs text-ink-500 mt-1">{t(q.data.alert_retention_days.description)}</p>
+                <p className="text-xs text-brand-600 dark:text-brand-400 mt-1">{t(q.data.alert_retention_days.when_effective)}</p>
               </div>
             </div>
             {isDirty && (
