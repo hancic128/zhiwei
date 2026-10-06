@@ -132,7 +132,7 @@ jobs:
           set -eu
           f="zhiwei-${{ matrix.target }}.tar.gz"
           curl -fsS -u "$USER:$PASS" -T "$f" \
-            "https://${HOST}/releases/hancic128/zhiwei/${f}"
+            "https://${HOST}/releases/hancic128/zhiwei/${GITHUB_REF_NAME#v}/${f}"
           echo "Uploaded to artifacts.hancic.site/releases/hancic128/zhiwei/${f}"
 
       # Upload install.sh to hancic-artifacts public/ (国内可访问)
