@@ -131,9 +131,13 @@ jobs:
         run: |
           set -eu
           f="zhiwei-${{ matrix.target }}.tar.gz"
+          # 上传到版本目录
           curl -fsS -u "$USER:$PASS" -T "$f" \
             "https://${HOST}/releases/hancic128/zhiwei/${GITHUB_REF_NAME#v}/${f}"
-          echo "Uploaded to artifacts.hancic.site/releases/hancic128/zhiwei/${f}"
+          # 同时上传到 latest 目录
+          curl -fsS -u "$USER:$PASS" -T "$f" \
+            "https://${HOST}/releases/hancic128/zhiwei/latest/${f}"
+          echo "Uploaded to artifacts.hancic.site/releases/hancic128/zhiwei/${GITHUB_REF_NAME#v}/${f} and latest/"
 
       # Upload install.sh to hancic-artifacts public/ (国内可访问)
       # Only run once, not on every matrix job (install.sh is identical across platforms)
