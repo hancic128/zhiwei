@@ -1,0 +1,89 @@
+name: Release (Docker + Deploy)
+
+# Push tag -> build Docker image, push to ghcr, trigger app-deploy.
+# Also supports manual dispatch to verify the build still works.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'image tag to deploy (e.g. v0.1.0)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  packages: write  # required to push to ghcr
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/hancic128/zhiwei
+
+jobs:
+  docker:
+    name: Build & Push Docker
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.vars.outputs.TAG }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set tag
+        id: vars
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME#v}"
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_OUTPUT"
+          echo "::notice::Using tag: $TAG"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login ghcr
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ steps.vars.outputs.TAG }}
+            type=sha,prefix=
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=min
+          platforms: linux/amd64  # VPS runs on x86_64
+
+  trigger-deploy:
+    needs: docker
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger app-deploy
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.APP_DEPLOY_DISPATCH_TOKEN }}
+          repository: hancic128/app-deploy
+          event-type: deploy
+          client-payload: |
+            {
+              "app": "zhiwei",
+              "tag": "${{ needs.docker.outputs.tag }}"
+            }
+          retry-delay: 10s
+          max-retries: 3
