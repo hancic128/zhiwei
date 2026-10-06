@@ -110,3 +110,49 @@ jobs:
             zhiwei-${{ matrix.target }}.tar.gz.sha256
           fail_on_unmatched_files: true
 
+      # Publish to GitHub Packages (hancic128-artifacts)
+      - name: Push to GitHub Packages
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: zhiwei-${{ matrix.target }}
+          path: |
+            zhiwei-${{ matrix.target }}.tar.gz
+            zhiwei-${{ matrix.target }}.tar.gz.sha256
+          retention-days: 30
+
+      # Upload to hancic-artifacts (国内加速)
+      - name: Upload to hancic-artifacts
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          HOST: ${{ secrets.ARTIFACTS_HOST }}
+          USER: ${{ secrets.ARTIFACTS_USER }}
+          PASS: ${{ secrets.ARTIFACTS_PASS }}
+        run: |
+          set -eu
+          f="zhiwei-${{ matrix.target }}.tar.gz"
+          # 上传到暂存区
+          curl -fsS -u "$USER:$PASS" -T "$f" \
+            "https://${HOST}/upload/${f}"
+          # MOVE 到 releases（后端 nginx 处理实际文件移动）
+          BACKEND="${HOST%%:*}"
+          curl -fsS -u "$USER:$PASS" -X MOVE \
+            -H "Destination: http://${BACKEND}:8888/releases/hancic128/zhiwei/v${GITHUB_REF_NAME#v}/${f}" \
+            -H "Overwrite: T" \
+            "https://${HOST}/upload/${f}"
+          echo "Uploaded to artifacts.hancic.site/releases/hancic128/zhiwei/v${GITHUB_REF_NAME#v}/${f}"
+
+      # Upload install.sh to hancic-artifacts public/ (国内可访问)
+      - name: Upload install.sh to artifacts
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          HOST: ${{ secrets.ARTIFACTS_HOST }}
+          USER: ${{ secrets.ARTIFACTS_USER }}
+          PASS: ${{ secrets.ARTIFACTS_PASS }}
+        run: |
+          set -eu
+          # 安装脚本直接 PUT 到 public 目录（匿名可读）
+          curl -fsS -u "$USER:$PASS" -T scripts/install.sh \
+            "https://${HOST}/public/install.sh"
+          echo "Uploaded install.sh to artifacts.hancic.site/public/install.sh"
+
