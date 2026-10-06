@@ -1165,15 +1165,16 @@ async fn patch_node_handler(
 /// `audit_log` is retained — it's for post-hoc accountability and shouldn't be
 /// laundered just because the node is gone.
 ///
-/// Precondition: no "still-valid" pending commands — these are in transit and would
+/// Precondition (non-force): no "still-valid" pending commands — these are in transit and would
 /// leave dangling records if the node is deleted (no one will ever receive the receipt).
 /// Expired ones (TTL passed) don't count: the node would refuse them upon receipt,
 /// and using them to block deletion would make the node permanently undeletable
 /// (a re-installed node gets a new `node_id` and never comes back to poll).
 ///
-/// `?force=1`: voids all unsent commands for this node (writes `audit_log`, outcome=cancelled),
-/// then deletes. "Cancel first" needs a button somewhere — when the command channel is broken
-/// or the node is reinstalled, "wait for the node to pull" will simply never happen.
+/// `?force=1`:
+///   - voids all unsent commands for this node (writes `audit_log`, outcome=cancelled), then deletes
+///   - idempotent: if node doesn't exist, returns 204 (success) instead of 404
+///   - use when agent is uninstalled / node is unreachable / node no longer in DB
 ///
 /// Probe bindings: remove the node id from every `probes.node_ids_json` array. A probe with
 /// no remaining node bindings falls back to "any node" (empty array = all nodes) — this
@@ -1195,48 +1196,58 @@ async fn delete_node_handler(
         return err(StatusCode::BAD_REQUEST, "node id cannot be empty");
     }
     let id = zhiwei_common::NodeId::from_string(trimmed.clone());
-    let exists = match state.storage.nodes().find_by_id(&id).await {
-        Ok(Some(_)) => true,
-        Ok(None) => return err(StatusCode::NOT_FOUND, "node not enrolled"),
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("lookup: {e}")),
-    };
 
     let force = matches!(
         q.get("force").map(String::as_str),
         Some("1" | "true" | "yes")
     );
 
-    let now_ns = zhiwei_common::Timestamp::now().unix_nano();
-    let pending = match state
-        .storage
-        .commands()
-        .count_pending_for_node(&trimmed, now_ns)
-        .await
-    {
-        Ok(n) => n,
-        Err(e) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("count commands: {e}"),
-            )
+    // Check if node exists (skip for force mode to support idempotent delete)
+    let exists = if force {
+        // force mode: skip existence check, proceed directly to delete
+        true
+    } else {
+        match state.storage.nodes().find_by_id(&id).await {
+            Ok(Some(_)) => true,
+            Ok(None) => return err(StatusCode::NOT_FOUND, "node not enrolled"),
+            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("lookup: {e}")),
         }
     };
-    if pending > 0 {
-        if !force {
-            return err(
-                StatusCode::CONFLICT,
-                format!(
-                    "this node still has {pending} unsent commands (pending state): wait for the node to pull before deleting,\
+
+    // Skip pending commands check if node doesn't exist (force mode with already-deleted node)
+    if exists {
+        let now_ns = zhiwei_common::Timestamp::now().unix_nano();
+        let pending = match state
+            .storage
+            .commands()
+            .count_pending_for_node(&trimmed, now_ns)
+            .await
+        {
+            Ok(n) => n,
+            Err(e) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("count commands: {e}"),
+                )
+            }
+        };
+        if pending > 0 {
+            if !force {
+                return err(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "this node still has {pending} unsent commands (pending state): wait for the node to pull before deleting,\
                      or void them and delete (DELETE …?force=1)"
-                ),
-            );
-        }
-        if let Err(resp) = void_pending_commands(&state, &trimmed, now_ns).await {
-            return resp;
+                    ),
+                );
+            }
+            if let Err(resp) = void_pending_commands(&state, &trimmed, now_ns).await {
+                return resp;
+            }
         }
     }
 
-    delete_node_row(&state, &trimmed, exists).await
+    delete_node_row(&state, &trimmed, exists, force).await
 }
 
 /// `?force=1` path: void every unsent command for the node and write one `audit_log`
@@ -1287,19 +1298,19 @@ async fn void_pending_commands(
     Ok(())
 }
 
-async fn delete_node_row(state: &AppState, node_id: &str, exists: bool) -> Response {
+async fn delete_node_row(state: &AppState, node_id: &str, _exists: bool, force: bool) -> Response {
     match state.storage.nodes().delete(node_id).await {
         Ok(true) => {
             info!(node_id = %node_id, "Node deleted");
             (StatusCode::NO_CONTENT).into_response()
         }
         Ok(false) => {
-            // exists=true reaching here shouldn't happen, but guard for the case where the node was concurrently deleted
-            if exists {
-                err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "delete reported 0 rows affected, but the node was just there",
-                )
+            // Node not found:
+            // - force=true: idempotent delete, return success (node already gone or never existed)
+            // - force=false: normal 404 (shouldn't reach here in normal flow)
+            if force {
+                info!(node_id = %node_id, "Node already absent (force delete)");
+                (StatusCode::NO_CONTENT).into_response()
             } else {
                 err(StatusCode::NOT_FOUND, "node not enrolled")
             }

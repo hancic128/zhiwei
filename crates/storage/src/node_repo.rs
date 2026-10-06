@@ -240,7 +240,8 @@ impl NodeRepo {
     ///     must be deleted first. `telemetry_hourly` / `probe_results` / `cert_sources` / alerts /
     ///     `alert_state` have no FKs, but must also be cleared when node is deleted -- without the
     ///     node, historical metrics and "auto-close alerts" make no sense.
-    ///   - **`probes.node_id` is a single node binding**: delete probes bound to this node.
+    ///   - **`probes.node_ids_json` is multi-node binding**: if probe has only this node, delete it;
+    ///     otherwise remove this node from the JSON array (empty array = "any node" persists).
     ///   - **commands deleted together**: issued commands are all "targeting this node", meaningless
     ///     without the node. The only thing to preserve is `audit_log`, but `audit_log` has no `node_id` column.
     ///
@@ -250,11 +251,32 @@ impl NodeRepo {
     pub async fn delete(&self, id: &str) -> anyhow::Result<bool> {
         let mut tx = self.pool.begin().await?;
 
-        // Delete probes bound to this node
-        sqlx::query("DELETE FROM probes WHERE node_id = ?")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
+        // Remove this node from probes.node_ids_json arrays.
+        // - Probes with only this node: delete entirely.
+        // - Probes with multiple nodes: remove this node from the array.
+        // Probes with empty array = "any node" (all nodes), so they persist.
+        //
+        // Step 1: delete probes bound ONLY to this node (array length = 1, element = id)
+        sqlx::query(
+            "DELETE FROM probes WHERE json_array_length(node_ids_json) = 1 \
+             AND json_extract(node_ids_json, '$[0]') = ?",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
+        // Step 2: for probes with multiple nodes, remove this id from the JSON array
+        // json_remove needs the array index, so we use a correlated subquery per row
+        sqlx::query(
+            "UPDATE probes SET node_ids_json = \
+             (SELECT json_group_array(value) FROM json_each(node_ids_json) \
+              WHERE value != ?) \
+             WHERE EXISTS (SELECT 1 FROM json_each(probes.node_ids_json) WHERE value = ?)",
+        )
+        .bind(id)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
 
         // telemetry_batches / node_inventory have FK references, must be deleted first.
         // audit_log is preserved: operational audit is for post-incident review, should still be visible after node deletion.
@@ -396,8 +418,8 @@ mod delete_tests {
         .unwrap();
         // Probe bound to node n1 (to be deleted)
         sqlx::query(
-            "INSERT INTO probes (id, name, kind, target_json, expect_json, interval_seconds, timeout_ms, failure_threshold, node_id, location, enabled, description, created_at_unix_nano, updated_at_unix_nano)
-             VALUES ('pr1', 'http', 'http', '{}', '{}', 60, 5000, 3, 'n1', '', 1, '', 0, 0)",
+            "INSERT INTO probes (id, name, kind, target_json, expect_json, interval_seconds, timeout_ms, failure_threshold, node_ids_json, location, enabled, description, created_at_unix_nano, updated_at_unix_nano)
+             VALUES ('pr1', 'http', 'http', '{}', '{}', 60, 5000, 3, '[\"n1\"]', '', 1, '', 0, 0)",
         )
         .execute(pool)
         .await
@@ -464,9 +486,9 @@ mod delete_tests {
             "audit_log must be preserved -- it's an audit requirement"
         );
 
-        // n1 probe should be deleted along with node deletion
+        // n1 probe should be deleted along with node deletion (single-node binding)
         let probe_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM probes WHERE node_id = 'n1'")
+            sqlx::query_scalar("SELECT COUNT(*) FROM probes WHERE json_extract(node_ids_json, '$[0]') = 'n1' AND json_array_length(node_ids_json) = 1")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
