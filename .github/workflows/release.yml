@@ -121,7 +121,7 @@ jobs:
             zhiwei-${{ matrix.target }}.tar.gz.sha256
           retention-days: 30
 
-      # Upload to hancic-artifacts (国内加速)
+      # Upload to hancic-artifacts public/zhiwei/ (国内加速)
       - name: Upload to hancic-artifacts
         if: startsWith(github.ref, 'refs/tags/v')
         env:
@@ -131,16 +131,9 @@ jobs:
         run: |
           set -eu
           f="zhiwei-${{ matrix.target }}.tar.gz"
-          # 上传到暂存区
           curl -fsS -u "$USER:$PASS" -T "$f" \
-            "https://${HOST}/upload/${f}"
-          # MOVE 到 releases（后端 nginx 处理实际文件移动）
-          BACKEND="${HOST%%:*}"
-          curl -fsS -u "$USER:$PASS" -X MOVE \
-            -H "Destination: http://${BACKEND}:8888/releases/hancic128/zhiwei/v${GITHUB_REF_NAME#v}/${f}" \
-            -H "Overwrite: T" \
-            "https://${HOST}/upload/${f}"
-          echo "Uploaded to artifacts.hancic.site/releases/hancic128/zhiwei/v${GITHUB_REF_NAME#v}/${f}"
+            "https://${HOST}/public/zhiwei/${f}"
+          echo "Uploaded to artifacts.hancic.site/public/zhiwei/${f}"
 
       # Upload install.sh to hancic-artifacts public/ (国内可访问)
       # Only run once, not on every matrix job (install.sh is identical across platforms)
