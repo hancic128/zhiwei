@@ -50,10 +50,13 @@ const BUILTIN_META: Record<
 > = {
   node_offline: { metric: "host.online = 0", severity: "critical", tone: "danger" },
   node_online: { metric: "host.online = 1", severity: "info", tone: "info" },
+  node_joined: { metric: "node.enrolled", severity: "info", tone: "info" },
   service_offline: { metric: "probe.state = down", severity: "critical", tone: "danger" },
   service_online: { metric: "probe.state = ok", severity: "info", tone: "info" },
+  service_joined: { metric: "probe.first_ok", severity: "info", tone: "info" },
   container_stopped: { metric: "container.state = stopped", severity: "warning", tone: "warn" },
   container_started: { metric: "container.state = started", severity: "info", tone: "info" },
+  container_joined: { metric: "container.discovered", severity: "info", tone: "info" },
   cert_expired: { metric: "cert.days_left < 0", severity: "critical", tone: "danger" },
   cert_expiring: { metric: "cert.days_left < notify_days_before", severity: "warning", tone: "warn" },
   cpu_high: { metric: "host.cpu.usage > threshold", severity: "warning", tone: "warn" },

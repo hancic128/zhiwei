@@ -1618,6 +1618,20 @@ mod container_builtin_channel_tests {
     }
 
     #[tokio::test]
+    async fn migration_026_seeds_join_alerts() {
+        let repo = AlertsRepo::new(fresh_pool().await);
+        let list = repo.list_builtin_rules().await.unwrap();
+        let ids: Vec<&str> = list.iter().map(|r| r.id.as_str()).collect();
+        for want in ["node_joined", "container_joined", "service_joined"] {
+            assert!(ids.contains(&want), "missing builtin alert {want}: {ids:?}");
+            assert!(
+                repo.builtin_rule_enabled(want).await.unwrap(),
+                "{want} should be enabled by default"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn container_alert_is_idempotent_and_resolve_only_touches_its_own() {
         let pool = fresh_pool().await;
         let repo = AlertsRepo::new(pool.clone());
