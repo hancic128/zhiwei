@@ -480,7 +480,7 @@ async fn run_shutdown(args: &[&str]) -> anyhow::Result<Vec<u8>> {
 ///
 /// Downloads the new binary from the given URL, verifies its SHA256 checksum,
 /// backs up the current version, atomically replaces it, and optionally restarts
-/// the agent via systemd.
+/// the agent via its init system.
 #[allow(clippy::cognitive_complexity)]
 async fn execute_upgrade_agent(cmd: &Command) -> anyhow::Result<Vec<u8>> {
     let p: UpgradeAgentArgs =
@@ -533,20 +533,9 @@ async fn execute_upgrade_agent(cmd: &Command) -> anyhow::Result<Vec<u8>> {
 
     info!("Binary replaced successfully");
 
-    // 8. Restart agent via systemd if requested
+    // 8. Restart the agent via its init system if requested
     if p.restart {
-        let output = tokio::process::Command::new("systemctl")
-            .args(["restart", "node-agent"])
-            .output()
-            .await
-            .context("failed to restart node-agent via systemctl")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("systemctl restart failed: {stderr}");
-        }
-
-        info!("Agent restart triggered via systemd");
+        restart_agent_service().await?;
     }
 
     Ok(format!(
@@ -555,6 +544,46 @@ async fn execute_upgrade_agent(cmd: &Command) -> anyhow::Result<Vec<u8>> {
         backup_path.display()
     )
     .into_bytes())
+}
+
+/// Restart the agent so the freshly installed binary takes effect.
+///
+/// The unit / label must match what `install-node.sh` installs — `zhiwei-node.service` on Linux,
+/// `com.zhiwei.node` on macOS. (This previously hard-coded `node-agent`, which is not the unit
+/// name, so every upgrade/rollback issued over the command channel failed at the restart step.)
+async fn restart_agent_service() -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        // `kickstart -k` is the launchd equivalent of `systemctl restart`.
+        let output = tokio::process::Command::new("launchctl")
+            .args(["kickstart", "-k", "system/com.zhiwei.node"])
+            .output()
+            .await
+            .context("failed to restart agent via launchctl")?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "launchctl kickstart failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        info!("Agent restart triggered via launchctl");
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let output = tokio::process::Command::new("systemctl")
+            .args(["restart", "zhiwei-node"])
+            .output()
+            .await
+            .context("failed to restart agent via systemctl")?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "systemctl restart failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        info!("Agent restart triggered via systemctl");
+    }
+    Ok(())
 }
 
 /// Download a file from URL to local path using the agent's HTTP client.
@@ -654,20 +683,9 @@ async fn execute_rollback_agent(cmd: &Command) -> anyhow::Result<Vec<u8>> {
 
     info!("Binary restored from backup successfully");
 
-    // 7. Restart agent via systemd if requested
+    // 7. Restart the agent via its init system if requested
     if p.restart {
-        let output = tokio::process::Command::new("systemctl")
-            .args(["restart", "node-agent"])
-            .output()
-            .await
-            .context("failed to restart node-agent via systemctl")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("systemctl restart failed: {stderr}");
-        }
-
-        info!("Agent restart triggered via systemd");
+        restart_agent_service().await?;
     }
 
     Ok(format!(

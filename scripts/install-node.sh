@@ -457,8 +457,15 @@ if [ -x "${INSTALL_DIR}/${BIN_NAME}" ]; then
     | tail -n1 | awk '{print $NF}' || true)"
   # For the final report (--upgrade needs to say "from version X to version Y")
   prev_version="$installed_ver"
-  if [ -n "$installed_ver" ] && [ "$installed_ver" = "$pkg_version" ]; then
-    log "${BIN_NAME} ${pkg_version} already installed, skipping overwrite"
+  # Skip only when the installed binary is byte-identical to the package one. Comparing the
+  # version *string* is not enough: a release can be re-pointed at the same version (neither the
+  # asset name nor the package's VERSION file carries a build id), so a changed binary would be
+  # silently skipped and `--upgrade` would report success without replacing anything. The digest
+  # reflects the actual build. (When no sha tool is present both digests are empty and compare
+  # equal, which falls back to the conservative "skip" behavior.)
+  if [ -n "$installed_ver" ] && [ "$installed_ver" = "$pkg_version" ] \
+    && [ "$(sha256_file "${INSTALL_DIR}/${BIN_NAME}")" = "$(sha256_file "${tmpdir}/${BIN_NAME}")" ]; then
+    log "${BIN_NAME} ${pkg_version} already installed (identical), skipping overwrite"
   else
     install_file 0755 "${tmpdir}/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
     log "overwriting ${BIN_NAME}: ${installed_ver:-?} -> ${pkg_version}"
