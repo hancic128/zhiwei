@@ -239,18 +239,11 @@ fn verify(cmd: &Command, state: &NodeState) -> anyhow::Result<()> {
     let pub_bytes = base64::engine::general_purpose::STANDARD.decode(pub_b64.trim())?;
     let public_key = PublicKey(pub_bytes);
 
-    let now = Timestamp::now().unix_nano();
-    let age_ns = now.saturating_sub(cmd.issued_at_unix_nano);
-    if cmd.ttl_seconds > 0 && age_ns > cmd.ttl_seconds.saturating_mul(1_000_000_000) {
-        bail!(
-            "command expired (issued {}ns ago, TTL {}s)",
-            age_ns,
-            cmd.ttl_seconds
-        );
-    }
-    if age_ns < 0 {
-        bail!("command issued time is in the future");
-    }
+    check_command_freshness(
+        cmd.issued_at_unix_nano,
+        cmd.ttl_seconds,
+        Timestamp::now().unix_nano(),
+    )?;
 
     let mut unsigned = cmd.clone();
     let sig = Signature(std::mem::take(&mut unsigned.signature));
@@ -258,6 +251,38 @@ fn verify(cmd: &Command, state: &NodeState) -> anyhow::Result<()> {
     unsigned.encode(&mut preimage)?;
 
     KeyPair::verify(&public_key, &preimage, &sig).context("ops signature mismatch")?;
+    Ok(())
+}
+
+/// How far *ahead* of this node's clock a command's `issued_at` may be and still
+/// be accepted. The ops key already authenticates the timestamp, so a forged
+/// future value is not an attack — the only thing this absorbs is clock skew
+/// between the signing host and this node. It must be non-zero: the command
+/// channel delivers sub-second, so a node even ~0.5s slow would otherwise reject
+/// every command with "issued time is in the future".
+const FUTURE_SKEW_NS: i64 = 60 * 1_000_000_000;
+
+/// Reject expired commands, and future-dated ones beyond [`FUTURE_SKEW_NS`].
+/// `ttl_seconds <= 0` disables only the expiry check, not the future check.
+fn check_command_freshness(
+    issued_at_unix_nano: i64,
+    ttl_seconds: i64,
+    now_unix_nano: i64,
+) -> anyhow::Result<()> {
+    let age_ns = now_unix_nano.saturating_sub(issued_at_unix_nano);
+    if ttl_seconds > 0 {
+        let ttl_ns = ttl_seconds.saturating_mul(1_000_000_000);
+        if age_ns > ttl_ns {
+            bail!("command expired (issued {age_ns}ns ago, TTL {ttl_seconds}s)");
+        }
+    }
+    if age_ns < -FUTURE_SKEW_NS {
+        bail!(
+            "command issued time is in the future ({}ns ahead, max skew {}s)",
+            -age_ns,
+            FUTURE_SKEW_NS / 1_000_000_000
+        );
+    }
     Ok(())
 }
 
@@ -699,4 +724,58 @@ async fn submit_result(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{check_command_freshness, FUTURE_SKEW_NS};
+    const S: i64 = 1_000_000_000;
+
+    #[test]
+    fn fresh_command_is_accepted() {
+        let now = 1_000 * S;
+        assert!(check_command_freshness(now, 60, now).is_ok());
+        assert!(check_command_freshness(now - 30 * S, 60, now).is_ok());
+    }
+
+    #[test]
+    fn small_future_skew_is_tolerated() {
+        // A node ~0.5s slow must not reject an otherwise valid command.
+        let now = 1_000 * S;
+        assert!(
+            check_command_freshness(now + 500_000_000, 60, now).is_ok(),
+            "0.5s ahead"
+        );
+        assert!(
+            check_command_freshness(now + 30 * S, 60, now).is_ok(),
+            "30s ahead"
+        );
+        assert!(
+            check_command_freshness(now + FUTURE_SKEW_NS, 60, now).is_ok(),
+            "exactly at the skew boundary"
+        );
+    }
+
+    #[test]
+    fn far_future_is_rejected() {
+        let now = 1_000 * S;
+        let err = check_command_freshness(now + FUTURE_SKEW_NS + 1, 60, now).unwrap_err();
+        assert!(err.to_string().contains("future"), "{err}");
+    }
+
+    #[test]
+    fn expired_command_is_rejected_even_if_future_check_would_pass() {
+        let now = 1_000 * S;
+        let err = check_command_freshness(now - 120 * S, 60, now).unwrap_err();
+        assert!(err.to_string().contains("expired"), "{err}");
+    }
+
+    #[test]
+    fn ttl_zero_disables_expiry_but_not_future_guard() {
+        let now = 1_000 * S;
+        // Ancient command, TTL disabled -> accepted.
+        assert!(check_command_freshness(now - 10_000 * S, 0, now).is_ok());
+        // TTL disabled still rejects a far-future timestamp.
+        assert!(check_command_freshness(now + FUTURE_SKEW_NS + 1, 0, now).is_err());
+    }
 }
