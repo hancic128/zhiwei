@@ -18,7 +18,7 @@ No Prometheus, Grafana, K8s, or Postgres required.
 - **Certificate tracking**: Scan and expiry monitoring for discovered certificates
 - **Alert system**: Threshold rules with webhook notifications
 - **Remote operations**: Container logs, process signals, host reboot — all signed and audited
-- **MCP server**: Read-only tools for AI agents (Claude Desktop, etc.)
+- **MCP server**: Tools for AI agents (Claude Desktop, etc.) — read data plus manage via the whitelisted command channel
 - **Single binary**: Rust + SQLite, ~105 MB image, 5-minute setup
 
 ## Quick Start

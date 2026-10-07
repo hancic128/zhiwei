@@ -1,8 +1,11 @@
 //! MCP (Model Context Protocol) server implementation.
 //!
-//! Exposes monitor data to external AI clients (Claude Desktop / Cursor /
-//! Cline, etc.) via the SSE transport. Read-only endpoints only — D8 decision:
-//! destructive operations (reboot / shutdown / kill) don't go through MCP.
+//! Exposes monitor data and management operations to external AI clients
+//! (Claude Desktop / Cursor / Cline, etc.) via the SSE transport. Most tools are
+//! read-only; management tools (rules / channels / probes / cert sources /
+//! node delete / whitelisted control commands) are also exposed so an AI client
+//! can do what the console can. Arbitrary shell is never possible: commands go
+//! through the ops-signed whitelist in `proto/control.proto`.
 //!
 //! Design decisions (see plan):
 //! - Single endpoint: `POST /mcp/sse`
@@ -93,7 +96,8 @@ fn tools_list() -> Value {
                         "until": { "type": "integer", "description": "End time in Unix milliseconds (optional)" },
                         "status": { "type": "string", "enum": ["open", "resolved", "all"], "description": "Filter by alert status (default: all)" },
                         "sources": { "type": "string", "description": "Comma-separated source types: rule,probe,cert,node_offline,container" },
-                        "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 50, "description": "Maximum number of resolved alerts to return" }
+                        "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 50, "description": "Maximum number of resolved alerts to return" },
+                        "offset": { "type": "integer", "minimum": 0, "description": "Pagination offset for resolved alerts" }
                     },
                     "additionalProperties": false,
                 }),
@@ -125,13 +129,7 @@ fn tools_list() -> Value {
                 &json!({
                     "type": "object",
                     "properties": {
-                        "node_id": { "type": "string" },
-                        "sort": {
-                            "type": "string",
-                            "enum": ["cpu", "memory"],
-                            "default": "cpu"
-                        },
-                        "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 20 }
+                        "node_id": { "type": "string" }
                     },
                     "required": ["node_id"],
                     "additionalProperties": false,
@@ -158,12 +156,12 @@ fn tools_list() -> Value {
             ),
             tool_def(
                 "delete_node",
-                "Delete a node from the cluster. Use force=true to remove even if it is currently online.",
+                "Permanently delete a node and all data referencing it (telemetry / inventory / probe results / cert sources / command history / alerts). Fails with 409 if the node still has unsent commands unless force=true, in which case those commands are voided and the delete is idempotent.",
                 &json!({
                     "type": "object",
                     "properties": {
                         "node_id": { "type": "string", "description": "Node ID to delete" },
-                        "force": { "type": "boolean", "default": false, "description": "Force deletion even if node is online" }
+                        "force": { "type": "boolean", "default": false, "description": "Void pending commands and delete even if the node has unsent commands (also makes delete idempotent)" }
                     },
                     "required": ["node_id"],
                     "additionalProperties": false,
@@ -181,34 +179,35 @@ fn tools_list() -> Value {
             ),
             tool_def(
                 "create_rule",
-                "Create a new alert rule. Expr is a PromQL-compatible expression.",
+                "Create a new alert rule: fire when `metric` `op` `threshold` holds for `duration_seconds`. Severity must be warning or critical.",
                 &json!({
                     "type": "object",
                     "properties": {
                         "name": { "type": "string", "description": "Rule name" },
-                        "expr": { "type": "string", "description": "PromQL expression that evaluates to a boolean" },
-                        "severity": { "type": "string", "enum": ["info", "warning", "critical"], "description": "Alert severity" },
-                        "labels": {
-                            "type": "object",
-                            "additionalProperties": { "type": "string" },
-                            "description": "Optional label key-value pairs"
-                        }
+                        "metric": { "type": "string", "description": "Metric name, e.g. host.cpu.usage / host.mem.usage / host.disk.usage / host.net.rx_bytes" },
+                        "op": { "type": "string", "enum": ["gt", "gte", "lt", "lte", "eq"], "description": "Comparison operator" },
+                        "threshold": { "type": "number", "description": "Threshold value the metric is compared against" },
+                        "duration_seconds": { "type": "integer", "minimum": 0, "default": 0, "description": "How long the condition must hold before firing (0 = fire immediately)" },
+                        "severity": { "type": "string", "enum": ["warning", "critical"], "default": "warning", "description": "Alert severity" }
                     },
-                    "required": ["name", "expr", "severity"],
+                    "required": ["name", "metric", "op", "threshold"],
                     "additionalProperties": false,
                 }),
             ),
             tool_def(
                 "update_rule",
-                "Update an existing alert rule.",
+                "Update an existing alert rule. Only the provided fields are changed.",
                 &json!({
                     "type": "object",
                     "properties": {
-                        "rule_id": { "type": "string", "description": "Rule ID to update" },
+                        "rule_id": { "type": "integer", "description": "Numeric rule ID to update" },
                         "name": { "type": "string", "description": "New rule name" },
-                        "expr": { "type": "string", "description": "New PromQL expression" },
-                        "severity": { "type": "string", "enum": ["info", "warning", "critical"] },
-                        "labels": { "type": "object", "additionalProperties": { "type": "string" } }
+                        "metric": { "type": "string", "description": "New metric name" },
+                        "op": { "type": "string", "enum": ["gt", "gte", "lt", "lte", "eq"] },
+                        "threshold": { "type": "number" },
+                        "duration_seconds": { "type": "integer", "minimum": 0 },
+                        "severity": { "type": "string", "enum": ["warning", "critical"] },
+                        "enabled": { "type": "boolean", "description": "Enable or disable the rule" }
                     },
                     "required": ["rule_id"],
                     "additionalProperties": false,
@@ -220,7 +219,7 @@ fn tools_list() -> Value {
                 &json!({
                     "type": "object",
                     "properties": {
-                        "rule_id": { "type": "string", "description": "Rule ID to delete" }
+                        "rule_id": { "type": "integer", "description": "Numeric rule ID to delete" }
                     },
                     "required": ["rule_id"],
                     "additionalProperties": false,
@@ -237,13 +236,14 @@ fn tools_list() -> Value {
             ),
             tool_def(
                 "update_builtin_rule",
-                "Enable/disable a built-in rule or update its labels.",
+                "Enable/disable a built-in rule or tune its threshold and duration.",
                 &json!({
                     "type": "object",
                     "properties": {
-                        "rule_id": { "type": "string", "description": "Built-in rule ID" },
+                        "rule_id": { "type": "string", "description": "Built-in rule ID (e.g. node_offline, node_online)" },
                         "enabled": { "type": "boolean", "description": "Enable or disable the rule" },
-                        "labels": { "type": "object", "additionalProperties": { "type": "string" } }
+                        "threshold": { "type": "number", "description": "New threshold value" },
+                        "duration_seconds": { "type": "integer", "minimum": 0, "description": "Seconds the condition must hold before firing" }
                     },
                     "required": ["rule_id"],
                     "additionalProperties": false,
@@ -278,27 +278,27 @@ fn tools_list() -> Value {
             // ========== Certificate Sources ==========
             tool_def(
                 "create_cert_source",
-                "Create a new certificate scan source on a node.",
+                "Create a certificate scan source: a path on a node (empty node_id = all nodes). Optionally configure expiry notifications.",
                 &json!({
                     "type": "object",
                     "properties": {
-                        "node_id": { "type": "string", "description": "Node ID where the cert file resides" },
-                        "path": { "type": "string", "description": "Path to certificate file on the node" },
-                        "command": { "type": "string", "description": "Optional command to fetch/renew the certificate" }
+                        "node_id": { "type": "string", "description": "Node ID where the cert path resides; empty string = apply to all nodes" },
+                        "path": { "type": "string", "description": "Path to a certificate file or directory on the node (non-recursive)" },
+                        "notify_enabled": { "type": "boolean", "default": true, "description": "Send expiry notifications for matched certificates" },
+                        "notify_days_before": { "type": "integer", "minimum": 1, "maximum": 365, "default": 30, "description": "Notify this many days before expiry" }
                     },
-                    "required": ["node_id", "path"],
+                    "required": ["path"],
                     "additionalProperties": false,
                 }),
             ),
             tool_def(
                 "test_cert_source",
-                "Test a certificate source configuration (validates path and optional command).",
+                "Have the node scan a certificate path immediately (without saving it). Returns a command_id to poll via get_command.",
                 &json!({
                     "type": "object",
                     "properties": {
-                        "node_id": { "type": "string", "description": "Node ID to test against" },
-                        "path": { "type": "string", "description": "Certificate file path" },
-                        "command": { "type": "string", "description": "Optional fetch command" }
+                        "node_id": { "type": "string", "description": "Node ID to scan on" },
+                        "path": { "type": "string", "description": "Certificate file or directory path on that node" }
                     },
                     "required": ["node_id", "path"],
                     "additionalProperties": false,
@@ -306,13 +306,16 @@ fn tools_list() -> Value {
             ),
             tool_def(
                 "update_cert_source",
-                "Update a certificate source path or command.",
+                "Update a certificate source's scope, path, enabled flag, or notification settings. Only the provided fields change.",
                 &json!({
                     "type": "object",
                     "properties": {
                         "source_id": { "type": "string", "description": "Certificate source ID" },
-                        "path": { "type": "string", "description": "New certificate file path" },
-                        "command": { "type": "string", "description": "New fetch command" }
+                        "node_id": { "type": "string", "description": "New owning node ID; empty string = all nodes" },
+                        "path": { "type": "string", "description": "New certificate file or directory path" },
+                        "enabled": { "type": "boolean", "description": "Enable or disable the source" },
+                        "notify_enabled": { "type": "boolean", "description": "Toggle expiry notifications" },
+                        "notify_days_before": { "type": "integer", "minimum": 1, "maximum": 365, "description": "Notify this many days before expiry" }
                     },
                     "required": ["source_id"],
                     "additionalProperties": false,
@@ -342,41 +345,55 @@ fn tools_list() -> Value {
             ),
             tool_def(
                 "create_channel",
-                "Create a new notification channel (webhook).",
+                "Create a notification channel. `kind` selects the required fields: feishu needs app_id + secret (App Secret) + receive_id; slack/webhook/bluebird need url (secret is an optional signing token).",
                 &json!({
                     "type": "object",
                     "properties": {
-                        "type": { "type": "string", "enum": ["webhook"], "description": "Channel type" },
                         "name": { "type": "string", "description": "Channel display name" },
-                        "url": { "type": "string", "description": "Webhook URL to POST notifications to" },
-                        "secret": { "type": "string", "description": "Optional HMAC secret for signing" }
+                        "kind": { "type": "string", "enum": ["feishu", "slack", "bluebird", "webhook"], "default": "webhook", "description": "Notification channel type" },
+                        "url": { "type": "string", "description": "Webhook URL (slack / webhook / bluebird; feishu leaves this empty)" },
+                        "secret": { "type": "string", "description": "Feishu App Secret, or optional HMAC / Bearer token for webhook delivery" },
+                        "app_id": { "type": "string", "description": "Feishu App ID (required for feishu)" },
+                        "receive_id": { "type": "string", "description": "Feishu receive ID: group chat_id or user open_id (required for feishu)" },
+                        "receive_id_type": { "type": "string", "enum": ["chat_id", "open_id", "user_id", "union_id", "email"], "default": "chat_id", "description": "Feishu receive ID type" },
+                        "min_severity": { "type": "string", "enum": ["info", "warning", "critical"], "default": "warning", "description": "Only notify for alerts at or above this severity" }
                     },
-                    "required": ["type", "name", "url"],
+                    "required": ["name"],
                     "additionalProperties": false,
                 }),
             ),
             tool_def(
                 "test_channel",
-                "Send a test notification to a channel to verify it is working.",
+                "Send a test notification using the given channel parameters (does not require the channel to be saved yet).",
                 &json!({
                     "type": "object",
                     "properties": {
-                        "channel_id": { "type": "string", "description": "Channel ID to test" }
+                        "kind": { "type": "string", "enum": ["feishu", "slack", "bluebird", "webhook"], "description": "Notification channel type" },
+                        "url": { "type": "string", "description": "Webhook URL (slack / webhook / bluebird)" },
+                        "secret": { "type": "string", "description": "Feishu App Secret, or optional webhook token" },
+                        "app_id": { "type": "string", "description": "Feishu App ID" },
+                        "receive_id": { "type": "string", "description": "Feishu receive ID (chat_id / open_id)" },
+                        "receive_id_type": { "type": "string", "enum": ["chat_id", "open_id", "user_id", "union_id", "email"], "description": "Feishu receive ID type" }
                     },
-                    "required": ["channel_id"],
+                    "required": ["kind"],
                     "additionalProperties": false,
                 }),
             ),
             tool_def(
                 "update_channel",
-                "Update a notification channel.",
+                "Update a notification channel. Only the provided fields change; an empty `secret` keeps the existing value.",
                 &json!({
                     "type": "object",
                     "properties": {
-                        "channel_id": { "type": "string", "description": "Channel ID to update" },
+                        "channel_id": { "type": "integer", "description": "Numeric channel ID to update" },
                         "name": { "type": "string", "description": "New channel name" },
                         "url": { "type": "string", "description": "New webhook URL" },
-                        "secret": { "type": "string", "description": "New HMAC secret" }
+                        "secret": { "type": "string", "description": "New credential (empty string keeps the existing value)" },
+                        "app_id": { "type": "string", "description": "New Feishu App ID" },
+                        "receive_id": { "type": "string", "description": "New Feishu receive ID" },
+                        "receive_id_type": { "type": "string", "enum": ["chat_id", "open_id", "user_id", "union_id", "email"] },
+                        "min_severity": { "type": "string", "enum": ["info", "warning", "critical"] },
+                        "enabled": { "type": "boolean", "description": "Enable or disable the channel" }
                     },
                     "required": ["channel_id"],
                     "additionalProperties": false,
@@ -388,62 +405,24 @@ fn tools_list() -> Value {
                 &json!({
                     "type": "object",
                     "properties": {
-                        "channel_id": { "type": "string", "description": "Channel ID to delete" }
+                        "channel_id": { "type": "integer", "description": "Numeric channel ID to delete" }
                     },
                     "required": ["channel_id"],
                     "additionalProperties": false,
                 }),
             ),
-            // ========== Services ==========
+            // ========== Services (timeline) ==========
             tool_def(
-                "list_services",
-                "List all registered services and their targets.",
-                &json!({
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false,
-                }),
-            ),
-            tool_def(
-                "create_service",
-                "Register a new service with target endpoints.",
+                "get_services_timeline",
+                "Get service/probe health over time as bucketed up/degraded/down counts. level=service groups by service name, level=probe by individual probe.",
                 &json!({
                     "type": "object",
                     "properties": {
-                        "name": { "type": "string", "description": "Service name" },
-                        "targets": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "description": "List of target URLs or host:port endpoints"
-                        }
+                        "from": { "type": "integer", "description": "Start time in Unix milliseconds (default: 1 hour ago)" },
+                        "to": { "type": "integer", "description": "End time in Unix milliseconds (default: now)" },
+                        "buckets": { "type": "integer", "minimum": 1, "maximum": 500, "description": "Number of time buckets" },
+                        "level": { "type": "string", "enum": ["service", "probe"], "default": "service", "description": "Aggregate by service or by probe" }
                     },
-                    "required": ["name", "targets"],
-                    "additionalProperties": false,
-                }),
-            ),
-            tool_def(
-                "update_service",
-                "Update a service name or targets.",
-                &json!({
-                    "type": "object",
-                    "properties": {
-                        "service_id": { "type": "string", "description": "Service ID to update" },
-                        "name": { "type": "string", "description": "New service name" },
-                        "targets": { "type": "array", "items": { "type": "string" } }
-                    },
-                    "required": ["service_id"],
-                    "additionalProperties": false,
-                }),
-            ),
-            tool_def(
-                "delete_service",
-                "Delete a service by ID.",
-                &json!({
-                    "type": "object",
-                    "properties": {
-                        "service_id": { "type": "string", "description": "Service ID to delete" }
-                    },
-                    "required": ["service_id"],
                     "additionalProperties": false,
                 }),
             ),
@@ -459,42 +438,57 @@ fn tools_list() -> Value {
             ),
             tool_def(
                 "create_probe",
-                "Create a new probe for a service.",
+                "Create a new probe (top-level entity). kind=http requires target_json {\"url\":\"https://...\"}; kind=tcp/tls requires {\"host\":\"...\",\"port\":N}. expect_json is optional assertions (e.g. status code / body contains).",
                 &json!({
                     "type": "object",
                     "properties": {
-                        "service_id": { "type": "string", "description": "Service ID to probe" },
-                        "type": { "type": "string", "enum": ["http", "tcp", "icmp"], "description": "Probe type" },
-                        "target": { "type": "string", "description": "Target URL or host:port" },
-                        "interval": { "type": "integer", "minimum": 10, "description": "Check interval in seconds" }
+                        "name": { "type": "string", "description": "Probe name" },
+                        "description": { "type": "string", "description": "Optional description" },
+                        "kind": { "type": "string", "enum": ["http", "tcp", "tls"], "description": "Probe type" },
+                        "target_json": { "type": "string", "description": "JSON string of the target, e.g. {\"url\":\"https://example.com\"} or {\"host\":\"1.2.3.4\",\"port\":443}" },
+                        "expect_json": { "type": "string", "description": "JSON string of expectations/assertions (optional)" },
+                        "interval_seconds": { "type": "integer", "minimum": 10, "maximum": 86400, "default": 60, "description": "Check interval in seconds" },
+                        "timeout_ms": { "type": "integer", "minimum": 100, "maximum": 60000, "default": 5000 },
+                        "failure_threshold": { "type": "integer", "minimum": 1, "maximum": 100, "default": 3, "description": "Consecutive failures before the probe is marked down" },
+                        "node_ids": { "type": "array", "items": { "type": "string" }, "description": "Node IDs that should execute this probe; empty/omitted = any node" },
+                        "enabled": { "type": "boolean", "default": true }
                     },
-                    "required": ["service_id", "type", "target"],
+                    "required": ["name", "kind", "target_json"],
                     "additionalProperties": false,
                 }),
             ),
             tool_def(
                 "test_probe",
-                "Test a probe configuration immediately without saving it.",
+                "Run a probe configuration once without saving it. Same target/expect validation as create_probe.",
                 &json!({
                     "type": "object",
                     "properties": {
-                        "type": { "type": "string", "enum": ["http", "tcp", "icmp"], "description": "Probe type" },
-                        "target": { "type": "string", "description": "Target URL or host:port" }
+                        "kind": { "type": "string", "enum": ["http", "tcp", "tls"], "description": "Probe type" },
+                        "target_json": { "type": "string", "description": "JSON string of the target to test" },
+                        "expect_json": { "type": "string", "description": "JSON string of expectations (optional)" },
+                        "timeout_ms": { "type": "integer", "minimum": 100, "maximum": 60000, "default": 5000 }
                     },
-                    "required": ["type", "target"],
+                    "required": ["kind", "target_json"],
                     "additionalProperties": false,
                 }),
             ),
             tool_def(
                 "update_probe",
-                "Update a probe configuration.",
+                "Update a probe configuration. Only the provided fields change; changing target_json requires kind to be given as well.",
                 &json!({
                     "type": "object",
                     "properties": {
                         "probe_id": { "type": "string", "description": "Probe ID to update" },
-                        "type": { "type": "string", "enum": ["http", "tcp", "icmp"] },
-                        "target": { "type": "string", "description": "New target" },
-                        "interval": { "type": "integer", "minimum": 10 }
+                        "name": { "type": "string" },
+                        "description": { "type": "string" },
+                        "kind": { "type": "string", "enum": ["http", "tcp", "tls"] },
+                        "target_json": { "type": "string", "description": "New target JSON (requires kind)" },
+                        "expect_json": { "type": "string" },
+                        "interval_seconds": { "type": "integer", "minimum": 10, "maximum": 86400 },
+                        "timeout_ms": { "type": "integer", "minimum": 100, "maximum": 60000 },
+                        "failure_threshold": { "type": "integer", "minimum": 1, "maximum": 100 },
+                        "node_ids": { "type": "array", "items": { "type": "string" }, "description": "Replacement node binding; empty array = any node" },
+                        "enabled": { "type": "boolean" }
                     },
                     "required": ["probe_id"],
                     "additionalProperties": false,
@@ -591,7 +585,8 @@ fn tools_list() -> Value {
                         "status": { "type": "string", "enum": ["open", "resolved", "all"], "description": "Filter by alert status (default: all)" },
                         "sources": { "type": "string", "description": "Comma-separated source types: rule,probe,cert,node_offline,container" },
                         "page": { "type": "integer", "minimum": 0, "default": 0, "description": "Page number (0-indexed)" },
-                        "page_size": { "type": "integer", "minimum": 1, "maximum": 100, "default": 5, "description": "Items per page" }
+                        "page_size": { "type": "integer", "minimum": 1, "maximum": 100, "default": 5, "description": "Items per page" },
+                        "offset": { "type": "integer", "minimum": 0, "description": "Row offset (alternative to page)" }
                     },
                     "additionalProperties": false,
                 }),
@@ -818,6 +813,17 @@ fn req_str(arguments: &Value, key: &str) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("{key} is required"))
 }
 
+/// Extract a required identifier that may arrive as a JSON string or number, normalized to
+/// the string the REST path expects. Numeric IDs (rule / channel / alert) are advertised as
+/// `integer`, but clients sometimes send them quoted; both must work.
+fn req_id(arguments: &Value, key: &str) -> anyhow::Result<String> {
+    match arguments.get(key) {
+        Some(Value::String(s)) => Ok(s.clone()),
+        Some(Value::Number(n)) => Ok(n.to_string()),
+        _ => anyhow::bail!("{key} is required"),
+    }
+}
+
 /// Build the `/v1/exec` request body from MCP tool arguments.
 ///
 /// Kept separate from the dispatch so the "arguments → server body" mapping is unit-testable:
@@ -947,6 +953,9 @@ async fn call_tool_impl(
             if let Some(limit) = opt_i64(arguments, "limit") {
                 params.push(format!("limit={limit}"));
             }
+            if let Some(offset) = opt_i64(arguments, "offset") {
+                params.push(format!("offset={offset}"));
+            }
             let query = if params.is_empty() {
                 String::new()
             } else {
@@ -1005,9 +1014,12 @@ async fn call_tool_impl(
         }
         "delete_node" => {
             let node_id = req_str(arguments, "node_id")?;
-            let force = opt_str(arguments, "force").unwrap_or_default();
-            let path = if force == "true" || force == "1" {
-                format!("/v1/nodes/{node_id}?force=true")
+            let force = arguments
+                .get("force")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let path = if force {
+                format!("/v1/nodes/{node_id}?force=1")
             } else {
                 format!("/v1/nodes/{node_id}")
             };
@@ -1041,7 +1053,7 @@ async fn call_tool_impl(
             pretty_json(body)
         }
         "update_rule" => {
-            let rule_id = req_str(arguments, "rule_id")?;
+            let rule_id = req_id(arguments, "rule_id")?;
             let body = http_request(
                 &client,
                 base_url,
@@ -1054,7 +1066,7 @@ async fn call_tool_impl(
             pretty_json(body)
         }
         "delete_rule" => {
-            let rule_id = req_str(arguments, "rule_id")?;
+            let rule_id = req_id(arguments, "rule_id")?;
             let body = http_request(
                 &client,
                 base_url,
@@ -1071,7 +1083,7 @@ async fn call_tool_impl(
             pretty_json(body)
         }
         "update_builtin_rule" => {
-            let rule_id = req_str(arguments, "rule_id")?;
+            let rule_id = req_id(arguments, "rule_id")?;
             let body = http_request(
                 &client,
                 base_url,
@@ -1086,7 +1098,7 @@ async fn call_tool_impl(
 
         // ========== Alert Actions ==========
         "silence_alert" => {
-            let alert_id = req_str(arguments, "alert_id")?;
+            let alert_id = req_id(arguments, "alert_id")?;
             let minutes = opt_i64(arguments, "minutes").unwrap_or(60);
             let body = http_request(
                 &client,
@@ -1100,7 +1112,7 @@ async fn call_tool_impl(
             pretty_json(body)
         }
         "resolve_alert" => {
-            let alert_id = req_str(arguments, "alert_id")?;
+            let alert_id = req_id(arguments, "alert_id")?;
             let body = http_request(
                 &client,
                 base_url,
@@ -1115,13 +1127,22 @@ async fn call_tool_impl(
 
         // ========== Certificate Sources ==========
         "create_cert_source" => {
+            // node_id is optional at the MCP surface (empty = all nodes) but the REST handler
+            // requires the key, so always send it rather than 400-ing on an all-nodes source.
+            let mut body = arguments.clone();
+            if let Some(map) = body.as_object_mut() {
+                map.insert(
+                    "node_id".to_string(),
+                    json!(opt_str(arguments, "node_id").unwrap_or_default()),
+                );
+            }
             let body = http_request(
                 &client,
                 base_url,
                 token,
                 reqwest::Method::POST,
                 "/v1/cert-sources",
-                Some(arguments),
+                Some(&body),
             )
             .await?;
             pretty_json(body)
@@ -1183,20 +1204,22 @@ async fn call_tool_impl(
             pretty_json(body)
         }
         "test_channel" => {
-            let channel_id = req_str(arguments, "channel_id")?;
+            // Params, not a saved channel id: the server's /v1/channels/test takes the same
+            // kind/url/secret/app_id/receive_id fields and sends one message through the real
+            // delivery path, so a passing test means real alerts will go out too.
             let body = http_request(
                 &client,
                 base_url,
                 token,
                 reqwest::Method::POST,
-                &format!("/v1/channels/{channel_id}/test"),
-                None,
+                "/v1/channels/test",
+                Some(arguments),
             )
             .await?;
             pretty_json(body)
         }
         "update_channel" => {
-            let channel_id = req_str(arguments, "channel_id")?;
+            let channel_id = req_id(arguments, "channel_id")?;
             let body = http_request(
                 &client,
                 base_url,
@@ -1209,7 +1232,7 @@ async fn call_tool_impl(
             pretty_json(body)
         }
         "delete_channel" => {
-            let channel_id = req_str(arguments, "channel_id")?;
+            let channel_id = req_id(arguments, "channel_id")?;
             let body = http_request(
                 &client,
                 base_url,
@@ -1222,45 +1245,31 @@ async fn call_tool_impl(
             pretty_json(body)
         }
 
-        // ========== Services ==========
-        "list_services" => {
-            let body = http_get(&client, base_url, token, "/v1/services").await?;
-            pretty_json(body)
-        }
-        "create_service" => {
-            let body = http_request(
+        // ========== Services (timeline) ==========
+        "get_services_timeline" => {
+            let mut params = Vec::new();
+            if let Some(from) = opt_i64(arguments, "from") {
+                params.push(format!("from={from}"));
+            }
+            if let Some(to) = opt_i64(arguments, "to") {
+                params.push(format!("to={to}"));
+            }
+            if let Some(buckets) = opt_i64(arguments, "buckets") {
+                params.push(format!("buckets={buckets}"));
+            }
+            if let Some(level) = opt_str(arguments, "level") {
+                params.push(format!("level={level}"));
+            }
+            let query = if params.is_empty() {
+                String::new()
+            } else {
+                format!("?{}", params.join("&"))
+            };
+            let body = http_get(
                 &client,
                 base_url,
                 token,
-                reqwest::Method::POST,
-                "/v1/services",
-                Some(arguments),
-            )
-            .await?;
-            pretty_json(body)
-        }
-        "update_service" => {
-            let service_id = req_str(arguments, "service_id")?;
-            let body = http_request(
-                &client,
-                base_url,
-                token,
-                reqwest::Method::PATCH,
-                &format!("/v1/services/{service_id}"),
-                Some(arguments),
-            )
-            .await?;
-            pretty_json(body)
-        }
-        "delete_service" => {
-            let service_id = req_str(arguments, "service_id")?;
-            let body = http_request(
-                &client,
-                base_url,
-                token,
-                reqwest::Method::DELETE,
-                &format!("/v1/services/{service_id}"),
-                None,
+                &format!("/v1/services/timeline{query}"),
             )
             .await?;
             pretty_json(body)
@@ -1394,6 +1403,9 @@ async fn call_tool_impl(
             if let Some(page_size) = opt_i64(arguments, "page_size") {
                 params.push(format!("page_size={page_size}"));
             }
+            if let Some(offset) = opt_i64(arguments, "offset") {
+                params.push(format!("offset={offset}"));
+            }
             let query = if params.is_empty() {
                 String::new()
             } else {
@@ -1454,12 +1466,13 @@ mod tests {
         check_alert_tools(&names);
         check_cert_tools(&names);
         check_channel_tools(&names);
-        check_service_tools(&names);
+        check_timeline_tools(&names);
         check_probe_tools(&names);
         check_command_tools(&names);
         check_other_tools(&names);
-        // Total: 7 original + 34 new = 41 tools
-        assert_eq!(names.len(), 41, "unexpected tool count: {}", names.len());
+        // 7 read-only + 2 node + 6 rule + 2 alert + 4 cert + 5 channel + 1 timeline
+        // + 6 probe + 3 command + 2 other = 38 tools (service CRUD dropped with the service layer)
+        assert_eq!(names.len(), 38, "unexpected tool count: {}", names.len());
     }
 
     fn extract_tool_names() -> Vec<String> {
@@ -1544,14 +1557,22 @@ mod tests {
         }
     }
 
-    fn check_service_tools(names: &[String]) {
-        for tool in [
+    fn check_timeline_tools(names: &[String]) {
+        assert!(
+            names.contains(&"get_services_timeline".to_string()),
+            "missing get_services_timeline"
+        );
+        // The service CRUD layer was removed (design spec 2026-10-04); probes are top-level.
+        for gone in [
             "list_services",
             "create_service",
             "update_service",
             "delete_service",
         ] {
-            assert!(names.contains(&tool.to_string()), "missing {tool}");
+            assert!(
+                !names.contains(&gone.to_string()),
+                "stale service tool {gone}"
+            );
         }
     }
 
@@ -1629,6 +1650,112 @@ mod tests {
 
         // missing action is a hard error, not a silently-empty command
         assert!(exec_body(&json!({"node_id": "n1"})).is_err());
+    }
+
+    /// Rules are metric/op/threshold based on the server — not a `PromQL` `expr`. Guard the schema
+    /// against a regression to the old MCP-only vocabulary.
+    #[test]
+    fn create_rule_speaks_metric_op_threshold_not_promql() {
+        let v = tools_list();
+        let tool = v["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "create_rule")
+            .expect("create_rule tool missing");
+        let props = &tool["inputSchema"]["properties"];
+        for expected in ["metric", "op", "threshold", "duration_seconds"] {
+            assert!(
+                props.get(expected).is_some(),
+                "create_rule needs `{expected}`"
+            );
+        }
+        assert!(
+            props.get("expr").is_none(),
+            "create_rule must not advertise `expr`"
+        );
+        let required = tool["inputSchema"]["required"].as_array().unwrap();
+        for r in ["name", "metric", "op", "threshold"] {
+            assert!(
+                required.iter().any(|v| v == r),
+                "create_rule must require `{r}`"
+            );
+        }
+    }
+
+    /// Channels are discriminated by `kind` (feishu/slack/bluebird/webhook) with a
+    /// `min_severity` filter — not the old `type: webhook` + url.
+    #[test]
+    fn channel_tools_use_kind_and_min_severity() {
+        let v = tools_list();
+        let create = v["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "create_channel")
+            .expect("create_channel missing");
+        let props = &create["inputSchema"]["properties"];
+        assert!(props.get("kind").is_some(), "create_channel needs `kind`");
+        assert!(
+            props.get("min_severity").is_some(),
+            "create_channel needs `min_severity`"
+        );
+        assert!(
+            props.get("type").is_none(),
+            "create_channel must not advertise `type`"
+        );
+        let kinds = props["kind"]["enum"].as_array().unwrap();
+        for k in ["feishu", "slack", "bluebird", "webhook"] {
+            assert!(kinds.iter().any(|v| v == k), "kind enum missing {k}");
+        }
+
+        // test_channel takes params, not a saved channel_id
+        let test = v["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "test_channel")
+            .expect("test_channel missing");
+        let tprops = &test["inputSchema"]["properties"];
+        assert!(tprops.get("kind").is_some(), "test_channel needs `kind`");
+        assert!(
+            tprops.get("channel_id").is_none(),
+            "test_channel must not take `channel_id` (server sends by params)"
+        );
+    }
+
+    /// Probes are top-level with a JSON target, not the old flat `type`/`target` string.
+    #[test]
+    fn probe_tools_use_kind_and_json_target() {
+        let v = tools_list();
+        let create = v["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "create_probe")
+            .expect("create_probe missing");
+        let props = &create["inputSchema"]["properties"];
+        assert!(
+            props.get("target_json").is_some(),
+            "create_probe needs `target_json`"
+        );
+        assert!(
+            props.get("service_id").is_none(),
+            "create_probe must not reference `service_id`"
+        );
+        let kinds = props["kind"]["enum"].as_array().unwrap();
+        for k in ["http", "tcp", "tls"] {
+            assert!(kinds.iter().any(|v| v == k), "probe kind enum missing {k}");
+        }
+    }
+
+    /// Numeric ids are advertised as integers but clients may send them quoted; both must
+    /// resolve to the string the REST path needs.
+    #[test]
+    fn req_id_accepts_numbers_and_strings() {
+        assert_eq!(req_id(&json!({"rule_id": 3}), "rule_id").unwrap(), "3");
+        assert_eq!(req_id(&json!({"rule_id": "3"}), "rule_id").unwrap(), "3");
+        assert!(req_id(&json!({}), "rule_id").is_err());
     }
 
     #[test]
