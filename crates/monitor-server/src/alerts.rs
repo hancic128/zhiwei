@@ -1633,6 +1633,31 @@ fn diff_containers(previous_json: &str, current_json: &str) -> Vec<ContainerEven
     stopped
 }
 
+/// Container IDs that a *same-named running* container has replaced this cycle.
+///
+/// `docker compose up -d` (every deploy) recreates containers with fresh IDs: the old ID stops
+/// and a new ID starts in the same snapshot. The new ID's `Started` event only resolves its own
+/// row, so the old ID's "stopped" alert would stay open until manually closed. These are the old
+/// IDs to close in that case — matched by name against a currently-running container.
+///
+/// The replaced container must have actually left the snapshot (`prev - cur`): a still-present
+/// exited container with the same name (e.g. `docker rename`) keeps its alert.
+fn replaced_container_ids(previous_json: &str, current_json: &str) -> Vec<String> {
+    let prev = parse_container_map(previous_json);
+    let cur = parse_container_map(current_json);
+    let running_names: std::collections::HashSet<&str> = cur
+        .values()
+        .filter(|(_, _, running)| *running)
+        .map(|(name, _, _)| name.as_str())
+        .collect();
+    prev.iter()
+        .filter(|(id, (name, _, _))| {
+            !cur.contains_key(*id) && running_names.contains(name.as_str())
+        })
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
 /// Container start/stop event detection: compare the previous and current container snapshots for the
 /// same node, convert the diff into events.
 ///
@@ -1656,7 +1681,10 @@ pub async fn on_container_events(
         return; // No historical baseline yet, just establish it this round
     };
     let events = diff_containers(previous, current_json);
-    if events.is_empty() {
+    // A recreated container (`docker compose up -d`) keeps its name but gets a new ID, so the new
+    // ID's Started event never resolves the old ID's "stopped" alert. Collect those old IDs here.
+    let replaced = replaced_container_ids(previous, current_json);
+    if events.is_empty() && replaced.is_empty() {
         return;
     }
 
@@ -1679,6 +1707,12 @@ pub async fn on_container_events(
                 handle_container_started(state, &repo, &id, &name, &short, node_id, hostname, now)
                     .await;
             }
+        }
+    }
+
+    for old_id in &replaced {
+        if let Err(e) = repo.resolve_open_container_alerts(old_id, now).await {
+            warn!(container_id = %old_id, error = %e, "Failed to close replaced container alert");
         }
     }
 }
@@ -2642,6 +2676,41 @@ mod tests {
         let done = snap(&[("c1", "migrate", 1000, "exited")]);
         assert!(diff_containers(&empty, &done).is_empty());
         assert!(diff_containers(&done, &done).is_empty());
+    }
+
+    /// Recreate (compose up / deploy): same name, new ID. The old ID left the snapshot while a
+    /// running container with the same name exists → its stopped alert must be closed.
+    #[test]
+    fn replaced_container_ids_matches_renamed_id() {
+        let prev = snap(&[("old123", "zhiwei-monitor", 1000, "running")]);
+        let cur = snap(&[("new456", "zhiwei-monitor", 2000, "running")]);
+        assert_eq!(
+            replaced_container_ids(&prev, &cur),
+            vec!["old123".to_string()]
+        );
+        // diff also reports the old container stopped and the new one started
+        assert_eq!(
+            diff_containers(&prev, &cur),
+            vec![
+                stopped("old123", "zhiwei-monitor"),
+                started("new456", "zhiwei-monitor")
+            ]
+        );
+    }
+
+    /// No same-named running replacement → nothing to close. Covers: no change at all, a genuinely
+    /// removed container (no successor), and a same-name container that is not running.
+    #[test]
+    fn replaced_container_ids_needs_a_running_successor() {
+        let same = snap(&[("c1", "web", 1000, "running")]);
+        assert!(replaced_container_ids(&same, &same).is_empty());
+
+        let before = snap(&[("c1", "web", 1000, "running")]);
+        let gone = snap(&[]);
+        assert!(replaced_container_ids(&before, &gone).is_empty());
+
+        let exited_successor = snap(&[("c2", "web", 1000, "exited")]);
+        assert!(replaced_container_ids(&before, &exited_successor).is_empty());
     }
 
     /// Dirty JSON / missing fields: don't panic, don't false-alert
