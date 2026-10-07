@@ -65,7 +65,10 @@ export function ContainerActions({
   // Let "Updated N seconds ago" tick by itself
   const [, setTick] = React.useState(0);
 
-  const running = container.state === "running";
+  // `restarting` is an active state too: the container process exists and Docker refuses
+  // to remove it (or start it again). Treating it as "not running" showed Start and Delete,
+  // both of which Docker rejects; Stop/Restart — which do work — were hidden instead.
+  const active = container.state === "running" || container.state === "restarting";
 
   /** After the action completes the node re-snapshots (5-min cycle is too long), here we re-pull a few times within ~20s */
   const scheduleRefresh = React.useCallback(() => {
@@ -228,7 +231,7 @@ export function ContainerActions({
   return (
     <>
       <div className="flex items-center justify-end gap-1">
-        {!running && (
+        {!active && (
           <Tooltip content={t("containers.actStart")}>
             <Button
               variant="ghost"
@@ -242,7 +245,7 @@ export function ContainerActions({
             </Button>
           </Tooltip>
         )}
-        {running && (
+        {active && (
           <>
             <Tooltip content={t("containers.actStop")}>
               <Button
@@ -272,7 +275,7 @@ export function ContainerActions({
         )}
         {/* Delete only appears when "already not running": please stop running containers first —
             the UI doesn't offer a "casually force-remove a running service" path */}
-        {!running && (
+        {!active && (
           <Tooltip content={t("containers.actRemove")}>
             <Button
               variant="ghost"
