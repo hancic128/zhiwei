@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **Docker healthcheck no longer reports a false "unhealthy".** The runtime
+  image (`debian:bookworm-slim`) shipped no HTTP client, so the compose
+  healthcheck `curl -f http://127.0.0.1:8443/healthz` exited 127 and the
+  container was permanently marked unhealthy even while the service served
+  traffic. The runtime stage now installs `curl`.
 
 ## [0.0.1] - 2026-10-03
 

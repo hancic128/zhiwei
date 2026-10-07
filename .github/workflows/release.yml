@@ -110,8 +110,10 @@ jobs:
             zhiwei-${{ matrix.target }}.tar.gz.sha256
           fail_on_unmatched_files: true
 
-      # Publish to GitHub Packages (hancic128-artifacts)
-      - name: Push to GitHub Packages
+      # Retain the built binaries as a workflow artifact (debugging / re-download from
+      # the Actions run). This is NOT the hancic-artifacts mirror — that upload is the
+      # "Upload to hancic-artifacts" step below.
+      - name: Upload workflow artifacts
         if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4
         with:
@@ -131,13 +133,18 @@ jobs:
         run: |
           set -eu
           f="zhiwei-${{ matrix.target }}.tar.gz"
-          # 上传到版本目录
-          curl -fsS -u "$USER:$PASS" -T "$f" \
-            "https://${HOST}/releases/hancic128/zhiwei/${GITHUB_REF_NAME#v}/${f}"
-          # 同时上传到 latest 目录
-          curl -fsS -u "$USER:$PASS" -T "$f" \
-            "https://${HOST}/releases/hancic128/zhiwei/latest/${f}"
-          echo "Uploaded to artifacts.hancic.site/releases/hancic128/zhiwei/${GITHUB_REF_NAME#v}/${f} and latest/"
+          # .sha256 must ride along: install-node.sh fetches the remote checksum to
+          # validate the package and to decide whether the local cache is current.
+          # Without it, verification is silently skipped and every reinstall re-downloads.
+          for name in "$f" "$f.sha256"; do
+            # 上传到版本目录
+            curl -fsS -u "$USER:$PASS" -T "$name" \
+              "https://${HOST}/releases/hancic128/zhiwei/${GITHUB_REF_NAME#v}/${name}"
+            # 同时上传到 latest 目录
+            curl -fsS -u "$USER:$PASS" -T "$name" \
+              "https://${HOST}/releases/hancic128/zhiwei/latest/${name}"
+          done
+          echo "Uploaded $f (+ .sha256) to artifacts.hancic.site/releases/hancic128/zhiwei/${GITHUB_REF_NAME#v}/ and latest/"
 
       # Upload install.sh to hancic-artifacts public/ (国内可访问)
       # Only run once, not on every matrix job (install.sh is identical across platforms)
