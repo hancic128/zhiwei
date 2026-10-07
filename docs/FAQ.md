@@ -92,7 +92,8 @@ intentional — MCP integrations are long-lived, so they should use an
 independently revocable credential. Create one in Settings → AI Tokens.
 
 **Q: Can MCP kill processes or restart containers?**
-No. MCP is **read-only** by intent. Management operations (kill / restart /
-reboot / shutdown) go through the console or `POST /v1/exec`, which uses the
-ops-signed command channel — that channel requires the operator's admin
-token, not an AI token.
+Yes, but only through the whitelisted command channel. `exec_command` accepts the
+same fixed, ops-signed actions the console can issue (`kill_process` / `container_*`
+/ `restart_host` / `shutdown_host` / …) — there is no arbitrary shell. The node
+re-validates every action before running it, and the command runs on the node's next
+poll. See [ALERTS.md](./ALERTS.md) and `proto/control.proto` for the full action list.

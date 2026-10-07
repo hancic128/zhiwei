@@ -140,19 +140,95 @@ Protocol version `2024-11-05`. Supports `initialize` / `notifications/initialize
 
 ### Tool List
 
+Tools mirror the console's REST endpoints. Read-only tools fetch data; management
+tools (create / update / delete / exec) are also exposed and run under the same AI
+token. Arbitrary shell is never possible — `exec_command` only accepts the whitelisted
+actions in `proto/control.proto` (which the node re-validates before running).
+
+**Read-only**
+
 | Tool | Parameters | Underlying Endpoint |
 | --- | --- | --- |
 | `list_nodes` | — | `GET /v1/nodes` |
 | `get_node` | `node_id` | `GET /v1/nodes` (filtered by id) |
 | `get_telemetry` | `node_id`, `limit?` (default 100) | `GET /v1/nodes/:id/telemetry` |
-| `list_alerts` | — | `GET /v1/alerts` |
+| `list_alerts` | `since?`, `until?`, `status?`, `sources?`, `limit?`, `offset?` | `GET /v1/alerts` |
 | `list_certs` | — | `GET /v1/cert-sources` |
 | `list_containers` | `node_id` | `GET /v1/nodes/:id/containers` |
-| `list_processes` | `node_id`, `sort?`, `limit?` | `GET /v1/nodes/:id/processes` |
+| `list_processes` | `node_id` | `GET /v1/nodes/:id/processes` |
+| `get_services_timeline` | `from?`, `to?`, `buckets?`, `level?` | `GET /v1/services/timeline` |
+| `list_command_history` | `node_id?`, `limit?` | `GET /v1/commands/history` |
+| `get_command` | `command_id` | `GET /v1/commands/:id` |
+| `get_todo` | `since?`, `until?`, `status?`, `sources?`, `page?`, `page_size?`, `offset?` | `GET /v1/todo` |
+| `get_retention` | — | `GET /v1/retention` |
 
-Destructive operations (`reboot` / `shutdown` / `kill_process` / `container_action` /
-`renew_cert`) are **not** exposed to MCP. MCP is read-only; management
-operations go through the console or `POST /v1/exec`.
+**Nodes**
+
+| Tool | Parameters | Underlying Endpoint |
+| --- | --- | --- |
+| `update_node` | `node_id`, `alias?`, `tags?` | `PATCH /v1/nodes/:id` |
+| `delete_node` | `node_id`, `force?` | `DELETE /v1/nodes/:id` |
+
+**Alert rules** (`op` = `gt`/`gte`/`lt`/`lte`/`eq`; `severity` = `warning`/`critical`)
+
+| Tool | Parameters | Underlying Endpoint |
+| --- | --- | --- |
+| `list_rules` | — | `GET /v1/rules` |
+| `create_rule` | `name`, `metric`, `op`, `threshold`, `duration_seconds?`, `severity?` | `POST /v1/rules` |
+| `update_rule` | `rule_id`, `name?`, `metric?`, `op?`, `threshold?`, `duration_seconds?`, `severity?`, `enabled?` | `PATCH /v1/rules/:id` |
+| `delete_rule` | `rule_id` | `DELETE /v1/rules/:id` |
+| `list_builtin_rules` | — | `GET /v1/builtin-alerts` |
+| `update_builtin_rule` | `rule_id`, `enabled?`, `threshold?`, `duration_seconds?` | `PATCH /v1/builtin-alerts/:id` |
+
+**Alert actions**
+
+| Tool | Parameters | Underlying Endpoint |
+| --- | --- | --- |
+| `silence_alert` | `alert_id`, `minutes` | `POST /v1/alerts/:id/silence` |
+| `resolve_alert` | `alert_id` | `POST /v1/alerts/:id/resolve` |
+
+**Certificate sources** (empty `node_id` = all nodes)
+
+| Tool | Parameters | Underlying Endpoint |
+| --- | --- | --- |
+| `create_cert_source` | `path`, `node_id?`, `notify_enabled?`, `notify_days_before?` | `POST /v1/cert-sources` |
+| `test_cert_source` | `node_id`, `path` | `POST /v1/cert-sources/test` |
+| `update_cert_source` | `source_id`, `node_id?`, `path?`, `enabled?`, `notify_enabled?`, `notify_days_before?` | `PATCH /v1/cert-sources/:id` |
+| `delete_cert_source` | `source_id` | `DELETE /v1/cert-sources/:id` |
+
+**Notification channels** (`kind` = `feishu`/`slack`/`bluebird`/`webhook`;
+`min_severity` = `info`/`warning`/`critical`)
+
+| Tool | Parameters | Underlying Endpoint |
+| --- | --- | --- |
+| `list_channels` | — | `GET /v1/channels` |
+| `create_channel` | `name`, `kind?`, `url?`, `secret?`, `app_id?`, `receive_id?`, `receive_id_type?`, `min_severity?` | `POST /v1/channels` |
+| `test_channel` | `kind`, `url?`, `secret?`, `app_id?`, `receive_id?`, `receive_id_type?` | `POST /v1/channels/test` |
+| `update_channel` | `channel_id`, `name?`, `url?`, `secret?`, `app_id?`, `receive_id?`, `receive_id_type?`, `min_severity?`, `enabled?` | `PATCH /v1/channels/:id` |
+| `delete_channel` | `channel_id` | `DELETE /v1/channels/:id` |
+
+**Probes** (`kind` = `http`/`tcp`/`tls`; `target_json` is a JSON string, e.g.
+`{"url":"https://example.com"}` or `{"host":"1.2.3.4","port":443}`)
+
+| Tool | Parameters | Underlying Endpoint |
+| --- | --- | --- |
+| `list_probes` | — | `GET /v1/probes` |
+| `create_probe` | `name`, `kind`, `target_json`, `description?`, `expect_json?`, `interval_seconds?`, `timeout_ms?`, `failure_threshold?`, `node_ids?`, `enabled?` | `POST /v1/probes` |
+| `test_probe` | `kind`, `target_json`, `expect_json?`, `timeout_ms?` | `POST /v1/probes/test` |
+| `update_probe` | `probe_id`, `name?`, `description?`, `kind?`, `target_json?`, `expect_json?`, `interval_seconds?`, `timeout_ms?`, `failure_threshold?`, `node_ids?`, `enabled?` | `PATCH /v1/probes/:id` |
+| `delete_probe` | `probe_id` | `DELETE /v1/probes/:id` |
+| `get_probe_results` | `probe_id`, `limit?` | `GET /v1/probes/:id/results` |
+
+**Control commands** (whitelisted actions only; runs on a later node poll)
+
+| Tool | Parameters | Underlying Endpoint |
+| --- | --- | --- |
+| `exec_command` | `node_id`, `action`, `params?` | `POST /v1/exec` |
+
+`action` is one of `noop`, `fetch_logs`, `kill_process`, `restart_host`,
+`shutdown_host`, `container_start`, `container_stop`, `container_restart`,
+`container_remove`, `refresh_inventory`, `scan_certs`, `upgrade_agent`,
+`rollback_agent`. Returns a `command_id` to poll via `get_command`.
 
 ### Client Configuration Example
 
