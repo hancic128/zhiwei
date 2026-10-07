@@ -526,16 +526,32 @@ fn tools_list() -> Value {
                 }),
             ),
             // ========== Command Execution ==========
+            //
+            // There is no arbitrary-shell action on purpose: nodes only run a fixed, signed
+            // whitelist (see proto/control.proto `Action`). Exposing `action` + `params` keeps
+            // the MCP surface identical to what the console can do — nothing more.
             tool_def(
                 "exec_command",
-                "Execute a shell command on a node and return the output.",
+                "Issue a control command to a node (whitelisted actions only; runs on a later poll, returns a command_id to poll via get_command)",
                 &json!({
                     "type": "object",
                     "properties": {
                         "node_id": { "type": "string", "description": "Target node ID" },
-                        "command": { "type": "string", "description": "Shell command to execute" }
+                        "action": {
+                            "type": "string",
+                            "enum": [
+                                "noop", "fetch_logs", "kill_process", "restart_host", "shutdown_host",
+                                "container_start", "container_stop", "container_restart", "container_remove",
+                                "refresh_inventory", "scan_certs", "upgrade_agent", "rollback_agent"
+                            ],
+                            "description": "Whitelisted action to run on the node"
+                        },
+                        "params": {
+                            "type": "object",
+                            "description": "Action parameters (e.g. fetch_logs: {container|path, tail}; container_*: {container, force}; kill_process: {pid, signal}; scan_certs: {path}; upgrade_agent: {version, download_url, sha256})"
+                        }
                     },
-                    "required": ["node_id", "command"],
+                    "required": ["node_id", "action"],
                     "additionalProperties": false,
                 }),
             ),
@@ -800,6 +816,18 @@ fn req_str(arguments: &Value, key: &str) -> anyhow::Result<String> {
         .and_then(|v| v.as_str())
         .map(String::from)
         .ok_or_else(|| anyhow::anyhow!("{key} is required"))
+}
+
+/// Build the `/v1/exec` request body from MCP tool arguments.
+///
+/// Kept separate from the dispatch so the "arguments → server body" mapping is unit-testable:
+/// the previous bug was exactly a mismatch here (args used `command`, server expects `action`).
+fn exec_body(arguments: &Value) -> anyhow::Result<Value> {
+    Ok(json!({
+        "node_id": req_str(arguments, "node_id")?,
+        "action": req_str(arguments, "action")?,
+        "params": arguments.get("params").cloned().unwrap_or_else(|| json!({})),
+    }))
 }
 
 /// HTTP GET request helper.
@@ -1308,16 +1336,19 @@ async fn call_tool_impl(
 
         // ========== Command Execution ==========
         "exec_command" => {
-            let body = http_request(
+            // Forward the whitelisted action + params verbatim; the server validates and the
+            // node re-validates before running, so an unknown action surfaces as an error here.
+            let body = exec_body(arguments)?;
+            let out = http_request(
                 &client,
                 base_url,
                 token,
                 reqwest::Method::POST,
                 "/v1/exec",
-                Some(arguments),
+                Some(&body),
             )
             .await?;
-            pretty_json(body)
+            pretty_json(out)
         }
         "list_command_history" => {
             let node_id = opt_str(arguments, "node_id");
@@ -1559,6 +1590,45 @@ mod tests {
             assert_eq!(schema["type"], "object", "tool {t:?} schema missing type");
             assert!(t["description"].as_str().is_some());
         }
+    }
+
+    /// `exec_command` must speak the server's vocabulary (`action` + `params`), not a shell
+    /// `command` string — the mismatch 400'd every call. Guard the schema and the body shape.
+    #[test]
+    fn exec_command_uses_whitelisted_action_not_shell() {
+        let v = tools_list();
+        let tool = v["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "exec_command")
+            .expect("exec_command tool missing");
+        let props = &tool["inputSchema"]["properties"];
+        assert!(props.get("action").is_some(), "exec_command needs `action`");
+        assert!(
+            props.get("command").is_none(),
+            "exec_command must not advertise a raw shell `command`"
+        );
+        let required = tool["inputSchema"]["required"].as_array().unwrap();
+        assert!(required.iter().any(|r| r == "node_id"));
+        assert!(required.iter().any(|r| r == "action"));
+
+        let body = exec_body(&json!({
+            "node_id": "n1",
+            "action": "fetch_logs",
+            "params": {"container": "web", "tail": 50}
+        }))
+        .unwrap();
+        assert_eq!(body["node_id"], "n1");
+        assert_eq!(body["action"], "fetch_logs");
+        assert_eq!(body["params"]["tail"], 50);
+
+        // params is optional → defaults to an empty object the server accepts
+        let body = exec_body(&json!({"node_id": "n1", "action": "noop"})).unwrap();
+        assert_eq!(body["params"], json!({}));
+
+        // missing action is a hard error, not a silently-empty command
+        assert!(exec_body(&json!({"node_id": "n1"})).is_err());
     }
 
     #[test]

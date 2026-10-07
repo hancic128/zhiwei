@@ -247,7 +247,7 @@ In your AI client's MCP settings file:
 - `get_probe_results` — probe history results
 
 **Commands** (3):
-- `exec_command` — execute a command on a node (write)
+- `exec_command` — issue a control command to a node (whitelisted actions, write)
 - `list_command_history` — command execution history
 - `get_command` — command details
 

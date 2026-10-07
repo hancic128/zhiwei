@@ -222,7 +222,7 @@ Cursor、Cline、Claude Code 等能直接读写集群数据。
 - `get_probe_results` — 探测历史结果
 
 **命令** (3个):
-- `exec_command` — 在节点执行命令（写）
+- `exec_command` — 向节点下发控制命令（白名单 action，写）
 - `list_command_history` — 命令历史
 - `get_command` — 命令详情
 
