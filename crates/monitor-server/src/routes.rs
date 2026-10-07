@@ -2912,10 +2912,10 @@ async fn create_channel_handler(
     ) {
         return err(StatusCode::BAD_REQUEST, msg);
     }
-    if !matches!(b.min_severity.as_str(), "warning" | "critical") {
+    if !matches!(b.min_severity.as_str(), "info" | "warning" | "critical") {
         return err(
             StatusCode::BAD_REQUEST,
-            "min_severity must be warning or critical",
+            "min_severity must be info, warning or critical",
         );
     }
     let now = zhiwei_common::Timestamp::now().unix_nano();
@@ -3127,8 +3127,8 @@ fn merge_channel_patch(
         ch.receive_id_type = v.trim().to_string();
     }
     if let Some(v) = &b.min_severity {
-        if !matches!(v.as_str(), "warning" | "critical") {
-            return Err("min_severity must be warning or critical".into());
+        if !matches!(v.as_str(), "info" | "warning" | "critical") {
+            return Err("min_severity must be info, warning or critical".into());
         }
         ch.min_severity.clone_from(v);
     }
@@ -4779,7 +4779,7 @@ mod channel_patch_tests {
     #[test]
     fn blank_name_and_unknown_severity_are_rejected() {
         assert!(merge_channel_patch(channel(), &body(r#"{"name":"   "}"#)).is_err());
-        assert!(merge_channel_patch(channel(), &body(r#"{"min_severity":"info"}"#)).is_err());
+        assert!(merge_channel_patch(channel(), &body(r#"{"min_severity":"debug"}"#)).is_err());
     }
 
     #[test]
