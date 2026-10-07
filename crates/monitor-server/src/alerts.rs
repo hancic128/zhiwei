@@ -103,7 +103,7 @@ struct LevelStyle {
     slack: &'static str,
 }
 
-/// Three levels: critical / warning / resolved.
+/// Four levels: critical / warning / info / resolved.
 fn level_style(rule: &AlertRule, firing: bool) -> LevelStyle {
     if !firing {
         LevelStyle {
@@ -120,6 +120,14 @@ fn level_style(rule: &AlertRule, firing: bool) -> LevelStyle {
             emoji: "🔴",
             feishu: "red",
             slack: "#cf222e",
+        }
+    } else if rule.severity == "info" {
+        LevelStyle {
+            key: "info",
+            label: "Info",
+            emoji: "🔵",
+            feishu: "blue",
+            slack: "#0969da",
         }
     } else {
         LevelStyle {
@@ -2462,7 +2470,7 @@ mod tests {
     fn level_palette_follows_severity() {
         assert_eq!(level_style(&rule("critical"), true).feishu, "red");
         assert_eq!(level_style(&rule("warning"), true).feishu, "orange");
-        assert_eq!(level_style(&rule("info"), true).feishu, "orange");
+        assert_eq!(level_style(&rule("info"), true).feishu, "blue");
         assert_eq!(level_style(&rule("critical"), false).feishu, "green");
     }
 
@@ -2473,6 +2481,7 @@ mod tests {
         for (severity, firing, key, feishu, hex, emoji) in [
             ("critical", true, "critical", "red", "#cf222e", "🔴"),
             ("warning", true, "warning", "orange", "#d93f0b", "🟠"),
+            ("info", true, "info", "blue", "#0969da", "🔵"),
             ("critical", false, "resolved", "green", "#2da44e", "✅"),
         ] {
             let r = rule(severity);
