@@ -24,7 +24,7 @@ jobs:
       # Pinned deliberately. clippy and rustfmt gain lints between releases, so
       # `@stable` drifts ahead of the dev toolchain and turns unrelated PRs red.
       # Bump this together with a formatting/lint cleanup pass.
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@1.120.0
         with:
           components: rustfmt, clippy
 
