@@ -51,13 +51,9 @@ struct Args {
     #[arg(long, default_value_t = 60, env = "ZHIWEI_OPS_TTL")]
     ttl: i64,
 
-    /// Directory to store agent upgrade packages
-    #[arg(
-        long,
-        default_value = "/opt/zhiwei/agent-upgrades",
-        env = "ZHIWEI_UPGRADE_DIR"
-    )]
-    upgrade_dir: PathBuf,
+    /// Directory to store agent upgrade packages (defaults to <data_dir>/agent-upgrades)
+    #[arg(long, env = "ZHIWEI_UPGRADE_DIR")]
+    upgrade_dir: Option<PathBuf>,
 }
 
 struct OpsState {
@@ -77,6 +73,11 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
     tokio::fs::create_dir_all(&args.data_dir).await?;
+
+    // Default upgrade_dir to data_dir/agent-upgrades
+    let upgrade_dir = args
+        .upgrade_dir
+        .unwrap_or_else(|| args.data_dir.join("agent-upgrades"));
 
     // Signing key: only exists within ops process, persisted as 0600
     let key_path = args.data_dir.join("ops.key");
@@ -108,19 +109,26 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(fingerprint = %&pub_b64[..16.min(pub_b64.len())], "ops public key written to {:?}", pub_path);
 
     let db_path = args.data_dir.join("monitor.db");
+    tracing::info!(path = %db_path.display(), "opening database...");
     let storage = zhiwei_storage::Storage::open(&db_path)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to open storage: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Failed to open database at {}: {e}", db_path.display()))?;
 
     // Ensure upgrade directory exists
-    tokio::fs::create_dir_all(&args.upgrade_dir).await?;
-    tracing::info!(dir = %args.upgrade_dir.display(), "upgrade directory ready");
+    tracing::info!(path = %upgrade_dir.display(), "creating upgrade directory...");
+    tokio::fs::create_dir_all(&upgrade_dir).await.map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to create upgrade directory {}: {e}",
+            upgrade_dir.display()
+        )
+    })?;
+    tracing::info!(dir = %upgrade_dir.display(), "upgrade directory ready");
 
     let state = Arc::new(OpsState {
         storage,
         key,
         ttl: args.ttl,
-        upgrade_dir: args.upgrade_dir,
+        upgrade_dir,
     });
 
     let app = Router::new()
@@ -132,7 +140,10 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     let addr: SocketAddr = args.listen.parse()?;
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    tracing::info!(%addr, "attempting to bind ops-server...");
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to bind {addr}: {e}"))?;
     tracing::info!(%addr, "zhiwei-ops ready (loopback only, for monitor to forward signing requests)");
     axum::serve(listener, app).await?;
     Ok(())

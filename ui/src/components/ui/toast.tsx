@@ -121,7 +121,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
       {children}
       <div
         className={cn(
-          "fixed top-4 left-1/2 -translate-x-1/2 z-[60] flex flex-col gap-2",
+          "fixed top-4 left-1/2 -translate-x-1/2 z-[80] flex flex-col gap-2",
           // Spec 7.11.3: desktop min 320 / max 480, narrow on mobile within the viewport (avoid horizontal overflow on narrow screens)
           "w-[min(480px,calc(100vw-2rem))] min-w-[320px]",
         )}
