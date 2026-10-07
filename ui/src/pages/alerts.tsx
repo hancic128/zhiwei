@@ -62,6 +62,7 @@ const BUILTIN_META: Record<
   cpu_high: { metric: "host.cpu.usage > threshold", severity: "warning", tone: "warn" },
   mem_high: { metric: "host.mem.usage > threshold", severity: "warning", tone: "warn" },
   disk_high: { metric: "host.disk.usage > threshold", severity: "warning", tone: "warn" },
+  admin_actions: { metric: "admin.action", severity: "info", tone: "info" },
 };
 
 const BUILTIN_TONE_CLASS: Record<string, string> = {

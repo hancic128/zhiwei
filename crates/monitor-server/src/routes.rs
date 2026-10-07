@@ -1299,9 +1299,22 @@ async fn void_pending_commands(
 }
 
 async fn delete_node_row(state: &AppState, node_id: &str, _exists: bool, force: bool) -> Response {
+    // Resolve a display name before the row is gone (alias preferred, else hostname).
+    let display = state
+        .storage
+        .nodes()
+        .find_by_id(&zhiwei_common::NodeId::from_string(node_id.to_string()))
+        .await
+        .ok()
+        .flatten()
+        .map_or_else(
+            || node_id.to_string(),
+            |n| node_display_name(&n.alias, &n.hostname),
+        );
     match state.storage.nodes().delete(node_id).await {
         Ok(true) => {
             info!(node_id = %node_id, "Node deleted");
+            crate::alerts::notify_admin_action(state, "deleted", "node", &display);
             (StatusCode::NO_CONTENT).into_response()
         }
         Ok(false) => {
@@ -2556,7 +2569,10 @@ async fn create_rule_handler(
         )
         .await
     {
-        Ok(id) => (StatusCode::CREATED, Json(serde_json::json!({ "id": id }))).into_response(),
+        Ok(id) => {
+            crate::alerts::notify_admin_action(&state, "created", "alert rule", &b.name);
+            (StatusCode::CREATED, Json(serde_json::json!({ "id": id }))).into_response()
+        }
         Err(e) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("create rule: {e}"),
@@ -2641,8 +2657,19 @@ async fn delete_rule_handler(
         );
     }
     let now = zhiwei_common::Timestamp::now().unix_nano();
+    let name = state
+        .storage
+        .alerts()
+        .get_rule(id)
+        .await
+        .ok()
+        .flatten()
+        .map_or_else(|| format!("rule {id}"), |r| r.name);
     match state.storage.alerts().delete_rule(id, now).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            crate::alerts::notify_admin_action(&state, "deleted", "alert rule", &name);
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("delete rule: {e}"),
@@ -2930,7 +2957,15 @@ async fn create_channel_handler(
         min_severity: &b.min_severity,
     };
     match state.storage.alerts().create_channel(&channel, now).await {
-        Ok(id) => (StatusCode::CREATED, Json(serde_json::json!({ "id": id }))).into_response(),
+        Ok(id) => {
+            crate::alerts::notify_admin_action(
+                &state,
+                "created",
+                "notification channel",
+                b.name.trim(),
+            );
+            (StatusCode::CREATED, Json(serde_json::json!({ "id": id }))).into_response()
+        }
         Err(e) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("create channel: {e}"),
@@ -3221,8 +3256,19 @@ async fn delete_channel_handler(
             "authentication required (Bearer admin token)",
         );
     }
+    let name = state
+        .storage
+        .alerts()
+        .find_channel(id)
+        .await
+        .ok()
+        .flatten()
+        .map_or_else(|| format!("channel {id}"), |c| c.name);
     match state.storage.alerts().delete_channel(id).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            crate::alerts::notify_admin_action(&state, "deleted", "notification channel", &name);
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("delete channel: {e}"),

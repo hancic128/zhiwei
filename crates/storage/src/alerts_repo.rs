@@ -1632,6 +1632,15 @@ mod container_builtin_channel_tests {
     }
 
     #[tokio::test]
+    async fn migration_027_seeds_admin_actions_alert() {
+        let repo = AlertsRepo::new(fresh_pool().await);
+        assert!(
+            repo.builtin_rule_enabled("admin_actions").await.unwrap(),
+            "admin_actions should exist and be enabled by default"
+        );
+    }
+
+    #[tokio::test]
     async fn container_alert_is_idempotent_and_resolve_only_touches_its_own() {
         let pool = fresh_pool().await;
         let repo = AlertsRepo::new(pool.clone());

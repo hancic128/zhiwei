@@ -501,7 +501,10 @@ pub async fn create_probe_handler(
     };
     let now = zhiwei_common::Timestamp::now().unix_nano();
     match state.storage.probes().create_probe(&input, now).await {
-        Ok(p) => (StatusCode::CREATED, Json(p)).into_response(),
+        Ok(p) => {
+            crate::alerts::notify_admin_action(&state, "created", "service", &p.name);
+            (StatusCode::CREATED, Json(p)).into_response()
+        }
         Err(e) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("create probe: {e}"),
@@ -678,8 +681,19 @@ pub async fn delete_probe_handler(
     {
         warn!(error = %e, "Failed to close probe alerts");
     }
+    let name = state
+        .storage
+        .probes()
+        .find_probe(&id)
+        .await
+        .ok()
+        .flatten()
+        .map_or_else(|| format!("probe {id}"), |p| p.name);
     match state.storage.probes().delete_probe(&id).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            crate::alerts::notify_admin_action(&state, "deleted", "service", &name);
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("delete probe: {e}"),

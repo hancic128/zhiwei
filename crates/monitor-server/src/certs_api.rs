@@ -293,6 +293,7 @@ pub async fn create_cert_source_handler(
     // Make relevant nodes rescan immediately: single node sends to one
     // device, "all nodes" sends per device (acceptable within scale limits)
     refresh_scope_inventory(&state, &node_id).await;
+    crate::alerts::notify_admin_action(&state, "created", "certificate source", &created.path);
     (
         StatusCode::CREATED,
         Json(serde_json::json!({
@@ -433,6 +434,7 @@ pub async fn delete_cert_source_handler(
         .resolve_open_cert_alerts(&id, None, now)
         .await;
     refresh_scope_inventory(&state, &existing.node_id).await;
+    crate::alerts::notify_admin_action(&state, "deleted", "certificate source", &existing.path);
     (StatusCode::NO_CONTENT).into_response()
 }
 
