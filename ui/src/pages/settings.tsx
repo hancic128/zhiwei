@@ -532,12 +532,20 @@ function ChannelsSection() {
                   </Td>
                   <Td>
                     <DotBadge
-                      tone={c.min_severity === "critical" ? "danger" : "warn"}
+                      tone={
+                        c.min_severity === "critical"
+                          ? "danger"
+                          : c.min_severity === "warning"
+                            ? "warn"
+                            : "neutral"
+                      }
                     >
                       {t(
                         c.min_severity === "critical"
                           ? "alerts.critical"
-                          : "alerts.warning",
+                          : c.min_severity === "warning"
+                            ? "alerts.warning"
+                            : "alerts.info",
                       )}
                     </DotBadge>
                   </Td>
