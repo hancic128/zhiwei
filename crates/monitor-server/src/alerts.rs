@@ -898,7 +898,15 @@ pub async fn on_probe_transition(
     let rule_name = probe.name.clone();
 
     if transition.new_state == STATE_OK {
-        handle_probe_recovered(state, &repo, probe, transition, hostname, &rule_name, now).await;
+        let resolved =
+            handle_probe_recovered(state, &repo, probe, transition, hostname, &rule_name, now)
+                .await;
+        // A probe whose very first result is healthy has no "recovery" to announce, so the normal
+        // path stays silent. Announce it once as "healthy" (newly configured probe). `previous_state`
+        // is per-probe (not per-node), so this fires exactly once even for multi-node probes.
+        if resolved == 0 && transition.previous_state == "unknown" {
+            notify_probe_joined(state, &repo, probe, hostname, &rule_name, now).await;
+        }
         return;
     }
 
@@ -921,23 +929,23 @@ async fn handle_probe_recovered(
     hostname: &str,
     rule_name: &str,
     now: i64,
-) {
+) -> u64 {
     let resolved = match repo.resolve_open_probe_alerts(&probe.id, now).await {
         Ok(n) => n,
         Err(e) => {
             warn!(error = %e, "Failed to close service probe alert");
-            return;
+            return 0;
         }
     };
     if resolved == 0 {
-        return;
+        return 0;
     }
     info!(probe = %probe.name, "Service probe recovered, alert closed");
     // The "back online" push is controlled by the builtin toggle service_online; closing
     // the alert itself is unaffected — the person came back, leaving the old alert up
     // would be misleading.
     if !builtin_enabled_or_default(repo, "service_online").await {
-        return;
+        return resolved;
     }
     let rule = probe_alert_rule(rule_name, "warning");
     let message = format!(
@@ -954,6 +962,35 @@ async fn handle_probe_recovered(
         detail: message,
     };
     notify(state, &rule, &facts, now).await;
+    resolved
+}
+
+/// A probe's first observed state is healthy: no recovery happened, so announce it once as
+/// "healthy" (a newly configured probe). Controlled by the `service_joined` builtin toggle.
+async fn notify_probe_joined(
+    state: &AppState,
+    repo: &AlertsRepo,
+    probe: &zhiwei_storage::probes_repo::Probe,
+    hostname: &str,
+    rule_name: &str,
+    now: i64,
+) {
+    if !builtin_enabled_or_default(repo, "service_joined").await {
+        return;
+    }
+    let rule = probe_alert_rule(rule_name, "info");
+    let facts = AlertFacts {
+        node: hostname.to_string(),
+        firing: true,
+        fields: vec![
+            ("Node", hostname.to_string()),
+            ("Probe", probe.name.clone()),
+            ("Status", "healthy".to_string()),
+        ],
+        detail: format!("Probe {} is healthy", probe.name),
+    };
+    notify(state, &rule, &facts, now).await;
+    info!(probe = %probe.name, "Probe joined (first healthy) notification sent");
 }
 
 /// Probe transitioned to `down`: if the `service_offline` toggle allows, open an alert and notify.
@@ -1083,6 +1120,22 @@ fn node_online_alert_rule() -> AlertRule {
     }
 }
 
+/// Carrier for "node joined" events — distinct from `node_online_alert_rule` (recovery).
+fn node_joined_alert_rule() -> AlertRule {
+    AlertRule {
+        id: 0,
+        name: "Node joined".to_string(),
+        metric: "host.online".to_string(),
+        op: "eq".to_string(),
+        threshold: 1.0,
+        duration_seconds: 0,
+        severity: "info".to_string(),
+        enabled: true,
+        created_at_unix_nano: 0,
+        updated_at_unix_nano: 0,
+    }
+}
+
 /// Node online/offline events — feed in a batch of node state changes at once.
 ///
 /// Design: a background task scans all nodes every ~30s (see `spawn_node_liveness_watcher`):
@@ -1114,6 +1167,44 @@ pub async fn on_node_liveness_change(state: &AppState, transitions: &[(String, S
             Liveness::Online => handle_node_online(state, &repo, node_id, hostname, now).await,
         }
     }
+}
+
+/// A genuinely-new node (enrolled within the warmup window) appeared. Unlike `node_online`
+/// (which fires on the Offline→Online recovery transition), this fires exactly once, when the
+/// node first becomes visible to the watcher. Controlled by the `node_joined` builtin toggle.
+///
+/// `compute_transitions` only lists a node here when its `enrolled_at` is recent — a monitor
+/// restart must not replay "Node X joined" for every node already in the fleet.
+pub async fn on_node_joined(state: &AppState, joined: &[(String, String)]) {
+    let repo = state.storage.alerts();
+    for (node_id, hostname) in joined {
+        let now = Timestamp::now().unix_nano();
+        notify_node_joined(state, &repo, node_id, hostname, now).await;
+    }
+}
+
+async fn notify_node_joined(
+    state: &AppState,
+    repo: &AlertsRepo,
+    node_id: &str,
+    hostname: &str,
+    now: i64,
+) {
+    if !builtin_enabled_or_default(repo, "node_joined").await {
+        return;
+    }
+    let rule = node_joined_alert_rule();
+    let facts = AlertFacts {
+        node: hostname.to_string(),
+        firing: true,
+        fields: vec![
+            ("Node", hostname.to_string()),
+            ("Status", "joined".to_string()),
+        ],
+        detail: format!("Node {hostname} joined the cluster"),
+    };
+    notify(state, &rule, &facts, now).await;
+    info!(%node_id, "Node joined notification sent");
 }
 
 /// Node went offline: open (or refresh) the single unresolved offline alert and notify once.
@@ -1678,7 +1769,11 @@ pub async fn on_container_events(
     current_json: &str,
 ) {
     let Some(previous) = previous_json else {
-        return; // No historical baseline yet, just establish it this round
+        // First snapshot for this node: no baseline to diff against. Announce the containers we
+        // just discovered (not their "started" transition — that would re-fire on the next cycle);
+        // suppressed for nodes already in the fleet, so a monitor upgrade doesn't flood.
+        notify_newly_discovered_containers(state, node_id, hostname, current_json).await;
+        return;
     };
     let events = diff_containers(previous, current_json);
     // A recreated container (`docker compose up -d`) keeps its name but gets a new ID, so the new
@@ -1800,6 +1895,62 @@ async fn handle_container_started(
     };
     notify(state, &rule, &facts, now).await;
     info!(container = %name, %node_id, "Container started notification sent");
+}
+
+/// Announce containers discovered on a node's very first snapshot. Unlike `handle_container_started`
+/// (which fires on a running-transition), each running container is announced once, when first seen.
+/// The whole path is suppressed for nodes already in the fleet (see [`should_announce_joins`]) so a
+/// monitor upgrade / fresh install doesn't replay every container. Controlled by `container_joined`.
+async fn notify_newly_discovered_containers(
+    state: &AppState,
+    node_id: &str,
+    hostname: &str,
+    current_json: &str,
+) {
+    let repo = state.storage.alerts();
+    if !should_announce_joins(state, node_id).await {
+        return;
+    }
+    if !builtin_enabled_or_default(&repo, "container_joined").await {
+        return;
+    }
+    for (id, (name, _started, running)) in parse_container_map(current_json) {
+        if !running {
+            continue;
+        }
+        let short = id.chars().take(12).collect::<String>();
+        let rule = container_event_rule("Container discovered", "info");
+        let facts = AlertFacts {
+            node: hostname.to_string(),
+            firing: true,
+            fields: vec![
+                ("Node", hostname.to_string()),
+                ("Container", name.clone()),
+                ("ID", short.clone()),
+            ],
+            detail: format!("Container {name} ({short}) discovered"),
+        };
+        notify(state, &rule, &facts, Timestamp::now().unix_nano()).await;
+        info!(container = %name, %node_id, "Container discovered notification sent");
+    }
+}
+
+/// Suppress the "joined / discovered" family (node / container / service) for nodes that were
+/// already in the fleet when this monitor started. `node_joined` is filtered upstream via
+/// `enrolled_at`; containers and services have no such origin timestamp, so they use this
+/// node-level proxy: a node enrolled within [`NODE_JOIN_WINDOW_MS`] is genuinely new.
+async fn should_announce_joins(state: &AppState, node_id: &str) -> bool {
+    let Ok(Some(n)) = state
+        .storage
+        .nodes()
+        .find_by_id(&zhiwei_common::NodeId::from_string(node_id.to_string()))
+        .await
+    else {
+        return false;
+    };
+    let now_ms = Timestamp::now().unix_nano() / 1_000_000;
+    let enrolled_age_ms = now_ms - n.enrolled_at_unix_nano / 1_000_000;
+    enrolled_age_ms < NODE_JOIN_WINDOW_MS
 }
 
 /// Snapshot JSON → { `container_id`: (name, `started_at_unix_nano`, running) }.
@@ -2054,6 +2205,14 @@ const LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(30);
 /// "first round" happens after warmup, logic stays the same (None→Offline still really alerts).
 pub const LIVENESS_WARMUP_MS: i64 = 120_000;
 
+/// A node first seen in this monitor process whose `enrolled_at` is within this window counts as
+/// newly joined (announced via `node_joined`). 24h keeps it robust to a monitor restart hours
+/// after enrollment; a node that was already in the fleet before the window is never re-announced.
+pub const NODE_JOIN_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// One liveness scan: (offline/online transitions, newly-joined nodes). Both carry `(id, display)`.
+type Transitions = (Vec<(String, String, Liveness)>, Vec<(String, String)>);
+
 /// Spawn a long-running task that periodically scans all nodes' `last_seen_unix_nano`,
 /// writing transitions to the alerts table.
 ///
@@ -2086,12 +2245,24 @@ pub fn spawn_node_liveness_watcher(state: AppState) {
                         continue;
                     }
                 };
+            let (changes, joined) = transitions;
             // Record state first then notify, to avoid same transitions arriving again during notify
-            for (id, _, liveness) in &transitions {
+            for (id, _, liveness) in &changes {
                 last_seen_state.insert(id.clone(), *liveness);
             }
-            if !transitions.is_empty() {
-                on_node_liveness_change(&state, &transitions).await;
+            // Joined nodes are already in `last_seen_state` (every listed node carries a liveness
+            // transition when it is Offline; when Online it does not — record it here so it isn't
+            // reported as "joined" again next round).
+            for (id, _) in &joined {
+                last_seen_state
+                    .entry(id.clone())
+                    .or_insert(Liveness::Online);
+            }
+            if !joined.is_empty() {
+                on_node_joined(&state, &joined).await;
+            }
+            if !changes.is_empty() {
+                on_node_liveness_change(&state, &changes).await;
             }
             tokio::time::sleep(LIVENESS_POLL_INTERVAL).await;
         }
@@ -2110,10 +2281,13 @@ async fn compute_transitions(
     state: &AppState,
     last_seen_state: &std::collections::HashMap<String, Liveness>,
     monitor_started_at_unix_ms: i64,
-) -> anyhow::Result<Vec<(String, String, Liveness)>> {
+) -> anyhow::Result<Transitions> {
     let nodes = state.storage.nodes().list_all().await?;
     let now_ms = Timestamp::now().unix_nano() / 1_000_000;
     let mut out = Vec::new();
+    // Nodes seen for the first time in this monitor *process* whose enrollment is recent —
+    // a genuine new node. Reported once; the offline/online transition list is separate.
+    let mut joined = Vec::new();
     // Suppress cold-start after monitor restart: all transitions are held first, wait for nodes
     // to reconnect and stabilize. `monitor_started_at_unix_ms` comes from the monitor startup Unix ms;
     // old binaries / tests may pass 0, saturating_sub treats it as "started a long time ago" and
@@ -2125,7 +2299,7 @@ async fn compute_transitions(
             warmup_ms = LIVENESS_WARMUP_MS,
             "Skipping liveness transition (warmup)"
         );
-        return Ok(out);
+        return Ok((out, joined));
     }
     for n in nodes {
         // Nodes that haven't reported yet (newly joined / offline a long time) skip this round: give one more cycle window.
@@ -2138,35 +2312,35 @@ async fn compute_transitions(
         } else {
             Liveness::Offline
         };
+        let display = if n.alias.is_empty() {
+            n.hostname.clone()
+        } else {
+            n.alias.clone()
+        };
         // Only report when "previous round recorded, and different from now", to avoid cold-start noise.
         match last_seen_state.get(&n.id) {
             Some(prev) if *prev != current => {
-                let hostname = if n.alias.is_empty() {
-                    n.hostname.clone()
-                } else {
-                    n.alias.clone()
-                };
-                out.push((n.id, hostname, current));
+                out.push((n.id, display, current));
             }
             None => {
-                // First round: record current state but don't notify — avoid flashing "just started, recovered"
-                // after restart. But offline nodes **are reported in the first round**: after a long
-                // monitor restart we should pick them up. Note: warmup already returned early at the
-                // top of the function; reaching here means we've passed warmup, monitor has run for at
-                // least LIVENESS_WARMUP_MS, normal behavior.
+                // First time this process sees the node. Report offline nodes (pick them up after a
+                // long monitor restart). Don't report "online" — that's `node_online`'s recovery
+                // transition, and a restart would otherwise replay it for the whole fleet.
+                //
+                // Separately: if the node enrolled recently (within the join window), it's a genuine
+                // arrival — tell the user. A node already in the fleet simply isn't mentioned.
+                let enrolled_age_ms = now_ms - n.enrolled_at_unix_nano / 1_000_000;
+                if enrolled_age_ms < NODE_JOIN_WINDOW_MS {
+                    joined.push((n.id.clone(), display.clone()));
+                }
                 if current == Liveness::Offline {
-                    let hostname = if n.alias.is_empty() {
-                        n.hostname.clone()
-                    } else {
-                        n.alias.clone()
-                    };
-                    out.push((n.id, hostname, current));
+                    out.push((n.id, display, current));
                 }
             }
             _ => {}
         }
     }
-    Ok(out)
+    Ok((out, joined))
 }
 
 #[cfg(test)]
