@@ -47,6 +47,7 @@ pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
     m024_retention_settings(pool).await?;
     m025_node_versions(pool).await?;
     m026_joined_alerts(pool).await?;
+    m027_admin_actions_alert(pool).await?;
 
     Ok(())
 }
@@ -833,6 +834,24 @@ async fn m026_joined_alerts(pool: &SqlitePool) -> anyhow::Result<()> {
                    ('container_joined', 'Container Discovered', 1, 0, 0, 0),
                    ('service_joined',   'Service Healthy', 1, 0, 0, 0);
         INSERT INTO schema_version (version) VALUES (26);
+        ",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// 027: Admin action notifications (add / delete of console-managed entities). Informational, so the
+// default min-severity filter admits it; can be turned off in the console.
+async fn m027_admin_actions_alert(pool: &SqlitePool) -> anyhow::Result<()> {
+    if migration_applied(pool, 27).await? {
+        return Ok(());
+    }
+    sqlx::query(
+        r"
+        INSERT OR IGNORE INTO builtin_alert_rules (id, name, enabled, threshold, duration_seconds, updated_at_unix_nano)
+            VALUES ('admin_actions', 'Admin Action', 1, 0, 0, 0);
+        INSERT INTO schema_version (version) VALUES (27);
         ",
     )
     .execute(pool)

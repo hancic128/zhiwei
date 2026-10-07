@@ -499,6 +499,48 @@ async fn handle_recovery(
         .await;
 }
 
+/// Notify that an administrative mutation happened (add / delete / update of a console-managed
+/// entity). Fire-and-forget: spawns so the HTTP handler returns without waiting on delivery.
+///
+/// Controlled by the `admin_actions` builtin toggle. This is intentionally **not** tied to a node:
+/// the entity name leads, with the action as the card's Status field.
+pub fn notify_admin_action(state: &AppState, action: &str, entity: &str, name: &str) {
+    let state = state.clone();
+    let action = action.to_string();
+    let entity = entity.to_string();
+    let name = name.to_string();
+    tokio::spawn(async move {
+        let repo = state.storage.alerts();
+        if !builtin_enabled_or_default(&repo, "admin_actions").await {
+            return;
+        }
+        let rule = AlertRule {
+            id: 0,
+            // Title renders as "<level> · <rule.name> · <facts.node>" — name the entity there.
+            name: entity.to_string(),
+            metric: "admin.action".to_string(),
+            op: "eq".to_string(),
+            threshold: 0.0,
+            duration_seconds: 0,
+            severity: "info".to_string(),
+            enabled: true,
+            created_at_unix_nano: 0,
+            updated_at_unix_nano: 0,
+        };
+        let facts = AlertFacts {
+            node: name.to_string(),
+            firing: true,
+            fields: vec![
+                ("Action", action.to_string()),
+                ("Entity", entity.to_string()),
+                ("Name", name.to_string()),
+            ],
+            detail: format!("{action} {entity} {name}"),
+        };
+        notify(&state, &rule, &facts, Timestamp::now().unix_nano()).await;
+    });
+}
+
 /// Deliver to enabled notification channels by severity.
 async fn notify(state: &AppState, rule: &AlertRule, facts: &AlertFacts, now: i64) {
     let channels = match state.storage.alerts().list_channels().await {
