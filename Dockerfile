@@ -2,8 +2,8 @@
 #
 # The official `rust:` images ship a full build toolchain (buildpack-deps),
 # which is everything `ring` and our crates need — so the builder stage runs
-# no `apt-get` at all. The runtime stage likewise installs nothing and copies
-# the CA bundle over from the builder.
+# no `apt-get` at all. The runtime stage installs only `curl` (for the compose
+# healthcheck) and reuses the CA bundle from the builder.
 
 # ---- builder ----
 FROM rust:1.88-bookworm AS builder
@@ -70,8 +70,14 @@ RUN npm run build
 # ---- runtime ----
 FROM debian:bookworm-slim AS runtime
 
-# No apt: reuse the CA bundle baked into the builder image, and create the
-# service account with the `useradd` that Debian's essential `passwd` provides.
+# The CA bundle is reused from the builder rather than installed. `curl` is the
+# one package we do install: the compose healthcheck runs
+# `curl -f http://127.0.0.1:8443/healthz`, and stock debian:bookworm-slim ships
+# neither curl nor wget — without it the healthcheck exits 127 and the container
+# is permanently "unhealthy" even while the service serves traffic.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /src/target/release/zhiwei-monitor /usr/local/bin/zhiwei-monitor
 # 控制平面：和 monitor 同一个容器、同一个数据目录，双进程各持其职
