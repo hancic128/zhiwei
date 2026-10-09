@@ -10,7 +10,7 @@ use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::Request;
 use hyper_util::rt::TokioIo;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use zhiwei_common::{NodeId, Timestamp};
 use zhiwei_proto::telemetry::TelemetryBatch;
 use zhiwei_storage::alerts_repo::{AlertRule, AlertsRepo, EvalState};
@@ -422,9 +422,9 @@ async fn fire_metric_alert(
         String::new()
     };
     let message = format!("{label} {sym}{threshold}{unit} (current: {value:.1}{unit}{duration})");
-    if !open_metric_alert(repo, rule, node_id, hostname, value, &message, now, since).await {
+    let Some(alert_id) = open_metric_alert(repo, rule, node_id, hostname, value, &message, now, since).await else {
         return;
-    }
+    };
     let facts = AlertFacts {
         node: hostname.to_string(),
         firing: true,
@@ -436,10 +436,14 @@ async fn fire_metric_alert(
         ],
         detail: message,
     };
-    notify(state, rule, &facts, now).await;
+    if is_silenced_for(repo, SilenceKey::AlertId(alert_id), now).await {
+        debug!(rule = %rule.name, %node_id, alert_id, "Alert in silence window, skipping notification");
+    } else {
+        notify(state, rule, &facts, now).await;
+    }
 }
 
-/// Open the alert and mark the eval state as firing. Returns whether it opened.
+/// Open the alert and mark the eval state as firing. Returns the new alert id, or None on failure.
 #[allow(clippy::too_many_arguments)]
 async fn open_metric_alert(
     repo: &zhiwei_storage::alerts_repo::AlertsRepo,
@@ -450,7 +454,7 @@ async fn open_metric_alert(
     message: &str,
     now: i64,
     since: i64,
-) -> bool {
+) -> Option<i64> {
     let alert_id = match repo
         .open_alert(rule, node_id.as_str(), hostname, value, message, now)
         .await
@@ -458,7 +462,7 @@ async fn open_metric_alert(
         Ok(alert_id) => alert_id,
         Err(e) => {
             warn!(error = %e, "Failed to open alert");
-            return false;
+            return None;
         }
     };
     info!(rule = %rule.name, %node_id, alert_id, "Alert firing");
@@ -472,7 +476,7 @@ async fn open_metric_alert(
             Some(value),
         )
         .await;
-    true
+    Some(alert_id)
 }
 
 /// A non-breaching sample: close a firing alert if present, then clear the state.
@@ -539,6 +543,30 @@ pub fn notify_admin_action(state: &AppState, action: &str, entity: &str, name: &
         };
         notify(&state, &rule, &facts, Timestamp::now().unix_nano()).await;
     });
+}
+
+/// Silence key: 8 notify call sites each represent a different "which alert instance am I".
+/// A-group (with an alerts row) uses AlertId; B-group (no row / just resolved) reverse-queries
+/// the most recent alert for that resource.
+enum SilenceKey<'a> {
+    AlertId(i64),
+    Node(&'a str),
+    Container(&'a str),
+    Probe(&'a str),
+}
+
+/// Single gate before notify: returns true when silenced, caller should skip notify + log debug.
+/// DB errors are fail-open (`unwrap_or(None)`) — a silence lookup failure must not also block
+/// the alert itself.
+async fn is_silenced_for<'a>(repo: &AlertsRepo, key: SilenceKey<'a>, now: i64) -> bool {
+    let until = match key {
+        SilenceKey::AlertId(id) => repo.silenced_until_for_alert(id).await,
+        SilenceKey::Node(node) => repo.silenced_until_for_node_offline(node).await,
+        SilenceKey::Container(cid) => repo.silenced_until_for_container(cid).await,
+        SilenceKey::Probe(pid) => repo.silenced_until_for_probe(pid).await,
+    }
+    .unwrap_or(None);
+    crate::todo_api::is_silenced(until, now)
 }
 
 /// Deliver to enabled notification channels by severity.
@@ -1003,7 +1031,11 @@ async fn handle_probe_recovered(
         ],
         detail: message,
     };
-    notify(state, &rule, &facts, now).await;
+    if is_silenced_for(repo, SilenceKey::Probe(&probe.id), now).await {
+        debug!(probe = %probe.name, "Probe recovery in silence window, skipping");
+    } else {
+        notify(state, &rule, &facts, now).await;
+    }
     resolved
 }
 
@@ -1095,7 +1127,11 @@ async fn handle_probe_down(
         ],
         detail: message,
     };
-    notify(state, &rule, &facts, now).await;
+    if is_silenced_for(repo, SilenceKey::AlertId(alert_id), now).await {
+        debug!(probe = %probe.name, alert_id, "Probe alert in silence window, skipping");
+    } else {
+        notify(state, &rule, &facts, now).await;
+    }
 }
 
 /// Read a builtin toggle; on error log and fall back to enabled (fail-open), matching the
@@ -1263,7 +1299,7 @@ async fn handle_node_offline(
     }
     // Notify only when this call *first* opened the alert (see `ensure_node_offline_alert`)
     if let Some(alert_id) = ensure_node_offline_alert(repo, node_id, hostname, now).await {
-        notify_node_offline(state, node_id, hostname, alert_id, now).await;
+        notify_node_offline(state, repo, node_id, hostname, alert_id, now).await;
     }
 }
 
@@ -1298,6 +1334,7 @@ async fn ensure_node_offline_alert(
 
 async fn notify_node_offline(
     state: &AppState,
+    repo: &AlertsRepo,
     node_id: &str,
     hostname: &str,
     alert_id: i64,
@@ -1313,7 +1350,11 @@ async fn notify_node_offline(
         ],
         detail: format!("Node {hostname} is offline"),
     };
-    notify(state, &rule, &facts, now).await;
+    if is_silenced_for(repo, SilenceKey::AlertId(alert_id), now).await {
+        debug!(alert_id, %node_id, "Node offline alert in silence window, skipping");
+    } else {
+        notify(state, &rule, &facts, now).await;
+    }
     info!(alert_id, %node_id, "Node offline alert firing");
 }
 
@@ -1366,7 +1407,11 @@ async fn notify_node_online(
         ],
         detail: format!("Node {hostname} is online"),
     };
-    notify(state, &rule, &facts, now).await;
+    if is_silenced_for(repo, SilenceKey::Node(node_id), now).await {
+        debug!(%node_id, "Node online notification in silence window, skipping");
+    } else {
+        notify(state, &rule, &facts, now).await;
+    }
     info!(%node_id, "Node online notification sent");
 }
 
@@ -1623,7 +1668,11 @@ async fn open_cert_alert(
         ],
         detail: message.to_string(),
     };
-    notify(state, &rule, &facts, now).await;
+    if is_silenced_for(repo, SilenceKey::AlertId(id), now).await {
+        debug!(id, cert = %name, "Cert alert in silence window, skipping");
+    } else {
+        notify(state, &rule, &facts, now).await;
+    }
 }
 
 async fn resolve_cert_alert(repo: &AlertsRepo, id: i64, source_ref: &str, now: i64) {
@@ -1900,7 +1949,11 @@ async fn handle_container_stopped(
         ],
         detail: message,
     };
-    notify(state, &rule, &facts, now).await;
+    if is_silenced_for(repo, SilenceKey::AlertId(alert_id), now).await {
+        debug!(container = %name, alert_id, "Container stopped alert in silence window, skipping");
+    } else {
+        notify(state, &rule, &facts, now).await;
+    }
 }
 
 /// Container started: close the unresolved stopped alert, then (per toggle) notify.
@@ -1935,7 +1988,11 @@ async fn handle_container_started(
         ],
         detail: message,
     };
-    notify(state, &rule, &facts, now).await;
+    if is_silenced_for(repo, SilenceKey::Container(id), now).await {
+        debug!(container = %name, %node_id, "Container started notification in silence window, skipping");
+    } else {
+        notify(state, &rule, &facts, now).await;
+    }
     info!(container = %name, %node_id, "Container started notification sent");
 }
 
