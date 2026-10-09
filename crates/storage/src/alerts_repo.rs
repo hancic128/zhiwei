@@ -1307,6 +1307,71 @@ impl AlertsRepo {
         Ok(())
     }
 
+    /// A 组用：按 alert_id 读 silenced_until。给已有 alerts 行的告警发送前查。
+    /// 行不存在或字段为 NULL 都返回 None。
+    pub async fn silenced_until_for_alert(&self, alert_id: i64) -> anyhow::Result<Option<i64>> {
+        let v: Option<Option<i64>> = sqlx::query_scalar(
+            "SELECT silenced_until_unix_nano FROM alerts WHERE id = ?",
+        )
+        .bind(alert_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(v.flatten())
+    }
+
+    /// B 组·节点上线通知用：返回该节点最近一条 `source = 'node_offline'`
+    /// 告警（不论 resolved 与否）的 silenced_until。
+    /// 语义：用户在节点离线告警上点过静默，节点恢复时上线通知也该一起静默。
+    /// 该节点没离线过、或从未被静默过，都返回 None。
+    pub async fn silenced_until_for_node_offline(
+        &self,
+        node_id: &str,
+    ) -> anyhow::Result<Option<i64>> {
+        let v: Option<Option<i64>> = sqlx::query_scalar(
+            "SELECT silenced_until_unix_nano FROM alerts
+             WHERE source = 'node_offline' AND source_ref = ?
+             ORDER BY id DESC LIMIT 1",
+        )
+        .bind(node_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(v.flatten())
+    }
+
+    /// B 组·容器启动通知用：与 node_offline 同语义，针对 `source = 'container'`。
+    pub async fn silenced_until_for_container(
+        &self,
+        container_id: &str,
+    ) -> anyhow::Result<Option<i64>> {
+        let v: Option<Option<i64>> = sqlx::query_scalar(
+            "SELECT silenced_until_unix_nano FROM alerts
+             WHERE source = 'container' AND source_ref = ?
+             ORDER BY id DESC LIMIT 1",
+        )
+        .bind(container_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(v.flatten())
+    }
+
+    /// B 组·服务探针恢复通知用：读该 probe 最近一条 `source = 'probe'`
+    /// 告警的 silenced_until。恢复通知在原 DOWN 告警 resolve 之后发，
+    /// 没有现成 alert_id 拿，反查"同一探针最近一条 probe 告警"。
+    pub async fn silenced_until_for_probe(
+        &self,
+        probe_id: &str,
+    ) -> anyhow::Result<Option<i64>> {
+        let v: Option<Option<i64>> = sqlx::query_scalar(
+            "SELECT silenced_until_unix_nano FROM alerts
+             WHERE source = 'probe' AND source_ref = ?
+             ORDER BY id DESC LIMIT 1",
+        )
+        .bind(probe_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(v.flatten())
+    }
+
     // ---------- Notify channels ----------
 
     /// Insert a new notify channel. Returns the row id.
@@ -1815,5 +1880,232 @@ mod container_builtin_channel_tests {
 
         assert!(!repo.update_channel(9999, &update, true).await.unwrap());
         assert!(repo.find_channel(9999).await.unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod silence_lookup_tests {
+    //! 静默字段的查询路径。这些方法是告警发送前「要不要跳过 notify」的唯一读出口。
+
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn fresh_pool() -> sqlx::SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        crate::migrations::run(&pool).await.expect("migrations");
+        pool
+    }
+
+    #[tokio::test]
+    async fn silenced_until_for_alert_returns_value_when_set() {
+        let pool = fresh_pool().await;
+        let repo = AlertsRepo::new(pool.clone());
+        let id = repo
+            .open_node_offline_alert("n1", "host-a", "critical", "x", 100)
+            .await
+            .unwrap();
+        repo.silence_alert(id, 500).await.unwrap();
+
+        assert_eq!(repo.silenced_until_for_alert(id).await.unwrap(), Some(500));
+    }
+
+    #[tokio::test]
+    async fn silenced_until_for_alert_returns_none_when_row_missing() {
+        let repo = AlertsRepo::new(fresh_pool().await);
+        assert_eq!(repo.silenced_until_for_alert(9999).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn silenced_until_for_alert_returns_none_when_field_null() {
+        let pool = fresh_pool().await;
+        let repo = AlertsRepo::new(pool.clone());
+        let id = repo
+            .open_node_offline_alert("n1", "host-a", "critical", "x", 100)
+            .await
+            .unwrap();
+        assert_eq!(repo.silenced_until_for_alert(id).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn silenced_until_for_node_offline_uses_latest_alert_only() {
+        let pool = fresh_pool().await;
+        let repo = AlertsRepo::new(pool.clone());
+        let first = repo
+            .open_node_offline_alert("n1", "host-a", "critical", "first", 100)
+            .await
+            .unwrap();
+        repo.silence_alert(first, 500).await.unwrap();
+        repo.resolve_node_offline_alerts("n1", 200).await.unwrap();
+        let second = repo
+            .open_node_offline_alert("n1", "host-a", "critical", "second", 300)
+            .await
+            .unwrap();
+        // 第二条是最新一条且未静默：返回 None（老告警的静默不能跨到新告警）
+        assert_eq!(
+            repo.silenced_until_for_node_offline("n1").await.unwrap(),
+            None,
+            "老告警的静默不应蔓延到同一节点的新告警实例"
+        );
+
+        // 给第二条也加静默：应返回更新后的
+        repo.silence_alert(second, 999).await.unwrap();
+        assert_eq!(
+            repo.silenced_until_for_node_offline("n1").await.unwrap(),
+            Some(999)
+        );
+    }
+
+    #[tokio::test]
+    async fn silenced_until_for_node_offline_returns_none_when_no_alert() {
+        let repo = AlertsRepo::new(fresh_pool().await);
+        assert_eq!(
+            repo.silenced_until_for_node_offline("n1").await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn silenced_until_for_node_offline_ignores_other_sources() {
+        let pool = fresh_pool().await;
+        let repo = AlertsRepo::new(pool.clone());
+        let probe = repo
+            .open_probe_alert("p1", "svc http", "n1", "host-a", "warning", "down", 100)
+            .await
+            .unwrap();
+        repo.silence_alert(probe, 500).await.unwrap();
+
+        assert_eq!(
+            repo.silenced_until_for_node_offline("n1").await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn silenced_until_for_container_returns_latest_silenced() {
+        let pool = fresh_pool().await;
+        let repo = AlertsRepo::new(pool.clone());
+        let first = repo
+            .open_container_alert("cid-1", "Container stopped", "n1", "host-a", "warning", "stopped", 100)
+            .await
+            .unwrap();
+        repo.silence_alert(first, 600).await.unwrap();
+        repo.resolve_open_container_alerts("cid-1", 200).await.unwrap();
+        assert_eq!(
+            repo.silenced_until_for_container("cid-1").await.unwrap(),
+            Some(600)
+        );
+    }
+
+    #[tokio::test]
+    async fn silenced_until_for_container_returns_none_when_no_alert() {
+        let repo = AlertsRepo::new(fresh_pool().await);
+        assert_eq!(
+            repo.silenced_until_for_container("cid-x").await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn silenced_until_for_probe_returns_latest_silenced() {
+        let pool = fresh_pool().await;
+        let repo = AlertsRepo::new(pool.clone());
+        let down = repo
+            .open_probe_alert("p1", "svc http", "n1", "host-a", "warning", "down", 100)
+            .await
+            .unwrap();
+        repo.silence_alert(down, 700).await.unwrap();
+        repo.resolve_open_probe_alerts("p1", 200).await.unwrap();
+        assert_eq!(
+            repo.silenced_until_for_probe("p1").await.unwrap(),
+            Some(700)
+        );
+    }
+
+    #[tokio::test]
+    async fn silenced_until_for_probe_returns_none_when_no_alert() {
+        let repo = AlertsRepo::new(fresh_pool().await);
+        assert_eq!(
+            repo.silenced_until_for_probe("px").await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn silenced_until_for_probe_ignores_other_sources() {
+        let pool = fresh_pool().await;
+        let repo = AlertsRepo::new(pool.clone());
+        let off = repo
+            .open_node_offline_alert("n1", "host-a", "critical", "x", 100)
+            .await
+            .unwrap();
+        repo.silence_alert(off, 500).await.unwrap();
+
+        assert_eq!(
+            repo.silenced_until_for_probe("p1").await.unwrap(),
+            None
+        );
+    }
+
+    /// 端到端：每个 source 走一遍"开告警 → 静默 → 用对应 lookup 查到"。
+    /// 这是 8 个 notify 调用点接 is_silenced_for 的语义底座——必须保证
+    /// 真实告警流程（开 → 静默 → 查）整条链路对每种 source 都对得上。
+    #[tokio::test]
+    async fn full_silence_cycle_for_every_source() {
+        let pool = fresh_pool().await;
+        let repo = AlertsRepo::new(pool);
+
+        // 1) 指标规则告警（按 alert_id 查）
+        let rule = AlertRule {
+            id: 1,
+            name: "CPU too high".into(),
+            metric: "host.cpu.usage".into(),
+            op: "gt".into(),
+            threshold: 80.0,
+            duration_seconds: 30,
+            severity: "warning".into(),
+            enabled: true,
+            created_at_unix_nano: 0,
+            updated_at_unix_nano: 0,
+        };
+        let rule_id = repo
+            .open_alert(&rule, "n1", "host-a", 95.0, "cpu 95%", 100)
+            .await
+            .unwrap();
+        repo.silence_alert(rule_id, 500).await.unwrap();
+        assert_eq!(repo.silenced_until_for_alert(rule_id).await.unwrap(), Some(500));
+
+        // 2) 探针告警（按 probe_id 查）
+        let probe_id = repo
+            .open_probe_alert("p1", "svc http", "n1", "host-a", "critical", "down", 200)
+            .await
+            .unwrap();
+        repo.silence_alert(probe_id, 600).await.unwrap();
+        assert_eq!(repo.silenced_until_for_probe("p1").await.unwrap(), Some(600));
+
+        // 3) 节点离线告警（按 node_id 查）
+        let off_id = repo
+            .open_node_offline_alert("n-off", "host-b", "critical", "lost", 300)
+            .await
+            .unwrap();
+        repo.silence_alert(off_id, 700).await.unwrap();
+        assert_eq!(
+            repo.silenced_until_for_node_offline("n-off").await.unwrap(),
+            Some(700)
+        );
+
+        // 4) 容器告警（按 container_id 查）
+        let cont_id = repo
+            .open_container_alert("cid-1", "Container stopped", "n1", "host-a", "warning", "stopped", 400)
+            .await
+            .unwrap();
+        repo.silence_alert(cont_id, 800).await.unwrap();
+        assert_eq!(
+            repo.silenced_until_for_container("cid-1").await.unwrap(),
+            Some(800)
+        );
     }
 }
