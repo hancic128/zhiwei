@@ -10,8 +10,10 @@ export function Segmented({
   onChange: (v: string) => void;
   options: Array<{ value: string; label: string }>;
 }) {
+  // See input.tsx: dialogs are bg-ink-700, so the border must be one tone lighter
+  // (ink-500) to read as an interactive control inside a modal.
   return (
-    <div className="inline-flex rounded-md border border-surface-3 dark:border-ink-700 p-0.5">
+    <div className="inline-flex rounded-md border border-surface-3 dark:border-ink-500 p-0.5">
       {options.map((o) => (
         <button
           key={o.value}
