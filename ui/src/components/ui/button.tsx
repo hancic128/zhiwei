@@ -18,7 +18,9 @@ const buttonVariants = cva(
         primary: "bg-brand-600 text-white hover:bg-brand-700 dark:bg-brand-500",
         secondary:
           "bg-surface-0 border border-surface-3 text-ink-700 hover:bg-surface-2 " +
-          "dark:bg-ink-700 dark:border-ink-700 dark:text-surface-0 dark:hover:bg-ink-700/70",
+          // ink-500 (not ink-700): dialogs are bg-ink-700 and a same-toned button border
+          // disappears — secondary buttons in dialogs need to read as a distinct control.
+          "dark:bg-ink-700 dark:border-ink-500 dark:text-surface-0 dark:hover:bg-ink-500/40",
         ghost: "text-brand-600 hover:text-brand-700 dark:text-brand-500",
         danger: "bg-rose-600 text-white hover:bg-rose-700",
       },

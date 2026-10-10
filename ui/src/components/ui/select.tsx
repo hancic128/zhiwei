@@ -12,7 +12,9 @@ const base =
   "appearance-none cursor-pointer " +
   "focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 focus:outline-none " +
   "disabled:cursor-not-allowed disabled:opacity-50 " +
-  "dark:bg-ink-700 dark:border-ink-700 dark:text-surface-0";
+  // See input.tsx for the rationale: ink-500 reads against both the page bg (ink-900)
+  // and the dialog body bg (ink-700).
+  "dark:bg-ink-700 dark:border-ink-500 dark:text-surface-0";
 
 export const Select = React.forwardRef<
   HTMLSelectElement,

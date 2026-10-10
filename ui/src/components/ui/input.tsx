@@ -7,7 +7,10 @@ const base =
   "placeholder:text-ink-400 " +
   "focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 focus:outline-none " +
   "disabled:cursor-not-allowed disabled:opacity-50 " +
-  "dark:bg-ink-700 dark:border-ink-700 dark:text-surface-0";
+  // dark border uses ink-500 not ink-700: dialog/card body is bg-ink-700, and a same-toned
+  // border becomes invisible — interactive elements need to read as interactive against
+  // any surface they sit on.
+  "dark:bg-ink-700 dark:border-ink-500 dark:text-surface-0 dark:placeholder:text-ink-400";
 
 export const Input = React.forwardRef<
   HTMLInputElement,

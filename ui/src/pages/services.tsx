@@ -303,8 +303,6 @@ export function Services() {
 
   return (
     <>
-      <ProbesTimeline />
-
       {/* Large header cards: clicking jumps the table to that filter (all / running / stopped / abnormal).
           The buckets intentionally overlap — a down probe is both running and abnormal — so the
           numbers describe "how many probes are in each state" rather than partitioning the total. */}
@@ -352,6 +350,8 @@ export function Services() {
           },
         ]}
       />
+
+      <ProbesTimeline />
 
       {/* Toolbar */}
       <TableShell>
