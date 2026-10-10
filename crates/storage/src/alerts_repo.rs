@@ -1005,17 +1005,34 @@ impl AlertsRepo {
             .await?;
             return Ok(existing);
         }
+        // Propagate silence forward: if the most recent prior node_offline row for this
+        // node is still in its silence window, the new row inherits that `silenced_until`.
+        // This matches user mental model "silence this node" — flapping shouldn't break
+        // the silence for repeated offline/online cycles within the window. After the
+        // window expires, new events get NULL silenced_until and notify normally.
+        let inherited_silence: Option<Option<i64>> = sqlx::query_scalar(
+            "SELECT silenced_until_unix_nano FROM alerts
+             WHERE source = 'node_offline' AND source_ref = ?
+             ORDER BY id DESC LIMIT 1",
+        )
+        .bind(node_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let inherited = inherited_silence.flatten();
+        let carry_forward = matches!(inherited, Some(t) if t > now);
         let r = sqlx::query(
-            r"INSERT INTO alerts
+            r#"INSERT INTO alerts
                (rule_id, rule_name, node_id, hostname, severity, metric, op, threshold, value,
-                message, started_at_unix_nano, source, source_ref)
-               VALUES (0, 'Node Offline', ?, ?, ?, 'host.online', 'eq', 0, 0, ?, ?, 'node_offline', ?)",
+                message, started_at_unix_nano, silenced_until_unix_nano, source, source_ref)
+               VALUES (0, 'Node Offline', ?, ?, ?, 'host.online', 'eq', 0, 0, ?, ?,
+                       ?, 'node_offline', ?)"#,
         )
         .bind(node_id)
         .bind(hostname)
         .bind(severity)
         .bind(message)
         .bind(now)
+        .bind(if carry_forward { inherited } else { None })
         .bind(node_id)
         .execute(&self.pool)
         .await?;
@@ -1294,17 +1311,20 @@ impl AlertsRepo {
     }
 
     /// Silence an alert until `until_unix_nano` (used for "I'm handling this").
+    /// Returns `Ok(true)` when a row was actually updated, `Ok(false)` when no row with that
+    /// id exists. The latter used to be silently swallowed, which made the UI's silence
+    /// button "succeed" against a stale/just-resolved id — caller now has to surface that.
     ///
     /// # Errors
     ///
     /// Returns `sqlx::Error` if the update fails.
-    pub async fn silence_alert(&self, id: i64, until_unix_nano: i64) -> anyhow::Result<()> {
-        sqlx::query("UPDATE alerts SET silenced_until_unix_nano = ? WHERE id = ?")
+    pub async fn silence_alert(&self, id: i64, until_unix_nano: i64) -> anyhow::Result<bool> {
+        let r = sqlx::query("UPDATE alerts SET silenced_until_unix_nano = ? WHERE id = ?")
             .bind(until_unix_nano)
             .bind(id)
             .execute(&self.pool)
             .await?;
-        Ok(())
+        Ok(r.rows_affected() > 0)
     }
 
     /// A 组用：按 alert_id 读 silenced_until。给已有 alerts 行的告警发送前查。
@@ -1934,6 +1954,9 @@ mod silence_lookup_tests {
     async fn silenced_until_for_node_offline_uses_latest_alert_only() {
         let pool = fresh_pool().await;
         let repo = AlertsRepo::new(pool.clone());
+        // 老告警被静默后离线+在线若干次；每个新行都应该继承前一个的 silenced_until
+        // （在静默窗口内）。"uses latest" 现在等价于"uses latest *with inheritance*"——
+        // 之前的 "老告警的静默不能跨到新告警" 语义被替换成"窗口内静默向下传递"。
         let first = repo
             .open_node_offline_alert("n1", "host-a", "critical", "first", 100)
             .await
@@ -1944,19 +1967,87 @@ mod silence_lookup_tests {
             .open_node_offline_alert("n1", "host-a", "critical", "second", 300)
             .await
             .unwrap();
-        // 第二条是最新一条且未静默：返回 None（老告警的静默不能跨到新告警）
+        // 静默窗口内（500 > 300）→ second 继承 500
         assert_eq!(
             repo.silenced_until_for_node_offline("n1").await.unwrap(),
-            None,
-            "老告警的静默不应蔓延到同一节点的新告警实例"
+            Some(500),
+            "新离线事件在静默窗口内应继承前一条的 silenced_until"
         );
 
-        // 给第二条也加静默：应返回更新后的
+        // 显式把 second 的 silenced_until 改为 999 → 查询应返回 999
         repo.silence_alert(second, 999).await.unwrap();
         assert_eq!(
             repo.silenced_until_for_node_offline("n1").await.unwrap(),
             Some(999)
         );
+    }
+
+    /// 静默窗口外再开新事件：不应继承已过期的 silenced_until，应该 NULL。
+    /// 这是"窗口内向新事件传递、窗口外不传递"的不变量。
+    #[tokio::test]
+    async fn silence_window_expiry_does_not_propagate_to_new_alerts() {
+        let pool = fresh_pool().await;
+        let repo = AlertsRepo::new(pool.clone());
+        let first = repo
+            .open_node_offline_alert("n1", "host-a", "critical", "first", 100)
+            .await
+            .unwrap();
+        // 静默到 200
+        repo.silence_alert(first, 200).await.unwrap();
+        repo.resolve_node_offline_alerts("n1", 200).await.unwrap();
+        // 在 500 时开新事件：silence window 已过（200 < 500），不应继承
+        let second = repo
+            .open_node_offline_alert("n1", "host-a", "critical", "second", 500)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.silenced_until_for_alert(second).await.unwrap(),
+            None,
+            "静默窗口已过，新告警不应继承老的 silenced_until"
+        );
+    }
+
+    /// 静默窗口边界：until == now 不算过期（is_silenced 谓词用严格大于），
+    /// 所以 until == now 的旧告警算"已过期"，新行不继承。
+    #[tokio::test]
+    async fn silence_window_boundary_uses_strict_greater_than() {
+        let pool = fresh_pool().await;
+        let repo = AlertsRepo::new(pool.clone());
+        let first = repo
+            .open_node_offline_alert("n1", "host-a", "critical", "first", 100)
+            .await
+            .unwrap();
+        repo.silence_alert(first, 300).await.unwrap();
+        repo.resolve_node_offline_alerts("n1", 200).await.unwrap();
+        // 在 300 时（silence 正好到期）开新事件：until(300) > now(300) 为 false → 不继承
+        let second = repo
+            .open_node_offline_alert("n1", "host-a", "critical", "second", 300)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.silenced_until_for_alert(second).await.unwrap(),
+            None,
+            "until == now 已过期，新告警不继承"
+        );
+    }
+
+    /// silence_alert 必须如实报告"是否真的更新了一行"。
+    /// 之前无声返回 Ok(()) 让 UI 在 id 已 resolve/不存在时也显示"静默成功"——这是用户误以为已经
+    /// 静默但实际什么都没发生的根因。
+    #[tokio::test]
+    async fn silence_alert_reports_whether_a_row_was_updated() {
+        let pool = fresh_pool().await;
+        let repo = AlertsRepo::new(pool.clone());
+        let id = repo
+            .open_node_offline_alert("n1", "host-a", "critical", "x", 100)
+            .await
+            .unwrap();
+        // 正常路径
+        assert!(repo.silence_alert(id, 500).await.unwrap());
+        // id 不存在
+        assert!(!repo.silence_alert(9999, 500).await.unwrap());
+        // 同一行再静默一次：依然 true（覆盖更新）
+        assert!(repo.silence_alert(id, 600).await.unwrap());
     }
 
     #[tokio::test]
