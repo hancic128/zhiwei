@@ -2473,11 +2473,17 @@ async fn silence_alert_handler(
     };
     let until =
         zhiwei_common::Timestamp::now().unix_nano() + minutes.clamp(1, 10_080) * 60 * 1_000_000_000;
-    if let Err(e) = state.storage.alerts().silence_alert(id, until).await {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, format!("silence: {e}"));
+    match state.storage.alerts().silence_alert(id, until).await {
+        Ok(true) => {
+            info!(alert_id = id, minutes, "alert silenced");
+            (StatusCode::NO_CONTENT).into_response()
+        }
+        Ok(false) => err(
+            StatusCode::NOT_FOUND,
+            format!("alert {id} not found (may have been resolved or never existed)"),
+        ),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("silence: {e}")),
     }
-    info!(alert_id = id, minutes, "alert silenced");
-    (StatusCode::NO_CONTENT).into_response()
 }
 
 async fn resolve_alert_handler(
