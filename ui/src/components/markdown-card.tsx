@@ -21,7 +21,7 @@ export function MarkdownCard({
     <div
       className={cn(
         "bg-surface-0 dark:bg-ink-700 rounded-xl shadow-sm",
-        "border border-surface-3 dark:border-ink-700 p-6",
+        "border border-surface-3 dark:border-ink-500 p-6",
         "markdown-body",
         className,
       )}

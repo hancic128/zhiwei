@@ -12,6 +12,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   ChevronRight,
+  Loader2,
   PlugZap,
   Server,
   ShieldCheck,
@@ -83,7 +84,7 @@ function TodoRow({ item, muted = false }: { item: TodoItem; muted?: boolean }) {
   const at = item.resolved_at_unix_nano ?? item.since_unix_nano;
 
   return (
-    <li className="flex items-start gap-3 px-6 py-4 border-b border-surface-3 last:border-b-0 dark:border-ink-700">
+    <li className="flex items-start gap-3 px-6 py-4 border-b border-surface-3 last:border-b-0 dark:border-ink-500">
       <SourceIcon
         source={item.source}
         className={cn(
@@ -192,14 +193,22 @@ function LoadMoreButton({
   loading: boolean;
 }) {
   const { t } = useTranslation();
+  // Reserve a fixed min-height so toggling between "Load more" and "Loading…"
+  // doesn't shift the button — without this, clicking the button would resize
+  // the row by a few pixels and pull the list contents up, which feels like
+  // the whole page refreshed.
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={loading}
-      className="w-full py-2 text-sm text-ink-500 hover:text-ink-700 dark:text-ink-400 dark:hover:text-ink-200 border-t border-surface-3 dark:border-ink-700 disabled:opacity-50"
+      aria-busy={loading}
+      className="w-full min-h-10 px-6 py-2 flex items-center justify-center gap-2 text-sm text-ink-500 hover:text-ink-700 dark:text-ink-400 dark:hover:text-ink-200 border-t border-surface-3 dark:border-ink-500 disabled:cursor-not-allowed"
     >
-      {loading ? t("action.refreshing") : t("todo.loadMore")}
+      {loading && (
+        <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+      )}
+      <span>{loading ? t("action.refreshing") : t("todo.loadMore")}</span>
     </button>
   );
 }
@@ -221,7 +230,7 @@ function Bucket({
 }) {
   return (
     <Card>
-      <div className="px-6 py-3 border-b border-surface-3 dark:border-ink-700 flex items-center gap-2">
+      <div className="px-6 py-3 border-b border-surface-3 dark:border-ink-500 flex items-center gap-2">
         <h2 className="text-sm font-semibold text-ink-900 dark:text-surface-0">
           {title}
         </h2>
@@ -416,7 +425,7 @@ export function Todo() {
           </button>
           {showRecovered && (
             <>
-              <ul className="border-t border-surface-3 dark:border-ink-700">
+              <ul className="border-t border-surface-3 dark:border-ink-500">
                 {accumulated.recovered.map((i) => (
                   <TodoRow key={i.id} item={i} muted />
                 ))}

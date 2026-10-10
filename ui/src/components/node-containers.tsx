@@ -158,7 +158,7 @@ export function NodeContainers({
         }
       />
 
-      <div className="px-4 py-3 border-b border-surface-3 dark:border-ink-700 flex flex-wrap items-center gap-2">
+      <div className="px-4 py-3 border-b border-surface-3 dark:border-ink-500 flex flex-wrap items-center gap-2">
         <SearchInput
           className="w-full sm:w-56"
           placeholder={t("containers.searchPlaceholder")}

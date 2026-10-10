@@ -114,11 +114,11 @@ export function SilenceDialog({
         <DialogPrimitive.Content className="fixed left-1/2 top-1/2 z-[70] w-full max-w-md -translate-x-1/2 -translate-y-1/2 outline-none">
           <div
             className={cn(
-              "bg-surface-0 dark:bg-ink-700 rounded-xl shadow-lg border border-surface-3 dark:border-ink-700",
+              "bg-surface-0 dark:bg-ink-700 rounded-xl shadow-lg border border-surface-3 dark:border-ink-500",
               "animate-panel-slide",
             )}
           >
-            <div className="px-6 py-4 border-b border-surface-3 dark:border-ink-700 flex items-start justify-between gap-3">
+            <div className="px-6 py-4 border-b border-surface-3 dark:border-ink-500 flex items-start justify-between gap-3">
               <div className="flex items-start gap-2 min-w-0">
                 <BellOff
                   className="w-5 h-5 shrink-0 mt-0.5 text-ink-500"
@@ -161,7 +161,7 @@ export function SilenceDialog({
                         "focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500",
                         active
                           ? "border-brand-500 bg-brand-50 text-brand-700 dark:bg-brand-900/30 dark:text-brand-100"
-                          : "border-surface-3 dark:border-ink-700 text-ink-700 dark:text-ink-100 hover:border-brand-300",
+                          : "border-surface-3 dark:border-ink-500 text-ink-700 dark:text-ink-100 hover:border-brand-300",
                       )}
                     >
                       <div className="font-medium tabular-nums">
@@ -189,7 +189,7 @@ export function SilenceDialog({
                   value={toLocalInputValue(until)}
                   onChange={(e) => onCustomChange(e.target.value)}
                   className={cn(
-                    "w-full rounded-lg border border-surface-3 dark:border-ink-700 bg-surface-0 dark:bg-ink-800",
+                    "w-full rounded-lg border border-surface-3 dark:border-ink-500 bg-surface-0 dark:bg-ink-800",
                     "px-3 py-2 text-sm text-ink-900 dark:text-surface-0",
                     "focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500",
                   )}
@@ -202,7 +202,7 @@ export function SilenceDialog({
               </div>
             </div>
 
-            <div className="px-6 py-4 border-t border-surface-3 dark:border-ink-700 flex justify-end gap-2">
+            <div className="px-6 py-4 border-t border-surface-3 dark:border-ink-500 flex justify-end gap-2">
               <Button variant="secondary" onClick={onCancel} disabled={loading}>
                 {t("action.cancel")}
               </Button>

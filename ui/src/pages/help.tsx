@@ -172,7 +172,7 @@ export function HelpPage() {
             <p className="text-xs font-medium text-ink-400 mb-2">
               {t("help.toc")}
             </p>
-            <ul className="space-y-1 border-l border-surface-3 dark:border-ink-700">
+            <ul className="space-y-1 border-l border-surface-3 dark:border-ink-500">
               {sections.rest.map((s) => {
                 const id = slugify(s.title);
                 return (

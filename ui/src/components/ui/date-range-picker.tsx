@@ -123,7 +123,7 @@ export function TimeRangePicker({
           align="end"
           sideOffset={8}
           className={cn(
-            "z-50 rounded-xl border border-surface-3 dark:border-ink-700 bg-surface-0 dark:bg-ink-700",
+            "z-50 rounded-xl border border-surface-3 dark:border-ink-500 bg-surface-0 dark:bg-ink-700",
             "shadow-lg animate-panel-slide p-4 flex flex-col sm:flex-row gap-4",
           )}
         >

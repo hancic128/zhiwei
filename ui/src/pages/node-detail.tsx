@@ -817,7 +817,7 @@ export function NodeDetail() {
                 <div className="overflow-x-auto scrollbar-thin">
                   <table className="w-full text-sm">
                     <thead>
-                      <tr className="border-b border-surface-3 dark:border-ink-700">
+                      <tr className="border-b border-surface-3 dark:border-ink-500">
                         <th className="px-4 py-2 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">
                           {t("processes.colPid")}
                         </th>
@@ -835,7 +835,7 @@ export function NodeDetail() {
                         </th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-surface-2 dark:divide-ink-700">
+                    <tbody className="divide-y divide-surface-2 dark:divide-ink-500">
                       {processes.map((p) => (
                         <tr
                           key={p.pid}
@@ -1271,7 +1271,7 @@ function Segmented({
   options: Array<{ value: string; label: string }>;
 }) {
   return (
-    <div className="inline-flex rounded-md border border-surface-3 dark:border-ink-700 p-0.5">
+    <div className="inline-flex rounded-md border border-surface-3 dark:border-ink-500 p-0.5">
       {options.map((o) => (
         <button
           key={o.value}

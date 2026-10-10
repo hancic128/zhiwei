@@ -69,7 +69,7 @@ export function FloatingControls() {
     "w-11 h-11 rounded-full bg-surface-0 border border-surface-3 shadow-lg",
     "flex items-center justify-center text-ink-700",
     "hover:bg-surface-2 hover:scale-105 transition-all",
-    "dark:bg-ink-700 dark:border-ink-700 dark:text-surface-0 dark:hover:bg-ink-700/70",
+    "dark:bg-ink-700 dark:border-ink-500 dark:text-surface-0 dark:hover:bg-ink-700/70",
     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40",
   );
 
@@ -114,7 +114,7 @@ export function FloatingControls() {
                 side="left"
                 align="center"
                 sideOffset={12}
-                className="z-50 bg-surface-0 dark:bg-ink-700 rounded-xl shadow-lg border border-surface-3 dark:border-ink-700 p-3 animate-panel-slide"
+                className="z-50 bg-surface-0 dark:bg-ink-700 rounded-xl shadow-lg border border-surface-3 dark:border-ink-500 p-3 animate-panel-slide"
               >
                 <div className="flex items-center gap-2">
                   {THEMES.map((theme) => (

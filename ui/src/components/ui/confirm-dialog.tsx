@@ -40,12 +40,12 @@ export function ConfirmDialog({
         <DialogPrimitive.Content className="fixed left-1/2 top-1/2 z-[70] w-full max-w-md -translate-x-1/2 -translate-y-1/2 outline-none">
           <div
             className={cn(
-              "bg-surface-0 dark:bg-ink-700 rounded-xl shadow-lg border border-surface-3 dark:border-ink-700",
+              "bg-surface-0 dark:bg-ink-700 rounded-xl shadow-lg border border-surface-3 dark:border-ink-500",
               "animate-panel-slide",
             )}
           >
             {/* Spec 7.10.2/7.10.3: header = icon + title + top-right close (X / ESC / mask three ways of closing coexist) */}
-            <div className="px-6 py-4 border-b border-surface-3 dark:border-ink-700 flex items-start justify-between gap-3">
+            <div className="px-6 py-4 border-b border-surface-3 dark:border-ink-500 flex items-start justify-between gap-3">
               <div className="flex items-start gap-2 min-w-0">
                 {danger && (
                   <AlertTriangle
@@ -71,7 +71,7 @@ export function ConfirmDialog({
               </DialogPrimitive.Description>
             </div>
 
-            <div className="px-6 py-4 border-t border-surface-3 dark:border-ink-700 flex justify-end gap-2">
+            <div className="px-6 py-4 border-t border-surface-3 dark:border-ink-500 flex justify-end gap-2">
               <Button variant="secondary" onClick={onCancel} disabled={loading}>
                 {cancelLabel}
               </Button>

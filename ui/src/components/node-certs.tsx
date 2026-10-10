@@ -91,7 +91,7 @@ export function NodeCerts({
           <div className="overflow-x-auto scrollbar-thin">
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b border-surface-3 dark:border-ink-700">
+                <tr className="border-b border-surface-3 dark:border-ink-500">
                   <th className="px-4 py-2 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">
                     {t("certs.colDomain")}
                   </th>
@@ -106,7 +106,7 @@ export function NodeCerts({
                   </th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-surface-2 dark:divide-ink-700">
+              <tbody className="divide-y divide-surface-2 dark:divide-ink-500">
                 {certs.map((c) => {
                   const days = daysLeft(c.not_after_unix_nano);
                   // Primary display = first SAN domain; fall back to path on parse failure (consistent with certificates page)
