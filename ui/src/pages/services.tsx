@@ -2,13 +2,17 @@
  * Probes page — manage HTTP/TCP/TLS health checks.
  */
 import * as React from "react";
+import { useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import {
   Activity,
+  AlertTriangle,
   Globe,
   Network,
+  Pause,
   Pencil,
+  Play,
   Plus,
   ShieldCheck,
   Trash2,
@@ -38,9 +42,12 @@ import {
   ErrorState,
   SearchEmptyState,
   Skeleton,
+  TableSkeleton,
 } from "@/components/ui/feedback";
 import {
   Table,
+  TableShell,
+  TableToolbar,
   TBody,
   Td,
   Th,
@@ -48,8 +55,18 @@ import {
   Tr,
 } from "@/components/ui/table";
 import { Switch } from "@/components/ui/switch";
+import { StatCards } from "@/components/stat-cards";
+import { TablePager, paginate } from "@/components/ui/pager";
 import { useToast } from "@/components/ui/toast";
 import { cn, friendlyError } from "@/lib/utils";
+
+type CardFilter = "all" | "running" | "stopped" | "abnormal";
+const CARD_FILTERS: readonly CardFilter[] = [
+  "all",
+  "running",
+  "stopped",
+  "abnormal",
+] as const;
 
 interface TargetShape {
   url?: string;
@@ -144,11 +161,12 @@ export function Services() {
   const { t } = useTranslation();
   const qc = useQueryClient();
   const toast = useToast();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const [q, setQ] = React.useState("");
-  const [stateFilter, setStateFilter] = React.useState("all");
   const [nodeFilter, setNodeFilter] = React.useState("all");
-  const [showDisabled, setShowDisabled] = React.useState(false);
+  const [page, setPage] = React.useState(1);
+  const [pageSize, setPageSize] = React.useState(10);
   const [probeDialog, setProbeDialog] = React.useState<{
     open: boolean;
     probe?: ProbeView;
@@ -158,6 +176,24 @@ export function Services() {
     id: string;
     name: string;
   } | null>(null);
+
+  // Card filter arrives via ?filter=running|stopped|abnormal so deep links stay shareable
+  const [filter, setFilter] = React.useState<CardFilter>(() => {
+    const raw = (searchParams.get("filter") ?? "").toLowerCase();
+    return (CARD_FILTERS as readonly string[]).includes(raw)
+      ? (raw as CardFilter)
+      : "all";
+  });
+
+  const selectFilter = React.useCallback(
+    (next: CardFilter) => {
+      setFilter(next);
+      const params = new URLSearchParams();
+      if (next !== "all") params.set("filter", next);
+      setSearchParams(params, { replace: true });
+    },
+    [setSearchParams],
+  );
 
   const probesQ = useQuery({
     queryKey: ["probes"],
@@ -177,6 +213,27 @@ export function Services() {
   const nodeLabel = (n: { alias?: string; hostname: string }) =>
     n.alias || n.hostname;
 
+  // Four card buckets: running = enabled and not down; stopped = !enabled; abnormal = state down.
+  // The buckets overlap intentionally (a down probe is both running and abnormal) so the cards
+  // describe how many probes are in each *state*, not mutually exclusive slices of the total.
+  const counts = React.useMemo(() => {
+    const c = { all: 0, running: 0, stopped: 0, abnormal: 0 };
+    for (const p of probesQ.data ?? []) {
+      c.all += 1;
+      if (p.enabled) {
+        if (p.state.state === "down") {
+          c.running += 1;
+          c.abnormal += 1;
+        } else {
+          c.running += 1;
+        }
+      } else {
+        c.stopped += 1;
+      }
+    }
+    return c;
+  }, [probesQ.data]);
+
   // Filter probes
   const filtered = React.useMemo(() => {
     let list = probesQ.data ?? [];
@@ -189,8 +246,12 @@ export function Services() {
           p.kind.toLowerCase().includes(needle),
       );
     }
-    if (stateFilter !== "all") {
-      list = list.filter((p) => p.state.state === stateFilter);
+    if (filter === "running") {
+      list = list.filter((p) => p.enabled);
+    } else if (filter === "stopped") {
+      list = list.filter((p) => !p.enabled);
+    } else if (filter === "abnormal") {
+      list = list.filter((p) => p.state.state === "down");
     }
     if (nodeFilter !== "all") {
       if (nodeFilter === "__none__") {
@@ -199,11 +260,15 @@ export function Services() {
         list = list.filter((p) => p.node_ids.includes(nodeFilter));
       }
     }
-    if (!showDisabled) {
-      list = list.filter((p) => p.enabled);
-    }
     return list;
-  }, [probesQ.data, q, stateFilter, nodeFilter, showDisabled]);
+  }, [probesQ.data, q, filter, nodeFilter]);
+
+  // After search/filter/page-size changes, reset to page 1 to avoid landing on an empty page
+  React.useEffect(() => {
+    setPage(1);
+  }, [q, filter, nodeFilter, pageSize]);
+
+  const { pageCount, current, visible } = paginate(filtered, page, pageSize);
 
   const toggleProbe = useMutation({
     mutationFn: (p: ProbeView) =>
@@ -240,83 +305,104 @@ export function Services() {
     <>
       <ProbesTimeline />
 
-      {/* Toolbar */}
-      <div className="flex items-start justify-between gap-4 flex-wrap">
-        <div>
-          <h2 className="text-lg font-semibold text-ink-900 dark:text-surface-0">
-            {t("probes.title")}
-          </h2>
-          <p className="text-sm text-ink-500 mt-0.5">
-            {t("probes.total", { n: filtered.length })}
-          </p>
-        </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          <SearchInput
-            className="w-48 md:w-64"
-            placeholder={t("probes.searchPlaceholder")}
-            aria-label={t("action.search")}
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-          />
-          <Select
-            wrapperClassName="w-32"
-            value={stateFilter}
-            onChange={(e) => setStateFilter(e.target.value)}
-            aria-label={t("probes.filterState")}
-          >
-            <option value="all">{t("probes.stateAll")}</option>
-            <option value="ok">{t("state.ok")}</option>
-            <option value="degraded">{t("state.degraded")}</option>
-            <option value="down">{t("state.down")}</option>
-          </Select>
-          <Select
-            wrapperClassName="w-40"
-            value={nodeFilter}
-            onChange={(e) => setNodeFilter(e.target.value)}
-            aria-label={t("probes.filterNode")}
-          >
-            <option value="all">{t("probes.nodeAll")}</option>
-            <option value="__none__">{t("probes.anyNode")}</option>
-            {nodeOptions.map((n) => (
-              <option key={n.id} value={n.id}>
-                {nodeLabel(n)}
-              </option>
-            ))}
-          </Select>
-          <div className="flex items-center gap-2">
-            <Switch
-              checked={showDisabled}
-              onCheckedChange={setShowDisabled}
-              aria-label={t("probes.showDisabled")}
-            />
-            <span className="text-sm text-ink-600 dark:text-ink-300">
-              {t("probes.showDisabled")}
-            </span>
-          </div>
-          <Button onClick={() => setProbeDialog({ open: true })}>
-            <Plus className="w-4 h-4" aria-hidden="true" />
-            {t("probes.newProbe")}
-          </Button>
-        </div>
-      </div>
+      {/* Large header cards: clicking jumps the table to that filter (all / running / stopped / abnormal).
+          The buckets intentionally overlap — a down probe is both running and abnormal — so the
+          numbers describe "how many probes are in each state" rather than partitioning the total. */}
+      <StatCards
+        cards={[
+          {
+            key: "all",
+            label: t("probes.cardAll"),
+            value: counts.all,
+            hint: t("probes.cardAllHint"),
+            tone: "neutral",
+            icon: Activity,
+            active: filter === "all",
+            onClick: () => selectFilter("all"),
+          },
+          {
+            key: "running",
+            label: t("probes.cardRunning"),
+            value: counts.running,
+            hint: t("probes.cardRunningHint"),
+            tone: "success",
+            icon: Play,
+            active: filter === "running",
+            onClick: () => selectFilter("running"),
+          },
+          {
+            key: "stopped",
+            label: t("probes.cardStopped"),
+            value: counts.stopped,
+            hint: t("probes.cardStoppedHint"),
+            tone: "neutral",
+            icon: Pause,
+            active: filter === "stopped",
+            onClick: () => selectFilter("stopped"),
+          },
+          {
+            key: "abnormal",
+            label: t("probes.cardAbnormal"),
+            value: counts.abnormal,
+            hint: t("probes.cardAbnormalHint"),
+            tone: counts.abnormal > 0 ? "danger" : "neutral",
+            icon: AlertTriangle,
+            active: filter === "abnormal",
+            onClick: () => selectFilter("abnormal"),
+          },
+        ]}
+      />
 
-      {probesQ.isLoading ? (
-        <Card>
-          <CardBody>
-            <Skeleton className="h-24 w-full" />
-          </CardBody>
-        </Card>
-      ) : probesQ.isError ? (
-        <Card>
+      {/* Toolbar */}
+      <TableShell>
+        <TableToolbar>
+          <div>
+            <h2 className="text-base font-semibold text-ink-900 dark:text-surface-0">
+              {t("probes.title")}
+            </h2>
+            <p className="text-sm text-ink-500 mt-0.5">
+              {t("probes.total", { n: filtered.length })}
+            </p>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <SearchInput
+              className="w-48 md:w-64"
+              placeholder={t("probes.searchPlaceholder")}
+              aria-label={t("action.search")}
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+            />
+            <Select
+              wrapperClassName="w-40"
+              value={nodeFilter}
+              onChange={(e) => setNodeFilter(e.target.value)}
+              aria-label={t("probes.filterNode")}
+            >
+              <option value="all">{t("probes.nodeAll")}</option>
+              <option value="__none__">{t("probes.anyNode")}</option>
+              {nodeOptions.map((n) => (
+                <option key={n.id} value={n.id}>
+                  {nodeLabel(n)}
+                </option>
+              ))}
+            </Select>
+            <Button onClick={() => setProbeDialog({ open: true })}>
+              <Plus className="w-4 h-4" aria-hidden="true" />
+              {t("probes.newProbe")}
+            </Button>
+          </div>
+        </TableToolbar>
+
+        {probesQ.isLoading ? (
+          <TableSkeleton rows={6} />
+        ) : probesQ.isError ? (
           <ErrorState
             message={t(friendlyError(probesQ.error))}
             onRetry={() => void probesQ.refetch()}
             retrying={probesQ.isFetching}
           />
-        </Card>
-      ) : filtered.length === 0 ? (
-        <Card>
-          {q || stateFilter !== "all" || nodeFilter !== "all" ? (
+        ) : filtered.length === 0 ? (
+          q || filter !== "all" || nodeFilter !== "all" ? (
             <SearchEmptyState
               title={t("probes.searchEmpty")}
               description={t("probes.searchEmptyHint")}
@@ -326,131 +412,143 @@ export function Services() {
               title={t("probes.empty")}
               description={t("probes.emptyHint")}
             />
-          )}
-        </Card>
-      ) : (
-        <Card>
-          <Table>
-            <THead>
-              <tr>
-                <Th>{t("probes.colProbeName")}</Th>
-                <Th className="hidden sm:table-cell">{t("probes.colKind")}</Th>
-                <Th className="hidden md:table-cell">{t("probes.colTarget")}</Th>
-                <Th className="hidden lg:table-cell">{t("probes.colNode")}</Th>
-                <Th>{t("probes.colState")}</Th>
-                <Th align="right" className="hidden xl:table-cell">
-                  {t("probes.colLatency")}
-                </Th>
-                <Th className="hidden 2xl:table-cell">
-                  {t("probes.colLastCheck")}
-                </Th>
-                <Th align="right">{t("probes.colActions")}</Th>
-              </tr>
-            </THead>
-            <TBody>
-              {filtered.map((p) => {
-                const Icon = KIND_ICON[p.kind] ?? Activity;
-                const state = p.state.state;
-                const dimmed = !p.enabled;
-                return (
-                  <Tr key={p.id} className={cn(dimmed && "opacity-60")}>
-                    <Td>
-                      <div className="text-sm font-medium text-ink-900 dark:text-surface-0 truncate max-w-[220px]">
-                        {p.name}
-                      </div>
-                      {p.description && (
-                        <div className="text-xs text-ink-400 truncate max-w-[220px]">
-                          {p.description}
+          )
+        ) : (
+          <>
+            <Table>
+              <THead>
+                <tr>
+                  <Th>{t("probes.colProbeName")}</Th>
+                  <Th className="hidden sm:table-cell">{t("probes.colKind")}</Th>
+                  <Th className="hidden md:table-cell">{t("probes.colTarget")}</Th>
+                  <Th className="hidden lg:table-cell">{t("probes.colNode")}</Th>
+                  <Th>{t("probes.colState")}</Th>
+                  <Th align="right" className="hidden xl:table-cell">
+                    {t("probes.colLatency")}
+                  </Th>
+                  <Th className="hidden 2xl:table-cell">
+                    {t("probes.colLastCheck")}
+                  </Th>
+                  <Th align="right">{t("probes.colActions")}</Th>
+                </tr>
+              </THead>
+              <TBody>
+                {visible.map((p) => {
+                  const Icon = KIND_ICON[p.kind] ?? Activity;
+                  const state = p.state.state;
+                  const dimmed = !p.enabled;
+                  return (
+                    <Tr key={p.id} className={cn(dimmed && "opacity-60")}>
+                      <Td>
+                        <div className="text-sm font-medium text-ink-900 dark:text-surface-0 truncate max-w-[220px]">
+                          {p.name}
                         </div>
-                      )}
-                    </Td>
-                    <Td className="hidden sm:table-cell">
-                      <span className="inline-flex items-center gap-1.5 text-xs text-ink-500">
-                        <Icon className="w-4 h-4" aria-hidden="true" />
-                        {p.kind.toUpperCase()}
-                      </span>
-                    </Td>
-                    <Td className="hidden md:table-cell">
-                      <span className="text-xs text-ink-500 break-all">
-                        {targetSummary(p)}
-                      </span>
-                    </Td>
-                    <Td className="hidden lg:table-cell">
-                      <span className="text-xs text-ink-500 truncate max-w-[120px]" title={p.node_labels.join(", ") || "—"}>
-                        {p.node_labels.join(", ") || "—"}
-                      </span>
-                    </Td>
-                    <Td>
-                      <DotBadge tone={state === "ok" ? "success" : state === "degraded" ? "warn" : "danger"}>
-                        {t(`state.${state}`)}
-                      </DotBadge>
-                      {p.state.last_error && (
-                        <div
-                          className="mt-1 text-xs text-ink-400 truncate max-w-[200px]"
-                          title={p.state.last_error}
-                        >
-                          {p.state.last_error}
+                        {p.description && (
+                          <div className="text-xs text-ink-400 truncate max-w-[220px]">
+                            {p.description}
+                          </div>
+                        )}
+                      </Td>
+                      <Td className="hidden sm:table-cell">
+                        <span className="inline-flex items-center gap-1.5 text-xs text-ink-500">
+                          <Icon className="w-4 h-4" aria-hidden="true" />
+                          {p.kind.toUpperCase()}
+                        </span>
+                      </Td>
+                      <Td className="hidden md:table-cell">
+                        <span className="text-xs text-ink-500 break-all">
+                          {targetSummary(p)}
+                        </span>
+                      </Td>
+                      <Td className="hidden lg:table-cell">
+                        <span className="text-xs text-ink-500 truncate max-w-[120px]" title={p.node_labels.join(", ") || "—"}>
+                          {p.node_labels.join(", ") || "—"}
+                        </span>
+                      </Td>
+                      <Td>
+                        <DotBadge tone={state === "ok" ? "success" : state === "degraded" ? "warn" : "danger"}>
+                          {t(`state.${state}`)}
+                        </DotBadge>
+                        {p.state.last_error && (
+                          <div
+                            className="mt-1 text-xs text-ink-400 truncate max-w-[200px]"
+                            title={p.state.last_error}
+                          >
+                            {p.state.last_error}
+                          </div>
+                        )}
+                      </Td>
+                      <Td align="right" className="hidden xl:table-cell">
+                        <span className="text-sm text-ink-500">
+                          {p.state.last_latency_ms != null
+                            ? `${p.state.last_latency_ms.toFixed(1)} ms`
+                            : "—"}
+                        </span>
+                      </Td>
+                      <Td className="hidden 2xl:table-cell">
+                        <span className="text-xs text-ink-500">
+                          {p.state.last_check_at_unix_nano
+                            ? new Date(
+                                p.state.last_check_at_unix_nano / 1_000_000,
+                              ).toLocaleTimeString()
+                            : t("probes.never")}
+                        </span>
+                      </Td>
+                      <Td align="right">
+                        <div className="flex items-center justify-end gap-1">
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            aria-label={t("action.edit")}
+                            onClick={() =>
+                              setProbeDialog({ open: true, probe: p })
+                            }
+                          >
+                            <Pencil className="w-4 h-4" aria-hidden="true" />
+                          </Button>
+                          <Switch
+                            checked={p.enabled}
+                            onCheckedChange={() => toggleProbe.mutate(p)}
+                            disabled={toggleProbe.isPending}
+                            aria-label={p.name}
+                          />
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            aria-label={t("action.delete")}
+                            className="text-rose-600 dark:text-rose-400"
+                            onClick={() =>
+                              setPendingDelete({
+                                kind: "probe",
+                                id: p.id,
+                                name: p.name,
+                              })
+                            }
+                          >
+                            <Trash2 className="w-4 h-4" aria-hidden="true" />
+                          </Button>
                         </div>
-                      )}
-                    </Td>
-                    <Td align="right" className="hidden xl:table-cell">
-                      <span className="text-sm text-ink-500">
-                        {p.state.last_latency_ms != null
-                          ? `${p.state.last_latency_ms.toFixed(1)} ms`
-                          : "—"}
-                      </span>
-                    </Td>
-                    <Td className="hidden 2xl:table-cell">
-                      <span className="text-xs text-ink-500">
-                        {p.state.last_check_at_unix_nano
-                          ? new Date(
-                              p.state.last_check_at_unix_nano / 1_000_000,
-                            ).toLocaleTimeString()
-                          : t("probes.never")}
-                      </span>
-                    </Td>
-                    <Td align="right">
-                      <div className="flex items-center justify-end gap-1">
-                        <Button
-                          size="icon"
-                          variant="ghost"
-                          aria-label={t("action.edit")}
-                          onClick={() =>
-                            setProbeDialog({ open: true, probe: p })
-                          }
-                        >
-                          <Pencil className="w-4 h-4" aria-hidden="true" />
-                        </Button>
-                        <Switch
-                          checked={p.enabled}
-                          onCheckedChange={() => toggleProbe.mutate(p)}
-                          disabled={toggleProbe.isPending}
-                          aria-label={p.name}
-                        />
-                        <Button
-                          size="icon"
-                          variant="ghost"
-                          aria-label={t("action.delete")}
-                          className="text-rose-600 dark:text-rose-400"
-                          onClick={() =>
-                            setPendingDelete({
-                              kind: "probe",
-                              id: p.id,
-                              name: p.name,
-                            })
-                          }
-                        >
-                          <Trash2 className="w-4 h-4" aria-hidden="true" />
-                        </Button>
-                      </div>
-                    </Td>
-                  </Tr>
-                );
-              })}
-            </TBody>
-          </Table>
-        </Card>
-      )}
+                      </Td>
+                    </Tr>
+                  );
+                })}
+              </TBody>
+            </Table>
+            <TablePager
+              page={current}
+              pageCount={pageCount}
+              pageSize={pageSize}
+              onPage={setPage}
+              onPageSize={setPageSize}
+              left={
+                <p className="text-xs text-ink-500">
+                  {t("probes.total", { n: filtered.length })}
+                </p>
+              }
+            />
+          </>
+        )}
+      </TableShell>
 
       {probeDialog.open && (
         <ProbeDialog
