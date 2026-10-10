@@ -64,7 +64,7 @@ export function NodeProbes({ nodeId, refreshMs }: { nodeId: string; refreshMs: n
           <div className="overflow-x-auto scrollbar-thin">
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b border-surface-3 dark:border-ink-700">
+                <tr className="border-b border-surface-3 dark:border-ink-500">
                   <th className="px-4 py-2 text-left text-xs font-semibold text-ink-500 uppercase tracking-wider">
                     {t("probes.colProbeName")}
                   </th>
@@ -79,7 +79,7 @@ export function NodeProbes({ nodeId, refreshMs }: { nodeId: string; refreshMs: n
                   </th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-surface-2 dark:divide-ink-700">
+              <tbody className="divide-y divide-surface-2 dark:divide-ink-500">
                 {probes.map((p) => (
                   <tr key={p.id}>
                     <td className="px-4 py-3">

@@ -215,7 +215,7 @@ export function LogFetchDialog({
           </Field>
 
           <Field label={t("logs.source")}>
-            <div className="flex items-center gap-1 rounded-lg border border-surface-3 dark:border-ink-700 p-1">
+            <div className="flex items-center gap-1 rounded-lg border border-surface-3 dark:border-ink-500 p-1">
               {(["container", "file"] as const).map((s) => (
                 <button
                   key={s}

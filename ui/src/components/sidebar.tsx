@@ -110,7 +110,7 @@ export function Sidebar({
     <aside
       className={cn(
         "hidden md:flex flex-col shrink-0 bg-surface-0 dark:bg-ink-700",
-        "border-r border-surface-3 dark:border-ink-700",
+        "border-r border-surface-3 dark:border-ink-500",
         "transition-[width] duration-200",
         collapsed ? "w-16" : "w-60",
       )}
@@ -118,7 +118,7 @@ export function Sidebar({
       {/* Logo area */}
       <div
         className={cn(
-          "h-16 shrink-0 flex items-center border-b border-surface-3 dark:border-ink-700",
+          "h-16 shrink-0 flex items-center border-b border-surface-3 dark:border-ink-500",
           collapsed ? "justify-center px-3" : "px-6",
         )}
       >
@@ -141,7 +141,7 @@ export function Sidebar({
       </nav>
 
       {/* Collapse button: pinned to bottom, doesn't scroll with the menu */}
-      <div className="shrink-0 mt-auto p-3 border-t border-surface-3 dark:border-ink-700">
+      <div className="shrink-0 mt-auto p-3 border-t border-surface-3 dark:border-ink-500">
         <button
           type="button"
           onClick={onToggle}

@@ -9,7 +9,7 @@ export function Card({
   return (
     <div
       className={cn(
-        "bg-surface-0 dark:bg-ink-700 rounded-xl border border-surface-3 dark:border-ink-700",
+        "bg-surface-0 dark:bg-ink-700 rounded-xl border border-surface-3 dark:border-ink-500",
         className,
       )}
       {...props}
@@ -33,7 +33,7 @@ export function CardHeader({
   return (
     <div
       className={cn(
-        "px-6 py-4 border-b border-surface-3 dark:border-ink-700 flex items-center justify-between gap-4",
+        "px-6 py-4 border-b border-surface-3 dark:border-ink-500 flex items-center justify-between gap-4",
         className,
       )}
       {...props}
@@ -69,7 +69,7 @@ export function CardFooter({
   return (
     <div
       className={cn(
-        "px-6 py-4 border-t border-surface-3 dark:border-ink-700 flex justify-end gap-2",
+        "px-6 py-4 border-t border-surface-3 dark:border-ink-500 flex justify-end gap-2",
         className,
       )}
       {...props}

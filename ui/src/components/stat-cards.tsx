@@ -60,7 +60,7 @@ export function StatCards({
           "group text-left bg-surface-0 dark:bg-ink-700 rounded-xl border p-4 transition-colors",
           c.active
             ? "border-brand-500 ring-1 ring-brand-500/30"
-            : "border-surface-3 dark:border-ink-700 hover:border-brand-500",
+            : "border-surface-3 dark:border-ink-500 hover:border-brand-500",
         );
         const body = (
           <>

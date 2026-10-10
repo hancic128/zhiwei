@@ -282,7 +282,7 @@ export function Nodes() {
     <StatCards cards={cards} />
 
     {!nodesQ.isLoading && nodes.length === 0 && (
-      <div className="rounded-xl border border-dashed border-surface-3 dark:border-ink-700 bg-surface-0 dark:bg-ink-700 p-2">
+      <div className="rounded-xl border border-dashed border-surface-3 dark:border-ink-500 bg-surface-0 dark:bg-ink-700 p-2">
         <EmptyState
           icon={<Server className="w-12 h-12" aria-hidden="true" />}
           title={t("overview.topNodesEmpty")}

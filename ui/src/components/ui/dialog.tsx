@@ -46,11 +46,11 @@ export function Dialog({
           <div
             className={cn(
               "max-h-[90vh] flex flex-col overflow-hidden",
-              "bg-surface-0 dark:bg-ink-700 rounded-xl shadow-lg border border-surface-3 dark:border-ink-700",
+              "bg-surface-0 dark:bg-ink-700 rounded-xl shadow-lg border border-surface-3 dark:border-ink-500",
               "animate-panel-slide",
             )}
           >
-            <div className="px-6 py-4 border-b border-surface-3 dark:border-ink-700 flex items-start justify-between gap-4">
+            <div className="px-6 py-4 border-b border-surface-3 dark:border-ink-500 flex items-start justify-between gap-4">
               <div className="min-w-0">
                 <DialogPrimitive.Title className="text-base font-semibold text-ink-900 dark:text-surface-0">
                   {title}
@@ -79,7 +79,7 @@ export function Dialog({
             </div>
 
             {footer && (
-              <div className="px-6 py-4 border-t border-surface-3 dark:border-ink-700 flex justify-end gap-2">
+              <div className="px-6 py-4 border-t border-surface-3 dark:border-ink-500 flex justify-end gap-2">
                 {footer}
               </div>
             )}

@@ -154,7 +154,7 @@ export function NodeMetaDialog({
           <span className="block text-xs text-ink-500 mb-1">
             {t("nodeMeta.tagsLabel")}
           </span>
-          <div className="flex flex-wrap items-center gap-1.5 rounded-md border border-surface-3 dark:border-ink-700 bg-surface-0 dark:bg-ink-700 px-2 py-1.5">
+          <div className="flex flex-wrap items-center gap-1.5 rounded-md border border-surface-3 dark:border-ink-500 bg-surface-0 dark:bg-ink-700 px-2 py-1.5">
             {tags.map((tag) => (
               <span
                 key={tag}

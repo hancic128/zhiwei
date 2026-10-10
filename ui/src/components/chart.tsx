@@ -158,6 +158,12 @@ export function LineChart({
     // grid top margin 44px baseline — when exceeded, ECharts's pagination arrows won't touch the curves.
     const hasLegend = series.length > 1;
 
+    // grid top must clear the legend AND have room above the legend so the axisPointer
+    // tooltip doesn't sit on top of the legend row. With many series the legend grows
+    // tall (pagination arrows + items wrap), and `grid.top: 44` would clip the tooltip
+    // under the legend.
+    const gridTop = hasLegend ? 56 : 16;
+
     chart.setOption(
       {
         animationDuration: 200,
@@ -166,12 +172,17 @@ export function LineChart({
         grid: {
           left: 8,
           right: 16,
-          top: hasLegend ? 44 : 16,
+          top: gridTop,
           bottom: 8,
           containLabel: true,
         },
         tooltip: {
           trigger: "axis",
+          // confine: tooltip stays inside the chart container, so a tall
+          // tooltip (many series) doesn't escape into the sticky page header
+          // above. Without this, ECharts's default behavior is to let the
+          // tooltip overflow upward and overlap the header at the top of the viewport.
+          confine: true,
           backgroundColor: "#18181b",
           borderWidth: 0,
           padding: [6, 10],

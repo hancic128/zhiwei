@@ -9,7 +9,7 @@ export function TableShell({
   return (
     <div
       className={cn(
-        "bg-surface-0 dark:bg-ink-700 rounded-xl border border-surface-3 dark:border-ink-700 overflow-hidden",
+        "bg-surface-0 dark:bg-ink-700 rounded-xl border border-surface-3 dark:border-ink-500 overflow-hidden",
         className,
       )}
       {...props}
@@ -25,7 +25,7 @@ export function TableToolbar({
   return (
     <div
       className={cn(
-        "px-6 py-4 border-b border-surface-3 dark:border-ink-700 flex items-center justify-between gap-4 flex-wrap",
+        "px-6 py-4 border-b border-surface-3 dark:border-ink-500 flex items-center justify-between gap-4 flex-wrap",
         className,
       )}
       {...props}
@@ -48,7 +48,7 @@ export function THead({
   return (
     <thead
       className={cn(
-        "border-b border-surface-3 dark:border-ink-700 bg-surface-1 dark:bg-ink-700/40",
+        "border-b border-surface-3 dark:border-ink-500 bg-surface-1 dark:bg-ink-700/40",
         className,
       )}
       {...props}
@@ -84,7 +84,7 @@ export function TBody({
 }: React.HTMLAttributes<HTMLTableSectionElement>) {
   return (
     <tbody
-      className={cn("divide-y divide-surface-2 dark:divide-ink-700", className)}
+      className={cn("divide-y divide-surface-2 dark:divide-ink-500", className)}
       {...props}
     />
   );
@@ -134,7 +134,7 @@ export function TableFooter({
   return (
     <div
       className={cn(
-        "px-6 py-4 border-t border-surface-3 dark:border-ink-700 flex items-center justify-between",
+        "px-6 py-4 border-t border-surface-3 dark:border-ink-500 flex items-center justify-between",
         className,
       )}
       {...props}

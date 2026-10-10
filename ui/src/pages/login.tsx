@@ -46,7 +46,7 @@ export function LoginPage({ onSubmit }: { onSubmit: () => void }) {
         {/* Same logo as the tab icon / sidebar: no backdrop, no border, color follows the theme */}
         <LogoMark className="w-12 h-12 mx-auto mb-8 text-brand-600 dark:text-brand-500" />
 
-        <div className="bg-surface-0 dark:bg-ink-700 rounded-xl shadow-lg border border-surface-3 dark:border-ink-700 p-8">
+        <div className="bg-surface-0 dark:bg-ink-700 rounded-xl shadow-lg border border-surface-3 dark:border-ink-500 p-8">
           <h1 className="text-base font-semibold text-ink-900 dark:text-surface-0 text-center">
             {t("login.title")}
           </h1>

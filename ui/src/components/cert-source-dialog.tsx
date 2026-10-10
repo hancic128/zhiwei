@@ -89,7 +89,7 @@ export function CertScanPanel({
   }
 
   return (
-    <div className="rounded-lg border border-surface-3 dark:border-ink-700 divide-y divide-surface-2 dark:divide-ink-700">
+    <div className="rounded-lg border border-surface-3 dark:border-ink-500 divide-y divide-surface-2 dark:divide-ink-500">
       {result.certs.map((c) => (
         <div key={c.path} className="px-4 py-3 flex items-center justify-between gap-3">
           <div className="min-w-0">

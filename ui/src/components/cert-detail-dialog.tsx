@@ -127,7 +127,7 @@ export function CertDetailDialog({
           )}
         </div>
 
-        <dl className="divide-y divide-surface-2 dark:divide-ink-700 border-y border-surface-2 dark:border-ink-700">
+        <dl className="divide-y divide-surface-2 dark:divide-ink-500 border-y border-surface-2 dark:border-ink-500">
           {rows.filter((r): r is NonNullable<typeof r> => r !== null).map((row) => (
             <div key={row.label} className="flex items-start justify-between gap-4 py-3">
               <dt className="text-xs text-ink-500 shrink-0 pt-0.5">{row.label}</dt>
