@@ -43,7 +43,7 @@ jobs:
           - target: x86_64-apple-darwin
             os: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Use stable rather than the repo's rust-version: this job only produces binaries.
       # Low-version compatibility is guaranteed by Cargo.toml's 1.75 declaration, so we
