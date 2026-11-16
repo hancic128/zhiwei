@@ -69,6 +69,12 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=min
           platforms: linux/amd64  # VPS runs on x86_64
+          # buildx 默认会往镜像索引里塞一个 attestation manifest（provenance 存证），
+          # 其 mediaType 是 application/vnd.oci.empty.v1+json。阿里云 ACR 不认这个
+          # media type，docker push 会在推 index 时报
+          # "unknown manifest class for application/vnd.oci.empty.v1+json"，
+          # 导致镜像同步到 ACR 失败、部署被跳过。
+          provenance: false
 
   trigger-deploy:
     needs: docker
